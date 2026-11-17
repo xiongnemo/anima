@@ -18,7 +18,7 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Install C11 & OpenSSL toolchain (Note: NO external Z3 — 100% self-built AnimaSMT)
+      - name: "Install C11 & OpenSSL toolchain (zero external Z3)"
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev
