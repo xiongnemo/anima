@@ -1,0 +1,111 @@
+# escrow_service.anm — Unified Anima Showcase
+# Combines:
+#   1. UML Entities + Relations + SPARK Hoare WP conservation proofs
+#   2. Linear Port Typestate protocol (AuditLog)
+#   3. SWEN90004 FSP/LTS Monitor + Safety Property + Progress + FLTL
+#   4. SWEN90004 Petri Workflow Net (Sound + 1-Safe + Short-Circuit L4-Live)
+#   5. Runnable main() executing identical verified logic on VM & Native ELF
+
+type Money    = int[0..1_000_000]
+type TxAmount = int[1..10_000]
+
+entity Account:
+    balance: Money
+    escrow:  Money
+    invariant: balance + escrow <= 1_000_000
+
+entity LedgerOrder:
+    amount: TxAmount
+    rel buyer -> 1 Account
+
+port AuditLog:
+    protocol:
+        state Closed:
+            on open_log -> Open
+        state Open:
+            on write_entry -> Open
+            on close_log -> Closed
+    extern def open_log()
+    extern def write_entry(amt: TxAmount, ok: bool)
+    extern def close_log()
+
+def lock_funds(mut acc: Account, amt: TxAmount) -> bool:
+    requires: acc.balance + acc.escrow <= 990_000
+    ensures:  acc.balance + acc.escrow == old(acc.balance) + old(acc.escrow)
+    if acc.balance >= amt:
+        acc.balance = acc.balance - amt
+        acc.escrow = acc.escrow + amt
+        return True
+    return False
+
+monitor VaultMutex:
+    writers: control int[0..1] = 0
+
+    state Unlocked:
+        invariant: writers == 0
+        on acquire -> Locked:
+            writers = 1
+
+    state Locked:
+        invariant: writers == 1
+        on release -> Unlocked:
+            writers = 0
+
+property MutualExclusion:
+    state Safe:
+        on acquire -> InCritical
+    state InCritical:
+        on release -> Safe
+
+progress MustReleaseLock = {release}
+
+workflow HandleOrder(mut acc: Account, amt: TxAmount) -> bool:
+    verify: sound, 1_safe
+    pool verifier_slot: int[0..2] = 2
+
+    start -> check_and_lock:
+        ok = False
+        if acc.balance + acc.escrow <= 990_000:
+            ok = lock_funds(mut acc, amt)
+
+    choice after check_and_lock:
+        when ok -> parallel_settle
+        when not ok -> reject_tx
+
+    fork parallel_settle:
+        branch commit_vault:
+            sync VaultMutex.acquire
+            sync VaultMutex.release
+        branch risk_audit:
+            acquire verifier_slot
+            call AuditLog.open_log()
+            call AuditLog.write_entry(amt, True)
+            call AuditLog.close_log()
+            release verifier_slot
+    join settle_done
+
+    step finalize_ok after settle_done -> done:
+        return True
+    step reject_tx -> done:
+        return False
+
+system EscrowCluster:
+    compose:
+        worker_a: HandleOrder
+        worker_b: HandleOrder
+        mutex:    VaultMutex
+    check:
+        deadlock_free
+        satisfies MutualExclusion
+        satisfies MustReleaseLock
+        ltl: always (worker_a.acquire -> eventually worker_a.release)
+
+def main() -> int:
+    acc = Account(balance=1000, escrow=0)
+    ord1 = LedgerOrder(amount=250, buyer=acc)
+    ok1 = run_workflow HandleOrder(mut acc, ord1.amount)
+    ok2 = run_workflow HandleOrder(mut acc, 5000)
+    print(f"escrow ok1={ok1} ok2={ok2} balance={acc.balance} escrow={acc.escrow}")
+    if ok1 and not ok2 and acc.balance == 750 and acc.escrow == 250:
+        return 0
+    return 1

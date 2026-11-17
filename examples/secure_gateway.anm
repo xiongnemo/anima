@@ -1,0 +1,84 @@
+# secure_gateway.anm — General-Purpose Verified Network Service & Functional Pipeline
+
+import std.socket as sock
+import std.concurrent as conc
+import std.json as json
+import std.bytes as bytes
+import std.crypto as crypto
+
+type PortNum = int[0..65535]
+type Score   = int[0..100]
+type FetchState = Fresh(score: Score) | Cached(score: Score) | Degraded
+
+entity UpstreamQuote:
+    provider: str
+    score: Score
+    weight: int[1..10]
+    invariant: score * weight <= 1000
+
+def aggregate_quotes(quotes: list[UpstreamQuote, cap=8]) -> FetchState:
+    valid = quotes |> filter(q => q.score >= 10)
+    match len(valid):
+        0 -> return Degraded
+        n if n >= 1 ->
+            total = valid |> map(q => q.score) |> fold(0, (a, b) => a + b)
+            return Fresh(score=total / n)
+
+def run_tcp_client(port: PortNum) -> Result[str, str]:
+    conn = sock.connect_tcp("127.0.0.1", port)?
+    _ = conn.send_text("PING")?
+    reply = conn.recv_text(128)?
+    conn.close()
+    return Ok(reply)
+
+def handle_echo_server(ln: sock.TcpListener) -> Result[str, str]:
+    conn = ln.accept(timeout_ms=3000)?
+    msg = conn.recv_text(128)?
+    _ = conn.send_text("ACK:" + msg)?
+    conn.close()
+    return Ok(msg)
+
+def main() -> int:
+    # 1. Functional pipeline + SMT-verified division + exhaustive ADT match
+    raw_inputs = [
+        "{\"provider\":\"alpha\",\"score\":80,\"weight\":10}",
+        "{\"provider\":\"rogue\",\"score\":90,\"weight\":20}",
+        "{\"provider\":\"beta\",\"score\":100,\"weight\":10}"
+    ]
+    decoded = raw_inputs
+        |> map(raw => json.decode[UpstreamQuote](raw))
+        |> filter_ok()
+    state = aggregate_quotes(decoded)
+    badge = match state:
+        Fresh(s) -> f"fresh:{s}"
+        Cached(s) -> f"cached:{s}"
+        Degraded -> "degraded"
+
+    # 2. Safe ByteView + OpenSSL constant-time HMAC
+    hdr = bytes.from_hex("cafe005a")
+    magic = hdr.read_u16_be(0)
+    mac1 = crypto.hmac_sha256("gateway-secret", badge)
+    mac2 = crypto.hmac_sha256("gateway-secret", badge)
+    if not crypto.constant_time_eq(mac1, mac2):
+        return 2
+
+    # 3. Typestate-verified loopback TCP socket + ThreadPool client
+    ln_res = sock.listen_tcp("127.0.0.1", 0)
+    match ln_res:
+        Ok(ln) ->
+            p = ln.port()
+            pool = conc.ThreadPool(2, 4)
+            fut = pool.submit(() => run_tcp_client(p))
+            srv_res = handle_echo_server(ln)
+            ln.close()
+            cli_res = fut.await()
+            pool.shutdown()
+            match cli_res:
+                Ok(ack) ->
+                    print(f"gateway badge={badge} magic={magic} tcp={ack}")
+                    if badge == "fresh:90" and magic == 51966 and ack == "ACK:PING":
+                        return 0
+                Err(e) -> print(f"client err={e}")
+            _ = srv_res
+        Err(e) -> print(f"listen err={e}")
+    return 1

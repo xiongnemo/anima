@@ -1,0 +1,24 @@
+machine Fork:
+    state Free:
+        on get -> Taken
+    state Taken:
+        on put -> Free
+
+machine Philosopher:
+    state Thinking:
+        on left.get -> HoldLeft
+    state HoldLeft:
+        on right.get -> Eating
+    state Eating:
+        on left.put -> PutRight
+    state PutRight:
+        on right.put -> Thinking
+
+system DeadlockDiners:
+    compose:
+        f0: Fork
+        f1: Fork
+        p0: Philosopher(left=f0, right=f1)
+        p1: Philosopher(left=f1, right=f0)
+    check:
+        deadlock_free

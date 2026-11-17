@@ -1,0 +1,11 @@
+workflow BadPoolLeak:
+    verify: sound, 1_safe
+    pool arm: int[0..2] = 2
+    start -> work
+    fork work:
+        branch a:
+            acquire arm
+            step grab
+        branch b:
+            step noop
+    join j -> done

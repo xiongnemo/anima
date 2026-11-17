@@ -1,0 +1,55 @@
+name: Anima CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install C11 & OpenSSL toolchain (Note: NO external Z3 — 100% self-built AnimaSMT)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Build single static anima binary
+        run: CGO_ENABLED=0 go build -o ./anima ./cmd/anima
+
+      - name: Run full test suite with race detector
+        run: go test -v -race ./...
+
+      - name: CLI smoke & Native ELF parity across all examples
+        run: |
+          ./anima stdlib
+          for f in examples/*.anm; do
+            echo "=== CI verifying $f ==="
+            ./anima check --explain "$f"
+            ./anima uml --format mermaid "$f" >/dev/null
+            ./anima disasm "$f" >/dev/null
+            vm_out=$(./anima run "$f")
+            nat_bin="/tmp/ci_$(basename "$f" .anm)"
+            ./anima build -o "$nat_bin" "$f"
+            nat_out=$("$nat_bin")
+            test "$vm_out" = "$nat_out"
+            echo "VM & Native ELF parity verified: $vm_out"
+          done
+          ./anima export --fsp /tmp/ci.fsp --pnml /tmp/ci.pnml examples/escrow_service.anm
+          if ./anima check --save-cex /tmp/cex.json tests/bugs/dining_philosophers_deadlock.anm; then
+            echo "Expected deadlock check failure!"
+            exit 1
+          fi
+          ./anima run --replay /tmp/cex.json tests/bugs/dining_philosophers_deadlock.anm

@@ -1,0 +1,10 @@
+workflow BadChoice(x: int[0..100]):
+    start -> eval
+    step eval
+    choice after eval:
+        when x >= 10 -> b1
+        when x <= 20 -> b2
+        else -> b3
+    step b1 -> done
+    step b2 -> done
+    step b3 -> done

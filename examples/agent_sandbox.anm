@@ -1,0 +1,97 @@
+# agent_sandbox.anm — LLM Agent Security Reference Monitor & Tool Sandbox
+# Proves:
+#   1. SPARK: Token & API budget conservation (no negative balance or budget runaway)
+#   2. FSP/LTS: Unapproved shell execution is statically unreachable (ERROR=-1)
+#   3. Petri WF-Net: Multi-tool sub-agent execution is 1-safe, bounded, and Sound
+
+type TokenBudget = int[0..100_000]
+type Cost        = int[1..5_000]
+
+entity AgentSession:
+    budget_left: TokenBudget
+    budget_spent: TokenBudget
+    invariant: budget_left + budget_spent <= 100_000
+
+def charge_tool_call(mut sess: AgentSession, cost: Cost) -> bool:
+    requires: sess.budget_left + sess.budget_spent <= 100_000
+    ensures:  sess.budget_left + sess.budget_spent == old(sess.budget_left) + old(sess.budget_spent)
+    if sess.budget_left >= cost:
+        sess.budget_left -= cost
+        sess.budget_spent += cost
+        return True
+    return False
+
+monitor ToolGate:
+    approved: control int[0..1] = 0
+
+    state Unapproved:
+        invariant: approved == 0
+        on policy_allow -> Approved:
+            approved = 1
+        on deny_shell -> Unapproved
+
+    state Approved:
+        invariant: approved == 1
+        on exec_shell -> Executed:
+            approved = 0
+        on revoke -> Unapproved:
+            approved = 0
+
+    state Executed:
+        invariant: approved == 0
+        on log_audit -> Unapproved
+
+property NoUnapprovedShell:
+    state Safe:
+        on policy_allow -> Authorized
+        on deny_shell -> Safe
+        on log_audit -> Safe
+    state Authorized:
+        on exec_shell -> Safe
+        on revoke -> Safe
+
+progress SandboxReturnsToSafe = {log_audit, deny_shell}
+
+workflow AgentPlan(mut sess: AgentSession, step_cost: Cost) -> bool:
+    verify: sound, 1_safe
+    pool sandbox_slot: int[0..2] = 2
+
+    start -> budget_check:
+        ok = charge_tool_call(mut sess, step_cost)
+
+    choice after budget_check:
+        when ok -> run_tools
+        when not ok -> abort_plan
+
+    fork run_tools:
+        branch read_ctx:
+            acquire sandbox_slot
+            step fetch_context
+            release sandbox_slot
+        branch gated_exec:
+            sync ToolGate.policy_allow
+            sync ToolGate.exec_shell
+            sync ToolGate.log_audit
+    join tools_done
+
+    step finish after tools_done -> done:
+        return True
+    step abort_plan -> done:
+        return False
+
+system AgentSecurityCell:
+    compose:
+        agent: AgentPlan
+        gate: ToolGate
+    check:
+        deadlock_free
+        satisfies NoUnapprovedShell
+        ltl: always (exec_shell -> eventually log_audit)
+
+def main() -> int:
+    sess = AgentSession(budget_left=10_000, budget_spent=0)
+    ran = run_workflow AgentPlan(mut sess, 1500)
+    print(f"agent ran={ran} left={sess.budget_left} spent={sess.budget_spent}")
+    if ran and sess.budget_left == 8500 and sess.budget_spent == 1500:
+        return 0
+    return 1

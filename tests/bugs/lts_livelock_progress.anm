@@ -1,0 +1,14 @@
+machine Worker:
+    state Ready:
+        on spin -> Ready
+        on serve -> Ready
+
+progress MustServe = {serve}
+
+system StarveSys:
+    compose:
+        w: Worker
+    priority_low: [serve]
+    check:
+        satisfies MustServe
+        ltl: always (spin -> eventually serve)

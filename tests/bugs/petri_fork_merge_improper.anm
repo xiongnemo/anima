@@ -1,0 +1,10 @@
+workflow BadForkMerge:
+    verify: sound, 1_safe
+    start -> split
+    fork split:
+        branch a:
+            step do_a
+        branch b:
+            step do_b
+    merge bad_merge
+    step finish after bad_merge -> done

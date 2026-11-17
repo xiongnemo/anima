@@ -1,0 +1,63 @@
+# single_lane_bridge.anm — Classic Unimelb SWEN90004 Concurrency Model
+
+machine RedCar:
+    state OffBridge:
+        on red_enter -> OnBridge
+    state OnBridge:
+        on red_exit -> OffBridge
+
+machine BlueCar:
+    state OffBridge:
+        on blue_enter -> OnBridge
+    state OnBridge:
+        on blue_exit -> OffBridge
+
+monitor BridgeController:
+    n_red: control int[0..1] = 0
+    n_blue: control int[0..1] = 0
+
+    state Empty:
+        invariant: n_red == 0 and n_blue == 0
+        on red_enter when n_blue == 0 -> RedCrossing:
+            n_red = 1
+        on blue_enter when n_red == 0 -> BlueCrossing:
+            n_blue = 1
+
+    state RedCrossing:
+        invariant: n_red == 1 and n_blue == 0
+        on red_exit -> Empty:
+            n_red = 0
+
+    state BlueCrossing:
+        invariant: n_blue == 1 and n_red == 0
+        on blue_exit -> Empty:
+            n_blue = 0
+
+property OneWaySafety:
+    state Empty:
+        on red_enter -> RedBusy
+        on blue_enter -> BlueBusy
+    state RedBusy:
+        on red_exit -> Empty
+    state BlueBusy:
+        on blue_exit -> Empty
+
+progress RedProgress = {red_enter}
+progress BlueProgress = {blue_enter}
+
+system SingleLaneBridge:
+    compose:
+        red: RedCar
+        blue: BlueCar
+        ctrl: BridgeController
+    check:
+        deadlock_free
+        satisfies OneWaySafety
+        satisfies RedProgress
+        satisfies BlueProgress
+        ltl: always (red_enter -> eventually red_exit)
+        ltl: always (blue_enter -> eventually blue_exit)
+
+def main() -> int:
+    print("SingleLaneBridge verified: OneWaySafety + DeadlockFree + Red/Blue Fair Progress + LTL")
+    return 0

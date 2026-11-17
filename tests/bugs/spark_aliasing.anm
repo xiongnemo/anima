@@ -1,0 +1,11 @@
+entity Account:
+    balance: int[0..1000]
+
+def transfer(mut src: Account, mut dst: Account, amt: int[1..100]) -> int:
+    src.balance -= amt
+    dst.balance += amt
+    return 0
+
+def main() -> int:
+    acc = Account(balance=500)
+    return transfer(mut acc, mut acc, 10)

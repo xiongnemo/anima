@@ -1,0 +1,7 @@
+import std.socket as sock
+
+def bad_uaf() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 8080)?
+    conn.close()
+    _ = conn.send_text("hello")?
+    return Ok(0)

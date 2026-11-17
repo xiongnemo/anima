@@ -1,0 +1,35 @@
+machine RedCar:
+    state Off:
+        on red_enter -> On
+    state On:
+        on red_exit -> Off
+
+machine BlueCar:
+    state Off:
+        on blue_enter -> On
+    state On:
+        on blue_exit -> Off
+
+monitor BrokenBridge:
+    state Any:
+        on red_enter -> Any
+        on blue_enter -> Any
+        on red_exit -> Any
+        on blue_exit -> Any
+
+property OneWaySafety:
+    state Empty:
+        on red_enter -> RedBusy
+        on blue_enter -> BlueBusy
+    state RedBusy:
+        on red_exit -> Empty
+    state BlueBusy:
+        on blue_exit -> Empty
+
+system BrokenSys:
+    compose:
+        red: RedCar
+        blue: BlueCar
+        ctrl: BrokenBridge
+    check:
+        satisfies OneWaySafety

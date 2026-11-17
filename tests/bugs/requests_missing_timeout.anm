@@ -1,0 +1,4 @@
+import std.requests as req
+
+def fetch() -> Result[req.HttpResponse, str]:
+    return req.get("https://example.com")

@@ -1,0 +1,7 @@
+type Money = int[0..1000]
+entity Account:
+    balance: Money
+
+def unsafe_withdraw(mut acc: Account, amt: int[1..100]) -> int:
+    acc.balance = acc.balance - amt
+    return 0

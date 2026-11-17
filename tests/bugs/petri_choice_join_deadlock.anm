@@ -1,0 +1,10 @@
+workflow BadChoiceJoin(flag: bool):
+    verify: sound, 1_safe
+    start -> eval
+    step eval
+    choice after eval:
+        when flag -> left_step
+        when not flag -> right_step
+    step left_step -> bad_join
+    step right_step -> bad_join
+    join bad_join -> done
