@@ -48,7 +48,7 @@ func main() {
 	case "stdlib":
 		code = cmdStdlib()
 	case "version", "--version", "-v":
-		fmt.Printf("anima v%s (AnimaSMT + SWEN90004 FSP/LTSA + Petri/WF-Net + BytecodeVM + Native C11)\n", version)
+		fmt.Printf("anima v%s (AnimaSMT + FSP/LTSA + Petri/WF-Net + BytecodeVM + Native C11)\n", version)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -168,7 +168,7 @@ func cmdCheck(args []string) int {
 		fmt.Fprintf(os.Stderr, "      ERROR: %s\n", e)
 	}
 
-	fmt.Printf("[2/3] SWEN90004 FSP/LTSA & Typestate: %d system(s), %d typestate error(s)\n",
+	fmt.Printf("[2/3] FSP/LTSA & Typestate: %d system(s), %d typestate error(s)\n",
 		len(res.ltsRep.Systems), len(res.ltsRep.TypestateErrors))
 	for _, sr := range res.ltsRep.Systems {
 		status := "PASS"
@@ -189,7 +189,7 @@ func cmdCheck(args []string) int {
 		fmt.Fprintf(os.Stderr, "      LTS BUILD ERROR: %s\n", be)
 	}
 
-	fmt.Printf("[3/3] SWEN90004 Petri / WF-Net Soundness: %d workflow(s)\n", len(res.petriRep.Workflows))
+	fmt.Printf("[3/3] Petri / WF-Net Soundness: %d workflow(s)\n", len(res.petriRep.Workflows))
 	for _, wr := range res.petriRep.Workflows {
 		fmt.Printf("      - Workflow %-16s places=%d trans=%d markings=%d bounded=%v 1_safe=%v sound=%v short_circuit_L4=%v\n",
 			wr.Name, wr.Places, wr.Transitions, wr.ReachableMarkings, wr.Bounded, wr.OneSafe, wr.Sound, wr.ShortCircuitL4)
@@ -431,7 +431,7 @@ func cmdExport(args []string) int {
 		fmt.Printf("Exported PNML: %s\n", *pnmlPath)
 	}
 	if *fspPath == "" && *pnmlPath == "" {
-		fmt.Println("=== SWEN90004 FSP ===")
+		fmt.Println("=== FSP ===")
 		fmt.Println(fspText)
 		fmt.Println("=== ISO PNML ===")
 		fmt.Println(pnmlText)

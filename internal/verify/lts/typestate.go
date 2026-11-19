@@ -57,7 +57,7 @@ func (r *Report) Errors() []string {
 	return out
 }
 
-// Verify runs SWEN90004 FSP/LTS composition, Safety, Deadlock, Tarjan SCC Progress,
+// Verify runs FSP/LTS composition, Safety, Deadlock, Tarjan SCC Progress,
 // FLTL checks across all SystemDecls, AND Linear Resource Typestate verification across functions/workflows.
 func Verify(info *sema.ProgramInfo) *Report {
 	rep := &Report{}
