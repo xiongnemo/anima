@@ -271,6 +271,18 @@ func valuesEqual(v, o Value, open []eqPair) bool {
 	}
 }
 
+// reboundFrom says whether a branch of a fork may have given a variable that
+// held pre another value. A list, a map or an entity counts as another one
+// even with the same contents: later writes must reach the one the branch
+// left there, as they do in the native backend.
+func (v Value) reboundFrom(pre Value) bool {
+	switch v.Kind {
+	case ValList, ValMap, ValEntity:
+		return true
+	}
+	return !v.Equals(pre)
+}
+
 // order is `<` and its kin: negative, zero or positive as v comes before, with
 // or after o. Two strings are ordered byte by byte, anything else as integers.
 func (v Value) order(o Value) int {
@@ -1051,7 +1063,7 @@ func (vm *VM) RunWorkflow(wfName string, args []Value) (Value, error) {
 					return VVoid(), r.err
 				}
 				for i := range locals {
-					if i < len(r.updated) && r.updated[i].Kind != ValVoid && !r.updated[i].Equals(preFork[i]) {
+					if i < len(r.updated) && r.updated[i].Kind != ValVoid && r.updated[i].reboundFrom(preFork[i]) {
 						locals[i] = r.updated[i]
 					}
 				}
