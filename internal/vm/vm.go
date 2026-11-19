@@ -271,6 +271,41 @@ func valuesEqual(v, o Value, open []eqPair) bool {
 	}
 }
 
+// order is `<` and its kin: negative, zero or positive as v comes before, with
+// or after o. Two strings are ordered byte by byte, anything else as integers.
+func (v Value) order(o Value) int {
+	if v.Kind == ValStr && o.Kind == ValStr {
+		return strings.Compare(v.Str, o.Str)
+	}
+	switch {
+	case v.Int < o.Int:
+		return -1
+	case v.Int > o.Int:
+		return 1
+	}
+	return 0
+}
+
+// in is `v in o`: an element of a list, a key of a map, a part of a string.
+func (v Value) in(o Value) bool {
+	switch o.Kind {
+	case ValList:
+		if o.List != nil {
+			for _, el := range *o.List {
+				if v.Equals(el) {
+					return true
+				}
+			}
+		}
+	case ValMap:
+		_, ok := o.Map[v.String()]
+		return ok
+	case ValStr:
+		return v.Kind == ValStr && strings.Contains(o.Str, v.Str)
+	}
+	return false
+}
+
 func sortedKeys(m map[string]Value) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -635,16 +670,19 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 			push(VBool(!l.Equals(r)))
 		case OpLt:
 			r, l := pop(), pop()
-			push(VBool(l.Int < r.Int))
+			push(VBool(l.order(r) < 0))
 		case OpLe:
 			r, l := pop(), pop()
-			push(VBool(l.Int <= r.Int))
+			push(VBool(l.order(r) <= 0))
 		case OpGt:
 			r, l := pop(), pop()
-			push(VBool(l.Int > r.Int))
+			push(VBool(l.order(r) > 0))
 		case OpGe:
 			r, l := pop(), pop()
-			push(VBool(l.Int >= r.Int))
+			push(VBool(l.order(r) >= 0))
+		case OpIn:
+			r, l := pop(), pop()
+			push(VBool(l.in(r)))
 		case OpJmp:
 			pc = int(imm)
 		case OpJmpIfFalse:

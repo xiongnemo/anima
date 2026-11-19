@@ -64,6 +64,9 @@ const (
 	OpJoinWait
 	OpRunWorkflow
 	OpHalt
+	// OpIn is `x in xs`: an element of a list, a key of a map, a part of a
+	// string. It is last so that the opcodes before it keep their numbers.
+	OpIn
 )
 
 var opNames = map[OpCode]string{
@@ -118,6 +121,7 @@ var opNames = map[OpCode]string{
 	OpJoinWait:       "JOIN_WAIT",
 	OpRunWorkflow:    "RUN_WORKFLOW",
 	OpHalt:           "HALT",
+	OpIn:             "IN",
 }
 
 func (op OpCode) String() string {

@@ -929,6 +929,7 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 				return err
 			}
 			f.patchJump(jf)
+			f.emitTruth(e.Span.Line)
 			return nil
 		}
 		if e.Op == "or" {
@@ -941,6 +942,7 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 				return err
 			}
 			f.patchJump(jt)
+			f.emitTruth(e.Span.Line)
 			return nil
 		}
 		if e.Op == "implies" {
@@ -954,6 +956,7 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 				return err
 			}
 			f.patchJump(jt)
+			f.emitTruth(e.Span.Line)
 			return nil
 		}
 		if err := f.compileExpr(e.Left); err != nil {
@@ -985,6 +988,8 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 			f.emit(EncodeImm(OpGt, 0), e.Span.Line)
 		case ">=":
 			f.emit(EncodeImm(OpGe, 0), e.Span.Line)
+		case "in":
+			f.emit(EncodeImm(OpIn, 0), e.Span.Line)
 		}
 	case *ast.ListLit:
 		for _, el := range e.Elems {
@@ -1258,4 +1263,12 @@ func (f *fnCompiler) emitNamedCall(name string, args []ast.CallArg, typeArgs []a
 	})
 	f.emit(EncodeABC(OpCall, uint8(len(args)), cmIdx), line)
 	return nil
+}
+
+// emitTruth turns the value on the stack into True or False. `and`, `or` and
+// `implies` leave one of their operands there, and the native backend gives
+// a boolean.
+func (f *fnCompiler) emitTruth(line int) {
+	f.emit(EncodeImm(OpNot, 0), line)
+	f.emit(EncodeImm(OpNot, 0), line)
 }

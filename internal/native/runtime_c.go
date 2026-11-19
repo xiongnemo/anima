@@ -369,6 +369,34 @@ static bool v_eq_in(AnimaVal a, AnimaVal b, const EqOpen *up) {
 
 static bool v_eq(AnimaVal a, AnimaVal b) { return v_eq_in(a, b, NULL); }
 
+// The order of two values, as Value.order in the VM: strings byte by byte,
+// anything else as integers.
+static int v_order(AnimaVal a, AnimaVal b) {
+    if (a.kind == VAL_STR && b.kind == VAL_STR) return strcmp(a.u.s ? a.u.s : "", b.u.s ? b.u.s : "");
+    return a.u.i < b.u.i ? -1 : (a.u.i > b.u.i ? 1 : 0);
+}
+
+static char *v_to_cstr(AnimaVal v);
+
+// a in b: an element of a list, a key of a map, a part of a string.
+static bool v_in(AnimaVal a, AnimaVal b) {
+    if (b.kind == VAL_LIST && b.u.list) {
+        for (size_t i = 0; i < b.u.list->len; i++) {
+            if (v_eq(a, b.u.list->items[i])) return true;
+        }
+        return false;
+    }
+    if (b.kind == VAL_MAP && b.u.map) {
+        char *k = v_to_cstr(a);
+        bool found = false;
+        for (size_t i = 0; i < b.u.map->len && !found; i++) found = strcmp(b.u.map->entries[i].key, k) == 0;
+        free(k);
+        return found;
+    }
+    if (b.kind == VAL_STR && a.kind == VAL_STR) return strstr(b.u.s ? b.u.s : "", a.u.s ? a.u.s : "") != NULL;
+    return false;
+}
+
 // A value as text, the same as Value.String in the VM: map entries and
 // entity fields in the order of their keys.
 typedef struct { char *p; size_t len; size_t cap; } AnimaBuf;
