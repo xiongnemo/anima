@@ -271,14 +271,22 @@ func valuesEqual(v, o Value, open []eqPair) bool {
 	}
 }
 
-// reboundFrom says whether a branch of a fork may have given a variable that
-// held pre another value. A list, a map or an entity counts as another one
-// even with the same contents: later writes must reach the one the branch
-// left there, as they do in the native backend.
+// reboundFrom says whether a branch of a fork gave a variable that held pre
+// another value. A list, a map or an entity is another one unless it is the
+// very same object, whatever it holds: later writes must reach the one the
+// branch left there, and a branch that did not touch the variable must not
+// bring the old one back.
 func (v Value) reboundFrom(pre Value) bool {
-	switch v.Kind {
-	case ValList, ValMap, ValEntity:
+	if v.Kind != pre.Kind {
 		return true
+	}
+	switch v.Kind {
+	case ValList:
+		return v.List != pre.List
+	case ValMap:
+		return reflect.ValueOf(v.Map).Pointer() != reflect.ValueOf(pre.Map).Pointer()
+	case ValEntity:
+		return v.Entity != pre.Entity
 	}
 	return !v.Equals(pre)
 }

@@ -285,3 +285,32 @@ func TestValueEqualsByContent(t *testing.T) {
 		}
 	}
 }
+
+// At the join of a fork a list, a map or an entity counts as given anew
+// only when it is another object, not when it holds something else.
+func TestValueReboundFromIsIdentityForReferences(t *testing.T) {
+	l1, l2 := VList([]Value{VInt(1)}), VList([]Value{VInt(1)})
+	m1, m2 := VMap(map[string]Value{"a": VInt(1)}), VMap(map[string]Value{"a": VInt(1)})
+	e1 := Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: "Box", Fields: map[string]Value{}}}
+	e2 := Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: "Box", Fields: map[string]Value{}}}
+	cases := []struct {
+		name   string
+		v, pre Value
+		want   bool
+	}{
+		{"the same list", l1, l1, false},
+		{"another list with the same elements", l2, l1, true},
+		{"the same map", m1, m1, false},
+		{"another map with the same entries", m2, m1, true},
+		{"the same entity", e1, e1, false},
+		{"another entity", e2, e1, true},
+		{"the same integer", VInt(3), VInt(3), false},
+		{"another integer", VInt(4), VInt(3), true},
+		{"a list where an integer was", l1, VInt(3), true},
+	}
+	for _, c := range cases {
+		if got := c.v.reboundFrom(c.pre); got != c.want {
+			t.Errorf("%s: reboundFrom is %v, want %v", c.name, got, c.want)
+		}
+	}
+}
