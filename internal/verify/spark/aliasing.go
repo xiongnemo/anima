@@ -150,8 +150,8 @@ func (v *verifier) readonlyNames(params []sema.FuncParamInfo, body any) map[stri
 		case *ast.TryExpr:
 			return derived(x.Inner)
 		case *ast.WithExpr:
-			// The copy shares the entities inside the original.
-			return derived(x.Base)
+			// The copy shares the entities inside the original, if any.
+			return !v.isFlatEntity(v.info.ExprTypes[x.Base]) && derived(x.Base)
 		case *ast.PipeExpr:
 			return derived(x.Left) || derived(x.Right)
 		case *ast.MatchExpr:
