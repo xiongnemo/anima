@@ -1560,3 +1560,30 @@ def choose(flag: bool) -> A:
 		t.Errorf("an arm that yields a broken entity: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
 	}
 }
+
+// A match expression must cover its subject wherever it is written, not
+// only as the whole right-hand side of an assignment or a return.
+func TestSPARKMatchExpressionCoverageInFieldAndElementAssignment(t *testing.T) {
+	prelude := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+`
+	partial := map[string]string{
+		"field":   "    b.inner = match k:\n        0 -> P(x=1)\n    return 0",
+		"element": "    rs = [P(x=1)]\n    rs[0] = match k:\n        0 -> P(x=1)\n    return 0",
+	}
+	for name, body := range partial {
+		src := prelude + "\ndef f(mut b: Holder, k: int[0..9]) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "match_exhaustive") {
+			t.Errorf("%s: expected a failed match_exhaustive, failed VCs:\n%s", name, failed)
+		}
+	}
+	total := prelude + "\ndef f(mut b: Holder, k: int[0..9]) -> int:\n    b.inner = match k:\n        0 -> P(x=1)\n        _ -> P(x=2)\n    return 0\n"
+	if failed := failedVCs(verifySrc(t, total)); len(failed) != 0 {
+		t.Errorf("a total match: expected every VC proved, failed VCs: %v", failed)
+	}
+}

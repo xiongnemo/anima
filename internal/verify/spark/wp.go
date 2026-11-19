@@ -906,9 +906,6 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.ReturnStmt:
 		if s.Value != nil {
-			if me, ok := s.Value.(*ast.MatchExpr); ok {
-				v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, s.Span)
-			}
 			v.checkArith(s.Value, env, scope)
 			v.evalSideEffects(s.Value, env, scope)
 			v.proveEntityValue(s.Value, env, scope)
@@ -920,9 +917,6 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		return true
 
 	case *ast.ExprStmt:
-		if me, ok := s.Expr.(*ast.MatchExpr); ok {
-			v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, s.Span)
-		}
 		v.checkArith(s.Expr, env, scope)
 		v.evalSideEffects(s.Expr, env, scope)
 	}
@@ -991,9 +985,6 @@ func (v *verifier) isConstructorCall(e ast.Expr) bool {
 
 func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
 	if !v.effectsDone {
-		if me, ok := rhs.(*ast.MatchExpr); ok {
-			v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, span)
-		}
 		v.evalSideEffects(rhs, env, scope)
 	}
 	v.effectsDone = false
@@ -1399,6 +1390,8 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 	case *ast.MatchExpr:
 		v.evalSideEffects(e.Subject, env, scope)
+		// Checked here so that it holds wherever the match is written.
+		v.verifyMatchExhaustive(e.Subject, extractMatchArmsFromExpr(e.Arms), env, scope, e.Span)
 		// Only one arm runs, and a guard may run without its arm.
 		for _, arm := range e.Arms {
 			v.havocMutArgs(arm.Guard, env)
