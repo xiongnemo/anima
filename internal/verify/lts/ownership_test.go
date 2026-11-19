@@ -680,6 +680,12 @@ def f(b: bool) -> Result[int, str]:
     ok = b implies close_it(own conn) == 0
     return Ok(0)
 `, "conditionally evaluated"},
+		{"closed only inside old()", `
+def f() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    x = old(conn.close())
+    return Ok(1)
+`, "never executed"},
 		{"stored in a list", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?

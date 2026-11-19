@@ -1093,7 +1093,11 @@ func (t *typestateChecker) evalExpr(expr ast.Expr, env *tsEnv, source bool) {
 	case *ast.UnaryExpr:
 		t.evalExpr(e.Expr, env, false)
 	case *ast.OldExpr:
-		t.evalExpr(e.Inner, env, false)
+		// old(...) belongs to contracts and is not evaluated at run time, so
+		// it has no effect on a handle; it still may not misuse one.
+		c := env.clone()
+		t.evalExpr(e.Inner, c, false)
+		t.requireUnchanged(e.Span, env, c, "an old(...) expression, which is never executed,")
 	case *ast.RangeExpr:
 		t.evalExpr(e.Lo, env, false)
 		t.evalExpr(e.Hi, env, false)
