@@ -1321,12 +1321,13 @@ func TestSPARKStateAfterIfAndMatch(t *testing.T) {
         if n > 3:
             x = 4
     return 10 / x`,
-		"match that may run no arm keeps a safe value": `
+		"match whose catch-all keeps the value": `
     t = name_of(n)
     x = 1
     match t:
         "a" -> x = 2
         "b" -> x = 3
+        _ -> x = 1
     return 10 / x`,
 		"guarded arm with a catch-all": `
     x = 1
