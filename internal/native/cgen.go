@@ -685,28 +685,25 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		g.line("%s = %s;", dest, valC)
 
 	case *ast.CompoundAssignStmt:
-		rhsC := g.emitExpr(s.Value)
+		// The target is read before the right-hand side runs, as on the VM.
+		opSym := "+"
+		if s.Op == "-=" {
+			opSym = "-"
+		} else if s.Op == "*=" {
+			opSym = "*"
+		}
 		switch tgt := s.Target.(type) {
 		case *ast.Ident:
 			vref := g.varRef(tgt.Name)
-			switch s.Op {
-			case "+=":
-				g.line("%s = v_int(%s.u.i + (%s).u.i);", vref, vref, rhsC)
-			case "-=":
-				g.line("%s = v_int(%s.u.i - (%s).u.i);", vref, vref, rhsC)
-			case "*=":
-				g.line("%s = v_int(%s.u.i * (%s).u.i);", vref, vref, rhsC)
-			}
+			cur := g.freshTmp("cur")
+			g.line("AnimaVal %s = %s;", cur, vref)
+			rhsC := g.emitExpr(s.Value)
+			g.line("%s = v_int(%s.u.i %s (%s).u.i);", vref, cur, opSym, rhsC)
 		case *ast.FieldExpr:
 			objC := g.emitExpr(tgt.Object)
 			curF := g.freshTmp("fld")
 			g.line("AnimaVal %s = v_entity_get(%s, %s);", curF, objC, cEscapeStr(tgt.Field))
-			opSym := "+"
-			if s.Op == "-=" {
-				opSym = "-"
-			} else if s.Op == "*=" {
-				opSym = "*"
-			}
+			rhsC := g.emitExpr(s.Value)
 			g.line("v_entity_set(%s, %s, v_int(%s.u.i %s (%s).u.i));", objC, cEscapeStr(tgt.Field), curF, opSym, rhsC)
 		}
 
@@ -923,13 +920,15 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 	}
 }
 
-// emitExpr returns a C expression for expr. A call is evaluated into a
-// temporary right here, so calls run once and in source order: C leaves the
-// evaluation order of operands and arguments unspecified.
+// emitExpr returns a C expression for expr. Calls, and reads of fields and
+// elements a later call could change, are evaluated into a temporary right
+// here, so an expression runs once and in source order as it does on the VM:
+// C leaves the evaluation order of operands and arguments unspecified.
 func (g *cgen) emitExpr(expr ast.Expr) string {
 	c := g.emitExprInline(expr)
-	if _, isCall := expr.(*ast.CallExpr); isCall {
-		tmp := g.freshTmp("call")
+	switch expr.(type) {
+	case *ast.CallExpr, *ast.FieldExpr, *ast.IndexExpr:
+		tmp := g.freshTmp("val")
 		g.line("AnimaVal %s = %s;", tmp, c)
 		return tmp
 	}
@@ -1385,11 +1384,6 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("conc_threadpool_new((%s).u.i, (%s).u.i)", args[0], args[1])
 	case "std.concurrent.Channel":
 		capC := "v_int(8)"
-		for _, a := range e.Args {
-			if a.Name == "cap" {
-				capC = g.emitExpr(a.Value)
-			}
-		}
 		if len(args) >= 1 {
 			capC = args[0]
 		}

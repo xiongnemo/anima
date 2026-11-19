@@ -247,14 +247,16 @@ func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
 	runOnBothBackends(t, "moved_then_try", movedThenTrySrc, "dispatch failed: boom\nreply=late\n")
 }
 
-// The native backend must evaluate calls once and in source order, skip the
-// right operand of a short-circuit operator, fall through a failed match
-// guard, and lower a match expression wherever it appears.
+// The native backend must evaluate calls and field reads once and in source
+// order, skip the right operand of a short-circuit operator, fall through a
+// failed match guard, and lower a match expression wherever it appears.
 func TestE2EEvaluationOrderParity(t *testing.T) {
 	runOnBothBackends(t, "evaluation_order", evaluationOrderSrc, evaluationOrderWant)
 }
 
-const evaluationOrderSrc = `def a() -> int[1..1]:
+const evaluationOrderSrc = `import std.concurrent as conc
+
+def a() -> int[1..1]:
     print("a")
     return 1
 
@@ -301,6 +303,16 @@ def ladder(n: int[0..9]) -> str:
 entity Box:
     v: int[0..10]
 
+def reset(mut box: Box) -> int[1..1]:
+    box.v = 0
+    print("reset")
+    return 1
+
+def capacity(mut box: Box) -> int[1..4]:
+    box.v = 2
+    print("capacity")
+    return 4
+
 def main() -> int:
     s = add(a(), b())
     d = a() - b()
@@ -326,6 +338,14 @@ def main() -> int:
         0 -> 3
         _ -> 4
     print(f"box={box.v} xs1={xs[1]}")
+    box.v += reset(mut box)
+    print(f"compound={box.v}")
+    box.v = 5
+    total = box.v + reset(mut box)
+    print(f"total={total} after={box.v}")
+    ch = conc.Channel[int[0..9]](cap=capacity(mut box))
+    ch.close()
+    print(f"cap box={box.v}")
     return 0
 `
 
@@ -345,6 +365,12 @@ guarded skip ok=True
 or-rhs-try
 guarded err=or-rhs-try
 box=7 xs1=4
+reset
+compound=8
+reset
+total=6 after=0
+capacity
+cap box=2
 `
 
 const movedThenTrySrc = `import std.socket as sock
