@@ -1592,7 +1592,7 @@ entity Holder:
 // two field updates: each write has to leave its invariants true.
 func TestSPARKSharedEntityKeepsItsInvariantOnEveryWrite(t *testing.T) {
 	body := func(b string) string {
-		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + b + "\n"
+		return invariantPrelude + "\ndef f(mut a: A, mut rows: list[A], mut o: Option[A]) -> int:\n" + b + "\n"
 	}
 	rejected := map[string]string{
 		"loop variable":                 body("    for r in rows:\n        r.x = 6\n    if len(rows) > 0:\n        return use(rows[0])\n    return 0"),

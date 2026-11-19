@@ -547,6 +547,7 @@ func (v *verifier) verifyFunc(fn *ast.FuncDecl) {
 	v.curRetType = fi.Type.Return
 	v.curMutEnts = nil
 	v.checkParamsNotRebound(fi.Type.Params, fn.Body, scope, fn.Span)
+	v.checkReadonlyWrites(fi.Type.Params, fn.Body, scope)
 
 	for _, p := range fi.Type.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -610,6 +611,7 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 	v.curRetType = wi.Return
 	v.curMutEnts = nil
 	v.checkParamsNotRebound(wi.Params, wf.Nodes, scope, wf.Span)
+	v.checkReadonlyWrites(wi.Params, wf.Nodes, scope)
 
 	for _, p := range wi.Params {
 		v.bindVarType(env, p.Name, p.Type)
