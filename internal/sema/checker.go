@@ -691,8 +691,10 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 		sc.defineLocal(p.Name, varBinding{ty: p.Type, mutable: p.Mut, isParam: true, span: wf.Span})
 	}
 	pools := map[string]bool{}
+	mutexPools := map[string]bool{} // one slot: holders exclude each other
 	for _, pl := range wf.Pools {
 		pools[pl.Name] = true
+		mutexPools[pl.Name] = pl.Capacity == 1
 	}
 	c.curReturn = wi.Return
 	defer func() { c.curReturn = nil }()
@@ -708,13 +710,23 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 			}
 		case *ast.ForkNode:
 			branchWrites := map[string]string{}
+			// For each element write: the branch and the one-slot pools it held.
+			type elemWrite struct {
+				branch string
+				locks  map[string]bool
+			}
+			elemWrites := map[string][]elemWrite{}
 			for _, br := range node.Branches {
 				brSc := newScope(sc)
+				held := map[string]bool{}
 				for _, op := range br.Ops {
 					switch op.Kind {
 					case ast.BranchAcquire, ast.BranchRelease:
 						if !pools[op.Target] {
 							return fmt.Errorf("%s: workflow %s references unknown pool %q", op.Span, wf.Name, op.Target)
+						}
+						if mutexPools[op.Target] {
+							held[op.Target] = op.Kind == ast.BranchAcquire
 						}
 					case ast.BranchSync:
 						parts := strings.SplitN(op.Target, ".", 2)
@@ -728,6 +740,11 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 						if la, ok := op.Stmt.(*ast.LetAssignStmt); ok {
 							if prevBr, dup := branchWrites[la.Name]; dup && prevBr != br.Name {
 								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, la.Name, prevBr, br.Name)
+							}
+							for _, prev := range elemWrites[la.Name] {
+								if prev.branch != br.Name {
+									return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, la.Name, prev.branch, br.Name)
+								}
 							}
 							branchWrites[la.Name] = br.Name
 							if b, exists := brSc.vars[la.Name]; exists {
@@ -744,10 +761,28 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 							written = st.Target
 						}
 						if path, ok := elementOwnerPath(written); written != nil && ok {
+							locks := map[string]bool{}
+							for pool, on := range held {
+								if on {
+									locks[pool] = true
+								}
+							}
 							if prevBr, dup := branchWrites[path]; dup && prevBr != br.Name {
 								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, path, prevBr, br.Name)
 							}
-							branchWrites[path] = br.Name
+							for _, prev := range elemWrites[path] {
+								if prev.branch == br.Name {
+									continue
+								}
+								shared := false
+								for pool := range locks {
+									shared = shared || prev.locks[pool]
+								}
+								if !shared {
+									return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, path, prev.branch, br.Name)
+								}
+							}
+							elemWrites[path] = append(elemWrites[path], elemWrite{br.Name, locks})
 						}
 					}
 				}
