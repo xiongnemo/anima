@@ -1587,3 +1587,58 @@ entity Holder:
 		t.Errorf("a total match: expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// An entity that can be reached in two ways has no private moment between
+// two field updates: each write has to leave its invariants true.
+func TestSPARKSharedEntityKeepsItsInvariantOnEveryWrite(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + b + "\n"
+	}
+	rejected := map[string]string{
+		"loop variable":                 body("    for r in rows:\n        r.x = 6\n    if len(rows) > 0:\n        return use(rows[0])\n    return 0"),
+		"matched payload":               body("    match o:\n        Some(v) ->\n            v.x = 6\n            return 0\n        None -> return 0"),
+		"element by index":              body("    if len(rows) > 0:\n        r = rows[0]\n        r.x = 6\n    return 0"),
+		"second name":                   body("    b = A(x=5, y=5)\n    c = b\n    b.x = 6\n    return use(c)"),
+		"stored in a list":              body("    b = A(x=5, y=5)\n    ys = [b]\n    b.x = 6\n    b.y = 4\n    return 0"),
+		"shared on a loop's next pass":  body("    c = A(x=5, y=5)\n    for i in 0..3:\n        c.x = 6\n        c.y = 4\n        if len(rows) > 0:\n            c = rows[0]\n    return 0"),
+		"entity inside a loop variable": invariantPrelude + "\ndef g(bxs: list[Box]) -> int:\n    for bx in bxs:\n        bx.inner.x = 6\n    return 0\n",
+		"field of another entity":       invariantPrelude + "\ndef g(mut bx: Box) -> int:\n    a = bx.inner\n    a.x = 6\n    return 0\n",
+		"yielded by a lambda":           body("    b = A(x=5, y=5)\n    b.x = 6\n    ys = [1, 2] |> map(n => b)\n    return 0"),
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "_invariant_1") || !strings.Contains(failed, "entity_") {
+			t.Errorf("%s: expected a failed entity invariant, failed VCs:\n%s", name, failed)
+		}
+	}
+	accepted := map[string]string{
+		"write that keeps the invariant": "    for r in rows:\n        r.x = 0\n    return 0",
+		"adjusted, then stored":          "    b = A(x=5, y=5)\n    b.x = 0\n    b.y = 10\n    ys = [b]\n    return 0",
+		"name given a new entity":        "    c = A(x=1, y=1)\n    for r in rows:\n        c = r\n    c = A(x=5, y=5)\n    c.x = 6\n    c.y = 4\n    return use(c)",
+	}
+	for name, b := range accepted {
+		if failed := failedVCs(verifySrc(t, body(b))); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// A compound assignment through a field path is recorded under that path.
+func TestSPARKCompoundAssignmentThroughFieldPath(t *testing.T) {
+	src := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+
+def f(mut b: Holder) -> int:
+    b.inner.x = 1
+    b.inner.x -= 1
+    a = b.inner
+    return 10 / a.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+}

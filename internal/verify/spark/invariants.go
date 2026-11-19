@@ -2,6 +2,8 @@ package spark
 
 import (
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
@@ -139,5 +141,123 @@ func (e *symEnv) copyEntityFacts(from, to string) {
 		if len(k) > len(from) && k[:len(from)+1] == from+"." {
 			e.boolTerms[to+k[len(from):]] = b
 		}
+	}
+}
+
+// An entity that can be reached in two ways (two names, or a name and the
+// list, map, variant or entity it sits in) is seen through the other way
+// while a field of it is being written. Such an entity has no private
+// moment between two updates: every write has to leave its invariants true.
+
+// pathRoot is the variable a field path starts from.
+func pathRoot(path string) string {
+	if i := strings.IndexByte(path, '.'); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// sharingOf lists the variables that node, on its own, makes shared, and
+// whether it gives the variable `fresh` an entity nothing else can reach.
+func (v *verifier) sharingOf(node any) (names []string, fresh string) {
+	stored := func(e ast.Expr) {
+		if _, ok := v.info.ExprTypes[e].(*sema.EntityType); !ok {
+			return
+		}
+		if p, ok := mutArgPath(e); ok {
+			names = append(names, pathRoot(p))
+		}
+	}
+	switch x := node.(type) {
+	case *ast.ForStmt:
+		if _, isRange := x.Iterable.(*ast.RangeExpr); !isRange {
+			names = append(names, x.Var)
+		}
+	case *ast.VarPat:
+		names = append(names, x.Name)
+	case *ast.LetAssignStmt:
+		src := x.Value
+		for {
+			t, ok := src.(*ast.TryExpr)
+			if !ok {
+				break
+			}
+			src = t.Inner
+		}
+		if _, ok := src.(*ast.IndexExpr); ok {
+			names = append(names, x.Name)
+		} else if p, ok := mutArgPath(src); ok {
+			names = append(names, x.Name, pathRoot(p))
+		} else {
+			fresh = x.Name
+		}
+	case *ast.IndexAssignStmt:
+		stored(x.Value)
+	case *ast.FieldAssignStmt:
+		stored(x.Value)
+	case *ast.ListLit:
+		for _, el := range x.Elems {
+			stored(el)
+		}
+	case *ast.MapLit:
+		for _, en := range x.Entries {
+			stored(en.Value)
+		}
+	case *ast.CallExpr:
+		if id, ok := x.Callee.(*ast.Ident); ok && (v.info.Entities[id.Name] != nil || v.isVariantConstructor(x)) {
+			for _, a := range x.Args {
+				stored(a.Value)
+			}
+		}
+	}
+	return names, fresh
+}
+
+// sharedIn lists the variables that the code under node can make shared.
+func (v *verifier) sharedIn(node any) []string {
+	var out []string
+	visitNodes(reflect.ValueOf(node), func(n any) {
+		names, _ := v.sharingOf(n)
+		out = append(out, names...)
+	})
+	return out
+}
+
+// noteShared records what stmt itself, not the statements inside it, shares.
+func (v *verifier) noteShared(stmt ast.Stmt, groups [][]ast.Expr, env *symEnv) {
+	names, fresh := v.sharingOf(stmt)
+	if fresh != "" {
+		delete(env.shared, fresh)
+	}
+	for _, g := range groups {
+		names = append(names, v.sharedIn(g)...)
+	}
+	if m, ok := stmt.(*ast.MatchStmt); ok {
+		for _, arm := range m.Arms {
+			names = append(names, v.sharedIn(arm.Pattern)...)
+		}
+	}
+	for _, name := range names {
+		env.shared[name] = true
+	}
+}
+
+// proveSharedEntity is called after a field of obj was written: when obj
+// belongs to a shared variable, that variable's invariants must hold now.
+func (v *verifier) proveSharedEntity(obj ast.Expr, env *symEnv, scope string, span ast.Span) {
+	root := obj
+	for {
+		fe, ok := root.(*ast.FieldExpr)
+		if !ok {
+			break
+		}
+		root = fe.Object
+	}
+	id, ok := root.(*ast.Ident)
+	if !ok || !env.shared[id.Name] {
+		return
+	}
+	if et, ok := v.info.ExprTypes[id].(*sema.EntityType); ok && hasInvariants(et, nil) {
+		v.proveInvariants(et, id.Name, id.Name, span, env, scope, map[*sema.EntityType]bool{})
 	}
 }

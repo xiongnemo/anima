@@ -108,6 +108,11 @@ func (v *verifier) joinBranches(env *symEnv, outs []*symEnv) {
 			env.intervals[k] = iv
 		}
 	}
+	for _, o := range outs {
+		for k := range o.shared {
+			env.shared[k] = true
+		}
+	}
 	env.intTerms, env.listLens, env.boolTerms = ints, lens, bools
 	env.listElems, env.sumInfos = elems, sums
 }

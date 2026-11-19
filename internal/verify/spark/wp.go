@@ -88,6 +88,9 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
+	// shared holds the variables whose entity can also be reached another
+	// way: through a second name, or inside a list, map, variant or entity.
+	shared map[string]bool
 	// fresh numbers the symbols this env and every clone of it invent, so
 	// that two branches never use one name for two values.
 	fresh *int
@@ -102,6 +105,7 @@ func newSymEnv() *symEnv {
 		listElems:  map[string]smt.Interval{},
 		sumInfos:   map[string]listSumInfo{},
 		entryTerms: map[string]smt.LinearTerm{},
+		shared:     map[string]bool{},
 		fresh:      new(int),
 	}
 }
@@ -115,8 +119,12 @@ func (e *symEnv) clone() *symEnv {
 		listElems:  make(map[string]smt.Interval, len(e.listElems)),
 		sumInfos:   make(map[string]listSumInfo, len(e.sumInfos)),
 		entryTerms: e.entryTerms,
+		shared:     make(map[string]bool, len(e.shared)),
 		pc:         append([]smt.BoolExpr{}, e.pc...),
 		fresh:      e.fresh,
+	}
+	for k := range e.shared {
+		c.shared[k] = true
 	}
 	for k, v := range e.intTerms {
 		c.intTerms[k] = v.Clone()
@@ -685,6 +693,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)
+	v.noteShared(stmt, groups, env)
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
 		v.checkArith(s.Value, env, scope)
@@ -732,8 +741,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		if id, ok := s.Target.(*ast.Ident); ok {
 			env.intTerms[id.Name] = rhsTerm
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
-			if objID, ok := fe.Object.(*ast.Ident); ok {
-				env.intTerms[objID.Name+"."+fe.Field] = rhsTerm
+			if path, ok := mutArgPath(fe); ok {
+				env.intTerms[path] = rhsTerm
+				v.proveSharedEntity(fe.Object, env, scope, s.Span)
 			}
 		}
 
@@ -787,6 +797,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			// Nothing known about the old value of the field, or of what
 			// was inside it, is true of the new one.
 			v.setField(path, s.Value, rhsTerm, env, scope, s.Span)
+			v.proveSharedEntity(s.Object, env, scope, s.Span)
 		}
 
 	case *ast.IfStmt:
@@ -1614,6 +1625,10 @@ func (v *verifier) bindFresh(env *symEnv, name string, ty sema.Type) {
 // variable is only known to hold some 64-bit integer. A range type narrows that when every
 // assignment in stmts is a compound one, which is proved to stay inside the range.
 func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
+	// An entity the loop shares on one pass is shared on the next.
+	for _, name := range v.sharedIn(stmts) {
+		env.shared[name] = true
+	}
 	names, compound := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
@@ -1779,6 +1794,8 @@ func (v *verifier) checkLambdaArith(lam *ast.LambdaExpr, types []sema.Type, body
 	v.lambdaDepth++
 	v.evalSideEffects(lam.Body, bodyEnv, scope)
 	v.lambdaDepth--
+	// What the lambda yields ends up in a list or in the caller's hands.
+	v.proveEntityValue(lam.Body, bodyEnv, scope)
 	v.strParams = saved
 }
 
