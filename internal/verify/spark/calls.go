@@ -316,6 +316,7 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 	// The callee may have inserted into a map it reaches. What it
 	// guarantees about the argument is bound after that.
 	env.forgetMapLens(a.Value)
+	env.forgetElemHulls()
 	saved := v.noInvariants
 	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {

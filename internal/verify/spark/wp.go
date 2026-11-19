@@ -837,6 +837,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 		if id, ok := s.Target.(*ast.Ident); ok {
 			env.intTerms[id.Name] = rhsTerm
+		} else if _, ok := s.Target.(*ast.IndexExpr); ok {
+			env.forgetElemHulls()
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
 			v.checkWrittenObject(fe.Object, fe.Field, scope, s.Span)
 			if path, ok := mutArgPath(fe); ok {
@@ -856,6 +858,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
+		v.proveElemAssign(s.List, s.Value, env, scope, s.Span)
+		env.forgetElemHulls()
 		if !hasFixedLen(v.info.ExprTypes[s.List]) {
 			env.forgetMapLens(s.List)
 		}
@@ -1010,6 +1014,14 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				elem = lt.Elem
 			}
 			v.bindFresh(loopEnv, s.Var, elem)
+			// What is known of the elements is known of each one.
+			if _, isInt := elem.(*sema.IntType); isInt {
+				if iv := v.pipeElemInterval(s.Iterable, loopEnv, scope); iv.HasLo && iv.HasHi {
+					t := loopEnv.intTerms[s.Var]
+					loopEnv.assume(smt.Ge(t, smt.Const(iv.Lo)))
+					loopEnv.assume(smt.Le(t, smt.Const(iv.Hi)))
+				}
+			}
 		}
 		v.execBlock(s.Body, loopEnv, scope)
 
@@ -1165,9 +1177,15 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			if ll, ok := rhs.(*ast.ListLit); ok {
 				lt := smt.Const(int64(len(ll.Elems)))
 				env.listLens[name] = lt
+				if iv := v.literalHull(ll, env, scope); iv.HasLo && iv.HasHi {
+					env.listElems[name] = iv
+				}
 			} else if id, ok := rhs.(*ast.Ident); ok {
 				// A list never changes its length, so a second name for it has the same one.
 				env.listLens[name] = env.lenOf(id.Name)
+				if iv, ok := env.listElems[id.Name]; ok {
+					env.listElems[name] = iv
+				}
 			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
@@ -1561,12 +1579,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			v.evalSideEffects(el, env, scope)
 			v.proveEntityValue(el, env, scope)
 		}
+		v.proveLiteralElems(e, env, scope)
 	case *ast.MapLit:
 		for _, en := range e.Entries {
 			v.evalSideEffects(en.Key, env, scope)
 			v.evalSideEffects(en.Value, env, scope)
 			v.proveEntityValue(en.Value, env, scope)
 		}
+		v.proveLiteralElems(e, env, scope)
 	case *ast.FStrExpr:
 		for _, part := range e.Parts {
 			if part.IsExpr {
@@ -1808,6 +1828,9 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 				delete(env.listElems, k)
 			}
 		}
+	}
+	if writesElems(stmts) {
+		env.forgetElemHulls()
 	}
 	// What the statements pass as mut may change on every pass too.
 	v.havocMutArgs(stmts, env)
@@ -2242,6 +2265,12 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 		env.assumeRange(term, it)
 	} else {
 		env.assume(smt.FitsInt64(term))
+	}
+	if ix, ok := expr.(*ast.IndexExpr); ok {
+		if iv, ok := v.elemHull(ix, env); ok {
+			env.assume(smt.Ge(term, smt.Const(iv.Lo)))
+			env.assume(smt.Le(term, smt.Const(iv.Hi)))
+		}
 	}
 	return term
 }
