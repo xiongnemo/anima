@@ -674,6 +674,12 @@ def f(n: int) -> int:
         Err(e) -> print(e)
     return 0
 `, "may run no arm"},
+		{"closed in the consequent of implies", `
+def f(b: bool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    ok = b implies close_it(own conn) == 0
+    return Ok(0)
+`, "conditionally evaluated"},
 		{"stored in a list", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?

@@ -1085,13 +1085,15 @@ func (t *typestateChecker) evalExpr(expr ast.Expr, env *tsEnv, source bool) {
 		return
 	case *ast.BinaryExpr:
 		t.evalExpr(e.Left, env, false)
-		if e.Op == "and" || e.Op == "or" {
+		if e.Op == "and" || e.Op == "or" || e.Op == "implies" {
 			t.evalConditional(e.Right, env)
 		} else {
 			t.evalExpr(e.Right, env, false)
 		}
 	case *ast.UnaryExpr:
 		t.evalExpr(e.Expr, env, false)
+	case *ast.OldExpr:
+		t.evalExpr(e.Inner, env, false)
 	case *ast.RangeExpr:
 		t.evalExpr(e.Lo, env, false)
 		t.evalExpr(e.Hi, env, false)
