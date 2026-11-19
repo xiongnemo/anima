@@ -1403,7 +1403,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if len(e.Args) != len(wi.Params) {
 			return nil, fmt.Errorf("%s: workflow %s expects %d args, got %d", e.Span, e.Name, len(wi.Params), len(e.Args))
 		}
-		if err := c.checkCallAliasing(e.Args); err != nil {
+		if err := c.checkCallAliasing(e.Args, sc); err != nil {
 			return nil, err
 		}
 		for i, arg := range e.Args {
@@ -1448,7 +1448,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 
 func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	// SPARK Anti-Aliasing rule on all call sites
-	if err := c.checkCallAliasing(e.Args); err != nil {
+	if err := c.checkCallAliasing(e.Args, sc); err != nil {
 		return nil, err
 	}
 
@@ -1894,7 +1894,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
-func (c *checker) checkCallAliasing(args []ast.CallArg) error {
+func (c *checker) checkCallAliasing(args []ast.CallArg, sc *scope) error {
 	var mutRoots []struct {
 		root string
 		span ast.Span
@@ -1905,7 +1905,13 @@ func (c *checker) checkCallAliasing(args []ast.CallArg) error {
 		span ast.Span
 	}
 	for _, a := range args {
-		if root, ok := rootVarPath(a.Value); ok {
+		root, ok := rootVarPath(a.Value)
+		if !ok && c.isSharedElement(a.Value, sc) {
+			// An entity, list or map read out of a container is the same
+			// object the container holds.
+			root, ok = containerPath(a.Value)
+		}
+		if ok {
 			allRoots = append(allRoots, struct {
 				root string
 				mut  bool
@@ -1950,6 +1956,43 @@ func rootVarPath(e ast.Expr) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// containerPath returns the variable path e is read from, ignoring indexes:
+// box.rows for box.rows[i], rows.inner for rows[i].inner.
+func containerPath(e ast.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name, true
+	case *ast.FieldExpr:
+		base, ok := containerPath(x.Object)
+		if !ok {
+			return "", false
+		}
+		return base + "." + x.Field, true
+	case *ast.IndexExpr:
+		return containerPath(x.List)
+	}
+	return "", false
+}
+
+// isSharedElement reports whether e reads, through an index, a value that is
+// passed by reference.
+func (c *checker) isSharedElement(e ast.Expr, sc *scope) bool {
+	switch e.(type) {
+	case *ast.IndexExpr, *ast.FieldExpr:
+	default:
+		return false
+	}
+	ty, err := c.checkExpr(e, sc)
+	if err != nil || ty == nil {
+		return false
+	}
+	switch ty.Kind() {
+	case KindEntity, KindList, KindMap:
+		return true
+	}
+	return false
 }
 
 // isMapKeyType reports whether keys of type t are told apart by the runtimes,

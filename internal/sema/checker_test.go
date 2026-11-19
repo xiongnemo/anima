@@ -218,3 +218,37 @@ def f() -> int:
 		t.Errorf("expected a map key error, got %v", err)
 	}
 }
+
+// An entity read out of a list is the object the list holds, so it cannot be
+// passed next to the same list as a mut argument.
+func TestSemaRejectsElementAliasOfMutContainer(t *testing.T) {
+	head := `
+entity Inner:
+    v: int[0..9]
+
+entity Row:
+    n: int[0..9]
+    inner: Inner
+
+def bump(mut rows: list[Row], r: Row) -> int:
+    return 0
+
+def poke(mut rows: list[Row], i: Inner) -> int:
+    return 0
+
+def f(mut rows: list[Row]) -> int:
+    if len(rows) > 0:
+`
+	for name, call := range map[string]string{
+		"element":          "        return bump(mut rows, rows[0])\n",
+		"field of element": "        return poke(mut rows, rows[0].inner)\n",
+	} {
+		prog, err := parser.Parse("alias.anm", head+call+"    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse error: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "anti-aliasing") {
+			t.Errorf("%s: expected an anti-aliasing error, got %v", name, err)
+		}
+	}
+}
