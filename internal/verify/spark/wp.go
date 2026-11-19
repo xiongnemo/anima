@@ -2,6 +2,7 @@ package spark
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 
@@ -805,12 +806,15 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.assignSymbolic(s.Name, s.Value, env, scope, s.Span)
 		if rng != nil {
 			vc := scope + ".let_" + s.Name
-			if before != nil {
-				v.checkIntRange(smt.Const(0), s.Value, before, rng, vc, scope, s.Span)
-			} else if t, ok := env.intTerms[s.Name]; ok {
-				v.prove(vc, scope, s.Span, env, smt.And(smt.Ge(t, smt.Const(rng.Lo)), smt.Le(t, smt.Const(rng.Hi))))
-			} else {
+			t, ok := env.intTerms[s.Name]
+			inRange := smt.And(smt.Ge(t, smt.Const(rng.Lo)), smt.Le(t, smt.Const(rng.Hi)))
+			switch {
+			case !ok:
 				v.prove(vc, scope, s.Span, env, smt.BoolConst{Val: false})
+			case before != nil && !v.holds(env, inRange):
+				v.checkIntRange(t, s.Value, before, rng, vc, scope, s.Span)
+			default:
+				v.prove(vc, scope, s.Span, env, inRange)
 			}
 		}
 
@@ -2204,21 +2208,27 @@ func (v *verifier) proveArith(e ast.Expr, env *symEnv, scope string, goal smt.Bo
 
 // checkIntRange verifies lo <= expr <= hi, using exact Presburger characterization for div!
 func (v *verifier) checkIntRange(term smt.LinearTerm, expr ast.Expr, env *symEnv, target *sema.IntType, vcName, scope string, span ast.Span) {
-	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == "/" {
+	inRange := smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi)))
+	// The rule below is for operands that are not negative; what is known
+	// of the quotient itself may do, as for `-4 / 2`.
+	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == "/" && !v.holds(env, inRange) {
 		num := v.evalInt(be.Left, env, scope, false)
 		den := v.evalInt(be.Right, env, scope, false)
 		// Exact theorem for den >= 1 and num >= 0:
 		// target.Lo <= floor(num / den) <= target.Hi  <==>  target.Lo * den <= num && num <= (target.Hi + 1) * den - 1
-		cond := smt.And(
+		parts := []smt.BoolExpr{
 			smt.Ge(den, smt.Const(1)),
 			smt.Ge(num, smt.Const(0)),
 			smt.Le(den.Scale(target.Lo), num),
-			smt.Lt(num, den.Scale(target.Hi+1)),
-		)
-		v.prove(vcName, scope, span, env, cond)
+		}
+		// No quotient is above the largest int, and Hi + 1 would wrap.
+		if target.Hi != math.MaxInt64 {
+			parts = append(parts, smt.Lt(num, den.Scale(target.Hi+1)))
+		}
+		v.prove(vcName, scope, span, env, smt.And(parts...))
 		return
 	}
-	v.prove(vcName, scope, span, env, smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi))))
+	v.prove(vcName, scope, span, env, inRange)
 }
 
 // makesVariant reports whether e makes a variant, whose fields

@@ -3342,6 +3342,28 @@ def f(p: int[2..9], xs: list[int[1..9]]) -> int:
 			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
 		}
 	}
+	// A quotient is in range by what is known of it, or by the rule for
+	// operands that are not negative; the largest int is no upper bound
+	// to wrap around.
+	quotients := `
+def f(n: int[0..100]) -> int:
+    a: int[-9..-1] = -4 / 2
+    b: int[0..9223372036854775807] = 4 / 1
+    c: int[0..9223372036854775807] = n / 1
+    d: int[1..9] = 8 / 2
+    return a + b + c + d
+`
+	if failed := failedVCs(verifySrc(t, quotients)); len(failed) != 0 {
+		t.Errorf("quotients in range: expected every VC proved, failed VCs: %v", failed)
+	}
+	for name, src := range map[string]string{
+		"a quotient below the range":                     "\ndef f(n: int[0..9]) -> int:\n    y: int[1..9] = 5\n    y = n / 2\n    return y\n",
+		"a quotient below a range up to the largest int": "\ndef f(n: int[0..100]) -> int:\n    z: int[5..9223372036854775807] = n / 1\n    return z\n",
+	} {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, ".let_") {
+			t.Errorf("%s: expected a failed let_ VC, failed VCs:\n%s", name, failed)
+		}
+	}
 	// A plain assignment in a loop of a variable without a range tells
 	// nothing about it at the head.
 	plain := `
