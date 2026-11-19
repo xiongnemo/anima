@@ -1592,16 +1592,16 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				if err != nil {
 					return nil, err
 				}
-				var ft Type
-				if a.Name == "" && i < len(vi.Fields) {
-					ft = vi.Fields[i].Type
+				// Both backends fill the fields of a variant in the order
+				// the arguments are written, whatever they are named.
+				if i >= len(vi.Fields) {
+					return nil, fmt.Errorf("%s: %s has %d field(s), got %d arguments", e.Span, id.Name, len(vi.Fields), len(e.Args))
 				}
-				for _, f := range vi.Fields {
-					if a.Name != "" && f.Name == a.Name {
-						ft = f.Type
-					}
+				if a.Name != "" && a.Name != vi.Fields[i].Name {
+					return nil, fmt.Errorf("%s: field %d of %s is %s, not %s: the fields of a variant are given in order", a.Span, i+1, id.Name, vi.Fields[i].Name, a.Name)
 				}
-				if ft != nil && !c.assignable(ft, at, a.Value) {
+				ft := vi.Fields[i].Type
+				if !c.assignable(ft, at, a.Value) {
 					return nil, fmt.Errorf("%s: field %d of %s expects %s, got %s", a.Span, i+1, id.Name, ft, at)
 				}
 			}

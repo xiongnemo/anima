@@ -531,3 +531,32 @@ def g() -> int:
 		}
 	}
 }
+
+// The backends fill the fields of a variant by position, so a keyword
+// argument has to name the field at its place.
+func TestSemaVariantFieldsInOrder(t *testing.T) {
+	prelude := `
+type Shape = Circle(r: int[1..9], k: int) | Dot
+
+def g() -> int:
+`
+	cases := map[string]bool{
+		"Circle(5, 0)":     true,
+		"Circle(r=5, k=0)": true,
+		"Circle(5, k=0)":   true,
+		"Circle(k=0, r=5)": false,
+		"Circle(5, r=0)":   false,
+		"Circle(5, 0, 1)":  false,
+		"Circle(5, zz=0)":  false,
+		`Circle("a", k=0)`: false,
+	}
+	for call, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    s = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", call, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%s: accepted = %v, want %v (%v)", call, err == nil, ok, err)
+		}
+	}
+}
