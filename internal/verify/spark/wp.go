@@ -1211,10 +1211,12 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *symEnv, scope string) {
 	// Collect chain left-to-right: base |> step1 |> step2 ...
 	var chain []ast.Expr
+	stageOf := map[ast.Expr]*ast.PipeExpr{}
 	cur := ast.Expr(pe)
 	for {
 		if p, ok := cur.(*ast.PipeExpr); ok {
 			chain = append([]ast.Expr{p.Right}, chain...)
+			stageOf[p.Right] = p
 			cur = p.Left
 		} else {
 			break
@@ -1260,22 +1262,9 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 			env.assume(smt.Le(fv, curLen))
 			curLen = fv
 		case "map":
-			if len(ce.Args) == 1 {
-				if lam, ok := ce.Args[0].Value.(*ast.LambdaExpr); ok {
-					// Check if lambda accesses a bounded field like q.score
-					if fe, ok := lam.Body.(*ast.FieldExpr); ok {
-						if ft, ok := v.info.ExprTypes[fe]; ok {
-							if it, ok := ft.(*sema.IntType); ok && it.IsBounded {
-								curElem = smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-							}
-						}
-					} else if bt, ok := v.info.ExprTypes[lam.Body]; ok {
-						if it, ok := bt.(*sema.IntType); ok && it.IsBounded {
-							curElem = smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-						}
-					}
-				}
-			}
+			// The elements are what the lambda yields: nothing is known
+			// of them when that cannot be bounded.
+			curElem = v.pipeElemInterval(stageOf[step], env, scope)
 		case "fold":
 			if len(ce.Args) >= 1 && curElem.HasLo && curElem.HasHi {
 				initT := v.evalInt(ce.Args[0].Value, env, scope, true)
@@ -1536,6 +1525,12 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
+		// A map stage given to a list[int[1..9]]: what the lambda yields.
+		if it := elemRange(v.info.LiteralTargets[e]); it != nil {
+			iv := v.pipeElemInterval(e, env, scope)
+			ok := iv.HasLo && iv.HasHi && it.Lo <= iv.Lo && iv.Hi <= it.Hi
+			v.prove(scope+".list_elem_bounds", scope, e.Span, env, smt.BoolConst{Val: ok})
+		}
 	case *ast.RunWorkflowExpr:
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
@@ -2041,10 +2036,10 @@ func (v *verifier) pipeMaxLen(e ast.Expr, env *symEnv) (int64, bool) {
 
 // pipeElemInterval bounds the int elements of the list e evaluates to, when it can.
 func (v *verifier) pipeElemInterval(e ast.Expr, env *symEnv, scope string) smt.Interval {
-	if lt, ok := v.info.ExprTypes[e].(*sema.ListType); ok {
-		if it, ok := lt.Elem.(*sema.IntType); ok && it.IsBounded {
-			return smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-		}
+	// The declared range, unless e is a new list that was given it: that
+	// one is what has to be proved.
+	if it := elemRange(v.info.ExprTypes[e]); it != nil && v.info.LiteralTargets[e] == nil {
+		return smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
 	}
 	switch x := e.(type) {
 	case *ast.Ident:
