@@ -1,4 +1,4 @@
-# dining_philosophers_safe.anm — SWEN90004 Asymmetric Deadlock-Free Solution
+# dining_philosophers_safe.anm — Asymmetric Deadlock-Free Solution
 
 machine Fork:
     state Free:

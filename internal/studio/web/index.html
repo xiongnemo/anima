@@ -234,7 +234,7 @@ function renderCanvas() {
       html += `<div class="card"><h3>Counterexample Sequence</h3><pre>${esc(JSON.stringify(m.failures, null, 2))}</pre></div>`;
     }
     html += `<div class="card"><h3>Mermaid UML Projection</h3><pre>${esc(m.mermaid||'')}</pre></div>`;
-    html += `<div class="card"><h3>SWEN90004 FSP Export</h3><pre>${esc(m.fsp||'')}</pre></div>`;
+    html += `<div class="card"><h3>FSP Export</h3><pre>${esc(m.fsp||'')}</pre></div>`;
     html += `<div class="card"><h3>32-bit Bytecode Disassembly</h3><pre>${esc(m.disasm||'')}</pre></div>`;
     c.innerHTML = html;
   }

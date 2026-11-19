@@ -69,7 +69,7 @@ workflow FulfillOrder(ok: bool):
 	}
 }
 
-func TestCatchesSWEN90004ForkMergeChoiceJoinAndPoolLeak(t *testing.T) {
+func TestCatchesForkMergeChoiceJoinAndPoolLeak(t *testing.T) {
 	// 1. fork (AND-split) into merge (XOR-join) -> Improper Completion + Not 1-safe!
 	repFM := verifyPetri(t, `
 workflow BadForkMerge:

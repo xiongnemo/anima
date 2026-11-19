@@ -1,4 +1,4 @@
-# single_lane_bridge.anm — Classic Unimelb SWEN90004 Concurrency Model
+# single_lane_bridge.anm — Classic Concurrency Model
 
 machine RedCar:
     state OffBridge:

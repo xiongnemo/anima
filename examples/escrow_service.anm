@@ -2,8 +2,8 @@
 # Combines:
 #   1. UML Entities + Relations + SPARK Hoare WP conservation proofs
 #   2. Linear Port Typestate protocol (AuditLog)
-#   3. SWEN90004 FSP/LTS Monitor + Safety Property + Progress + FLTL
-#   4. SWEN90004 Petri Workflow Net (Sound + 1-Safe + Short-Circuit L4-Live)
+#   3. FSP/LTS Monitor + Safety Property + Progress + FLTL
+#   4. Petri Workflow Net (Sound + 1-Safe + Short-Circuit L4-Live)
 #   5. Runnable main() executing identical verified logic on VM & Native ELF
 
 type Money    = int[0..1_000_000]

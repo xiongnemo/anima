@@ -5,11 +5,11 @@
 1. **Ada / SPARK-Level Data & Contract Proofs (Self-Built `AnimaSMT`)**:
    - Refinement range types (`int[0..1_000_000]`), `requires` / `ensures` / `old(...)`, entity `invariant`s, `mut` exclusive anti-aliasing, loop/recursion `decreases` termination, and SMT-verified exhaustive `match` + `choice` completeness/exclusivity.
    - 100% pure-Go prover: **Interval/Octagon Abstract Domain (Floyd-Warshall)** + **CDCL SAT (2-watched literals + 1-UIP)** + **Exact Rational Dutertre-de Moura Simplex (`math/big.Rat`)** + **Integer Branch-and-Bound**.
-2. **SWEN90004 FSP / LTSA & Linear Typestate Verification**:
+2. **FSP / LTSA & Linear Typestate Verification**:
    - Compiles `monitor`, `machine`, and `workflow` synchronizations into explicit Labelled Transition Systems (`||` composition, relabeling, hiding, priority).
    - Verifies Safety (`property` `ERROR=-1`), Deadlock freedom, **Tarjan SCC Fair-Choice `progress` (starvation/livelock)**, bounded **FLTL**, and **Linear Socket/File/Port Typestate** (zero FD leaks & zero use-after-close).
    - Exports standard `.fsp` compatible with Magee & Kramer's **LTSA**.
-3. **SWEN90004 Petri Net & Workflow Soundness**:
+3. **Petri Net & Workflow Soundness**:
    - Compiles `workflow` (`pool`, `fork`/`join` AND-split/join, `choice`/`merge` XOR-split/join) into Place/Transition WF-Nets.
    - Verifies **Karp-Miller Coverability** (`1_safe`, boundedness), **van der Aalst Soundness** (*Option to complete*, *Proper completion*, *No dead transitions*), and cross-checks via the **Short-Circuit Theorem ($\overline{N}$ bounded & $L_4$-live)**.
    - Exports ISO `.pnml` XML.

@@ -76,7 +76,7 @@ func (n *PetriNet) addTrans(name string, kind TransKind, pre, post map[int]int) 
 	return id
 }
 
-// CompileWorkflow builds a SWEN90004 Place/Transition Workflow Net (WF-Net)
+// CompileWorkflow builds a Place/Transition Workflow Net (WF-Net)
 // with explicit pool resource places, AND-split/join (fork/join), and XOR-split/join (choice/merge).
 func CompileWorkflow(wf *ast.WorkflowDecl) (*PetriNet, error) {
 	net := &PetriNet{

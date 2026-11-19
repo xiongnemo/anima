@@ -82,7 +82,7 @@ system BridgeSystem:
 `
 	rep := verifyLTS(t, src)
 	if !rep.OK() {
-		t.Fatalf("expected SingleLaneBridge to pass all SWEN90004 checks, got: %v", rep.Errors())
+		t.Fatalf("expected SingleLaneBridge to pass all checks, got: %v", rep.Errors())
 	}
 	if len(rep.Systems) != 1 || rep.Systems[0].NumStates == 0 {
 		t.Fatalf("unexpected system stats: %+v", rep.Systems)
