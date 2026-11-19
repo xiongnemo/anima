@@ -235,6 +235,8 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// bindingEnts holds the entity types bindVarType is currently expanding.
+	bindingEnts map[*sema.EntityType]bool
 }
 
 func (v *verifier) prove(name, scope string, span ast.Span, env *symEnv, goal smt.BoolExpr) {
@@ -328,6 +330,15 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 			env.listElems[name] = smt.Interval{HasLo: true, HasHi: true, Lo: elemInt.Lo, Hi: elemInt.Hi}
 		}
 	case *sema.EntityType:
+		// A field of the entity's own type is left unbound: nothing is assumed about it.
+		if v.bindingEnts[t] {
+			return
+		}
+		if v.bindingEnts == nil {
+			v.bindingEnts = map[*sema.EntityType]bool{}
+		}
+		v.bindingEnts[t] = true
+		defer delete(v.bindingEnts, t)
 		for _, f := range t.Fields {
 			fPath := name + "." + f.Name
 			v.bindVarType(env, fPath, f.Type)
