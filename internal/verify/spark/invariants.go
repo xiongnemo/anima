@@ -134,14 +134,35 @@ func (v *verifier) isVariantConstructor(call *ast.CallExpr) bool {
 
 // copyEntityFacts gives the entity under to what is known of the one under from.
 func (e *symEnv) copyEntityFacts(from, to string) {
+	under := func(k string) (string, bool) {
+		if strings.HasPrefix(k, from+".") {
+			return to + k[len(from):], true
+		}
+		return "", false
+	}
 	for k, t := range e.intTerms {
-		if len(k) > len(from) && k[:len(from)+1] == from+"." {
-			e.intTerms[to+k[len(from):]] = t
+		if nk, ok := under(k); ok {
+			e.intTerms[nk] = t
 		}
 	}
 	for k, b := range e.boolTerms {
-		if len(k) > len(from) && k[:len(from)+1] == from+"." {
-			e.boolTerms[to+k[len(from):]] = b
+		if nk, ok := under(k); ok {
+			e.boolTerms[nk] = b
+		}
+	}
+	for k, t := range e.listLens {
+		if nk, ok := under(k); ok {
+			e.listLens[nk] = t
+		}
+	}
+	for k, iv := range e.listElems {
+		if nk, ok := under(k); ok {
+			e.listElems[nk] = iv
+		}
+	}
+	for k, si := range e.sumInfos {
+		if nk, ok := under(k); ok {
+			e.sumInfos[nk] = si
 		}
 	}
 }
