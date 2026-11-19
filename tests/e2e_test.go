@@ -531,6 +531,60 @@ def main() -> int:
     return 0
 `
 
+// A variable that a fork branch gives another list or map holds it after the
+// join on both backends: also when the new list holds what the old one held,
+// and when a later branch did not touch the variable.
+func TestE2EForkJoinKeepsReboundContainersParity(t *testing.T) {
+	runOnBothBackends(t, "fork_equal_list", forkEqualListSrc, "[7] [1] 5\n5\n")
+	runOnBothBackends(t, "fork_other_list", forkOtherListSrc, "[2, 3] {\"b\": 2} 5\n5\n")
+}
+
+const forkEqualListSrc = `workflow Tally(n: int) -> int:
+    verify: sound
+    start -> work:
+        xs = [1]
+        ys = xs
+        k = 0
+    fork work:
+        branch a:
+            xs = [1]
+        branch b:
+            k = 5
+    join j
+    step finish after j -> done:
+        xs[0] = 7
+        print(xs, ys, k)
+        return k
+
+def main() -> int:
+    r = run_workflow Tally(1)
+    print(r)
+    return 0
+`
+
+const forkOtherListSrc = `workflow Tally(n: int) -> int:
+    verify: sound
+    start -> work:
+        xs = [1]
+        m: map[str, int] = {"a": 1}
+        k = 0
+    fork work:
+        branch a:
+            xs = [2, 3]
+            m = {"b": 2}
+        branch b:
+            k = 5
+    join j
+    step finish after j -> done:
+        print(xs, m, k)
+        return k
+
+def main() -> int:
+    r = run_workflow Tally(1)
+    print(r)
+    return 0
+`
+
 // Both backends write a value the same way, with map entries and entity
 // fields in the order of their keys, and have the same pipeline stages.
 func TestE2EPrintedValuesParity(t *testing.T) {
