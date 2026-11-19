@@ -2452,10 +2452,14 @@ func (v *verifier) evalEquality(e *ast.BinaryExpr, env *symEnv) (smt.BoolExpr, b
 	isBool := func(t sema.Type) bool { return t != nil && t.Kind() == sema.KindBool }
 	var eq smt.BoolExpr
 	switch {
-	case (isBool(lt) || !known(lt)) && (isBool(rt) || !known(rt)) && (isBool(lt) || isBool(rt)):
+	case isBool(lt) && isBool(rt):
 		l := v.evalBoolWithPrefix(e.Left, env, "")
 		r := v.evalBoolWithPrefix(e.Right, env, "")
 		eq = smt.And(smt.Implies(l, r), smt.Implies(r, l))
+	case isBool(lt) || isBool(rt):
+		// The other side has no type (a lambda parameter): it may hold
+		// something that is not a boolean and equal to none.
+		eq = smt.BoolVar{Name: env.freshVar("bool")}
 	case (known(lt) && !isScalar(lt)) || (known(rt) && !isScalar(rt)):
 		eq = smt.BoolVar{Name: env.freshVar("bool")}
 	default:
