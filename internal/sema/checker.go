@@ -894,7 +894,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			}
 		}
 		if mt, ok := lty.(*MapType); ok {
-			if !isAssignable(mt.Key, ity) {
+			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
 				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
 			}
 			if !isAssignable(mt.Val, vty) {
@@ -1238,7 +1238,8 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
 	case *ast.MapLit:
-		var kt, vt Type = StrType{}, UnknownType{}
+		// The key type of `{}` is whatever it is first used with.
+		var kt, vt Type = UnknownType{}, UnknownType{}
 		for _, ent := range e.Entries {
 			k, err := c.checkExpr(ent.Key, sc)
 			if err != nil {

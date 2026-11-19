@@ -189,3 +189,32 @@ func TestSemaRejectsCompositeMapKeys(t *testing.T) {
 		}
 	}
 }
+
+// `{}` takes its key type from its use; a composite key stays rejected.
+func TestSemaEmptyMapLiteralKeyType(t *testing.T) {
+	ok := `
+def f() -> int:
+    a: map[int, int[0..9]] = {}
+    a[1] = 2
+    b: map[bool, int[0..9]] = {}
+    b[True] = 3
+    c = {}
+    c["k"] = 4
+    return 0
+`
+	prog, err := parser.Parse("ok.anm", ok)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err != nil {
+		t.Errorf("int, bool and str keys into an empty map should be accepted, got %v", err)
+	}
+	bad := "def f() -> int:\n    c = {}\n    c[[1]] = 4\n    return 0\n"
+	prog, err = parser.Parse("bad.anm", bad)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "map key expects") {
+		t.Errorf("expected a map key error, got %v", err)
+	}
+}
