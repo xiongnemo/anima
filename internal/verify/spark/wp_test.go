@@ -3421,6 +3421,8 @@ def one() -> list[int]:
 		"a field assigned by a name":  "def f(mut b: Bag) -> int:\n    c = b\n    if len(b.items) > 3:\n        c.items = [1]\n        return b.items[3]\n    return 0\n",
 		"a field assigned by a call":  "def f(mut b: Bag) -> int:\n    if len(b.items) > 3:\n        z = shrink(mut b)\n        return b.items[3]\n    return 0\n",
 		"a field assigned in a loop":  "def f(mut b: Bag, n: int) -> int:\n    if len(b.items) > 3:\n        for i in 0..n:\n            b.items = [1]\n        return b.items[3]\n    return 0\n",
+		"a string field assigned":     "def f(mut b: Bag) -> str:\n    b.name = \"ab\"\n    return b.name[2]\n",
+		"a string field by a name":    "def f() -> str:\n    b = Bag(items=[1, 2], name=\"ab\")\n    d = b\n    d.name = \"a\"\n    return b.name[1]\n",
 		"a field of a kept entity":    "def f() -> str:\n    b = Bag(items=[1, 2], name=\"ab\")\n    d = keep(b)\n    if len(d.name) > 1:\n        b.name = \"a\"\n        return d.name[1]\n    return \"\"\n",
 		"a string assigned in an if":  "def f(c: bool) -> str:\n    s = \"hello\"\n    if c:\n        s = \"a\"\n    return s[4]\n",
 		"a string assigned in a loop": "def f(xs: list[int]) -> str:\n    s = \"hello\"\n    for x in xs:\n        s = \"a\"\n    return s[4]\n",
@@ -3471,6 +3473,14 @@ def g(mut b: Bag, mut ys: list[int], zs: list[int[0..9]], i: int) -> int:
     s = "hello"
     u = s
     print(s[0], u[4], "abc"[2], [1, 2][1])
+    # A string field is as long as the value it is given.
+    b.name = "ab"
+    print(b.name[1])
+    q = b with {name: "xyz"}
+    print(q.name[2])
+    if len(o.name) > 1:
+        b.name = o.name
+        print(b.name[1])
     # The list a name was given keeps its length when the field gets another.
     old = b.items
     if len(old) > 3:

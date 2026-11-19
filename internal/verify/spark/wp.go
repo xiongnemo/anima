@@ -1113,8 +1113,13 @@ func (v *verifier) setField(path string, value ast.Expr, term smt.LinearTerm, en
 		env.unbind(path)
 		env.boolTerms[path] = v.evalBool(value, env, scope)
 	default:
+		// A string is as long as the value it is given.
+		lt, known := v.lenOfValue(value, env)
 		env.unbind(path)
 		env.intTerms[path] = term
+		if known {
+			env.listLens[path] = lt
+		}
 	}
 }
 
