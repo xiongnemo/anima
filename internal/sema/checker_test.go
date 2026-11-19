@@ -278,6 +278,7 @@ func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
 	for name, body := range map[string]string{
 		"writes to an empty map": "    m = {}\n    m[1] = 1\n    m[\"1\"] = 2\n",
 		"literal":                "    m = {1: 1, \"1\": 2}\n",
+		"map inside a list":      "    maps = [{}]\n    m = maps[0]\n    m[\"1\"] = 1\n    m[1] = 2\n",
 	} {
 		prog, err := parser.Parse("mixed.anm", "def f() -> int:\n"+body+"    return 0\n")
 		if err != nil {

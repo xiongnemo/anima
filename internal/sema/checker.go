@@ -806,23 +806,22 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if err != nil {
 			return err
 		}
+		// The literal `{}` fits every map type: a declared one, or the one
+		// the variable already has. On its own it has str keys.
+		lit, _ := s.Value.(*ast.MapLit)
+		emptyMap := lit != nil && len(lit.Entries) == 0
 		if s.TypeAnno != nil {
 			annoTy, err := c.resolveTypeExpr(s.TypeAnno)
 			if err != nil {
 				return err
 			}
-			if !isAssignable(annoTy, valTy) {
+			if !isAssignable(annoTy, valTy) && !(emptyMap && annoTy.Kind() == KindMap) {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s)", s.Span, valTy, s.Name, annoTy)
 			}
 			valTy = annoTy
-		} else if mt, ok := valTy.(*MapType); ok && mt.Key.Kind() == KindUnknown {
-			// `{}` does not say what its keys are. A variable that is
-			// already a map keeps its type; a new one gets str keys, and
-			// other key types are declared: `m: map[int, V] = {}`.
+		} else if emptyMap {
 			if prev, found := sc.lookup(s.Name); found && prev.ty != nil && prev.ty.Kind() == KindMap {
 				valTy = prev.ty
-			} else {
-				valTy = &MapType{Key: StrType{}, Val: mt.Val, Cap: mt.Cap, HasCap: mt.HasCap}
 			}
 		}
 		if c.curFuncInfo != nil {
@@ -1247,9 +1246,8 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
 	case *ast.MapLit:
-		// The key type of `{}` is whatever it is first used with.
-		var kt, vt Type = UnknownType{}, UnknownType{}
-		for _, ent := range e.Entries {
+		var kt, vt Type = StrType{}, UnknownType{}
+		for i, ent := range e.Entries {
 			k, err := c.checkExpr(ent.Key, sc)
 			if err != nil {
 				return nil, err
@@ -1258,7 +1256,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			if !isAssignable(kt, k) {
+			if i > 0 && !isAssignable(kt, k) {
 				return nil, fmt.Errorf("%s: map keys must have one type, got %s and %s", e.Span, kt, k)
 			}
 			kt = k
