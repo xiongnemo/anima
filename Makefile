@@ -7,7 +7,8 @@ vet:
 	go vet ./...
 
 test: vet
-	go test -v -race ./...
+	go test -v -race -short ./...
+	go test -v ./internal/verify/smt
 
 clean:
 	rm -f anima *.anbc

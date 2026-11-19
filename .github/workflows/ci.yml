@@ -18,10 +18,10 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: "Install C11 & OpenSSL toolchain (zero external Z3)"
+      - name: "Install C11 & OpenSSL toolchain, plus Z3 as a test-only oracle"
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev
+          sudo apt-get install -y build-essential libssl-dev z3
 
       - name: Go vet
         run: go vet ./...
@@ -30,7 +30,10 @@ jobs:
         run: CGO_ENABLED=0 go build -o ./anima ./cmd/anima
 
       - name: Run full test suite with race detector
-        run: go test -v -race ./...
+        run: go test -v -race -short ./...
+
+      - name: AnimaSMT property tests and Z3 differential test
+        run: ANIMA_REQUIRE_Z3=1 go test -v ./internal/verify/smt
 
       - name: CLI smoke & Native ELF parity across all examples
         run: |
