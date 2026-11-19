@@ -171,3 +171,13 @@ func (v *verifier) matchIsTotal(subj ast.Expr, arms []matchArmDesc) bool {
 	}
 	return false
 }
+
+// sortedKeys lists the keys of m in a fixed order.
+func sortedKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}

@@ -71,12 +71,25 @@ func (v *verifier) proveEntityValue(e ast.Expr, env *symEnv, scope string) {
 	if !ok || !hasInvariants(et, nil) || v.entityHolds(e) {
 		return
 	}
+	if me, ok := e.(*ast.MatchExpr); ok {
+		// The value is that of one arm, in the state that arm runs in.
+		for _, arm := range me.Arms {
+			armEnv := env.clone()
+			v.assumePattern(arm.Pattern, me.Subject, armEnv, scope)
+			if arm.Guard != nil {
+				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
+			}
+			v.proveEntityValue(arm.Value, armEnv, scope)
+		}
+		return
+	}
 	path, isPath := mutArgPath(e)
 	label := path
 	if !isPath {
 		// A value with no name: work it out as an assignment would.
 		path, label = entityProbe, "value"
 		probe := env.clone()
+		v.effectsDone = true
 		v.assignSymbolic(path, e, probe, scope, e.GetSpan())
 		env = probe
 	}

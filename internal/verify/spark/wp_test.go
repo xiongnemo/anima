@@ -1479,3 +1479,58 @@ func TestSPARKEntityInvariantWhereAnEntityIsHandedOn(t *testing.T) {
 		}
 	}
 }
+
+// Replacing an entity-valued field, in a statement or in a loop, replaces
+// what was known about the entity inside it.
+func TestSPARKReplacedEntityFieldForgetsItsOldContents(t *testing.T) {
+	prelude := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+`
+	stale := map[string]string{
+		"copy with a new field":     "    b.inner.x = 1\n    c = b with {inner: P(x=0)}\n    a = c.inner\n    return 10 / a.x",
+		"field assigned":            "    b.inner.x = 1\n    b.inner = P(x=0)\n    a = b.inner\n    return 10 / a.x",
+		"nested field in a for":     "    b.inner.x = 1\n    for i in [0]:\n        b.inner.x = 0\n    a = b.inner\n    return 10 / a.x",
+		"nested field in a while":   "    b.inner.x = 1\n    i: int = 0\n    while i < 1:\n        invariant: i >= 0\n        decreases: 1 - i\n        b.inner.x = 0\n        i += 1\n    a = b.inner\n    return 10 / a.x",
+		"entity assigned in a loop": "    p = P(x=1)\n    for i in [0]:\n        p = P(x=0)\n    return 10 / p.x",
+	}
+	for name, body := range stale {
+		src := prelude + "\ndef f(mut b: Holder) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	ok := prelude + "\ndef f(mut b: Holder) -> int:\n    b.inner = P(x=2)\n    a = b.inner\n    return 10 / a.x\n"
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("the new contents are known, failed VCs: %v", failed)
+	}
+}
+
+// The entity a match expression yields is checked arm by arm.
+func TestSPARKEntityInvariantOfMatchExpression(t *testing.T) {
+	valid := invariantPrelude + `
+def choose(flag: bool) -> A:
+    return match flag:
+        True -> A(x=1, y=1)
+        False -> A(x=2, y=2)
+`
+	if failed := failedVCs(verifySrc(t, valid)); len(failed) != 0 {
+		t.Errorf("arms that construct valid entities: expected every VC proved, failed VCs: %v", failed)
+	}
+	broken := invariantPrelude + `
+def choose(flag: bool) -> A:
+    b = A(x=5, y=5)
+    b.x = 6
+    return match flag:
+        True -> A(x=1, y=1)
+        False -> b
+`
+	failed := strings.Join(failedVCs(verifySrc(t, broken)), "\n")
+	if !strings.Contains(failed, "entity_b_invariant_1") {
+		t.Errorf("an arm that yields a broken entity: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
+	}
+}

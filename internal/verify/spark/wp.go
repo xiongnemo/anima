@@ -284,6 +284,9 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// effectsDone tells the next assignSymbolic that the right-hand side
+	// has been checked and its effects applied already.
+	effectsDone bool
 	// lambdaDepth counts the lambda bodies being checked.
 	lambdaDepth int
 	// noInvariants makes bindVarType bind an entity without assuming its invariants.
@@ -779,7 +782,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			}
 		}
 		if path != "" {
-			env.intTerms[path] = rhsTerm
+			// Nothing known about the old value of the field, or of what
+			// was inside it, is true of the new one.
+			v.setField(path, s.Value, rhsTerm, env, scope, s.Span)
 		}
 
 	case *ast.IfStmt:
@@ -950,6 +955,23 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 	}
 }
 
+// setField makes the field at path hold value, whose integer reading is
+// term. An entity or list is assigned as a variable would be, so that what
+// was known under the old value is gone.
+func (v *verifier) setField(path string, value ast.Expr, term smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
+	switch v.info.ExprTypes[value].(type) {
+	case *sema.EntityType, *sema.ListType:
+		v.effectsDone = true
+		v.assignSymbolic(path, value, env, scope, span)
+	case sema.BoolType:
+		env.unbind(path)
+		env.boolTerms[path] = v.evalBool(value, env, scope)
+	default:
+		env.unbind(path)
+		env.intTerms[path] = term
+	}
+}
+
 // isConstructorCall reports whether e builds a new entity.
 func (v *verifier) isConstructorCall(e ast.Expr) bool {
 	call, ok := e.(*ast.CallExpr)
@@ -961,10 +983,13 @@ func (v *verifier) isConstructorCall(e ast.Expr) bool {
 }
 
 func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
-	if me, ok := rhs.(*ast.MatchExpr); ok {
-		v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, span)
+	if !v.effectsDone {
+		if me, ok := rhs.(*ast.MatchExpr); ok {
+			v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, span)
+		}
+		v.evalSideEffects(rhs, env, scope)
 	}
-	v.evalSideEffects(rhs, env, scope)
+	v.effectsDone = false
 
 	// Propagate pipe list lengths & element intervals
 	if pe, ok := rhs.(*ast.PipeExpr); ok {
@@ -1007,10 +1032,11 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			}
 			if isWith {
 				for _, f := range with.Fields {
+					env.unbind(name + "." + f.Name)
 					if t := v.tryEvalInt(f.Value, env); t != nil {
-						env.intTerms[name+"."+f.Name] = *t
+						v.setField(name+"."+f.Name, f.Value, *t, env, scope, span)
 					} else {
-						delete(env.intTerms, name+"."+f.Name)
+						v.setField(name+"."+f.Name, f.Value, smt.Var(env.freshVar("field")), env, scope, span)
 					}
 				}
 			}
@@ -1614,6 +1640,25 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 		delete(env.listLens, name)
 		delete(env.listElems, name)
 		delete(env.sumInfos, name)
+		// An entity that is assigned as a whole: everything inside it.
+		for _, k := range sortedKeys(env.intTerms) {
+			if strings.HasPrefix(k, name+".") {
+				t := smt.Var(env.freshVar(k))
+				env.intTerms[k] = t
+				env.assume(smt.FitsInt64(t))
+			}
+		}
+		for _, k := range sortedKeys(env.boolTerms) {
+			if strings.HasPrefix(k, name+".") {
+				env.boolTerms[k] = smt.BoolVar{Name: env.freshVar(k)}
+			}
+		}
+		for _, k := range sortedKeys(env.listLens) {
+			if strings.HasPrefix(k, name+".") {
+				delete(env.listLens, k)
+				delete(env.listElems, k)
+			}
+		}
 	}
 	// What the statements pass as mut may change on every pass too.
 	v.havocMutArgs(stmts, env)
@@ -2368,15 +2413,8 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 	}
 	// path names what an assignment target denotes in a symEnv: `x` or `obj.field`.
 	path := func(e ast.Expr) string {
-		switch t := e.(type) {
-		case *ast.Ident:
-			return t.Name
-		case *ast.FieldExpr:
-			if obj, ok := t.Object.(*ast.Ident); ok {
-				return obj.Name + "." + t.Field
-			}
-		}
-		return ""
+		p, _ := mutArgPath(e)
+		return p
 	}
 	var walk func([]ast.Stmt)
 	walk = func(ss []ast.Stmt) {
