@@ -2,12 +2,12 @@ package spark
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
 	"github.com/xiongnemo/anima/internal/verify/smt"
-	"reflect"
 )
 
 type VCStatus string
@@ -604,7 +604,9 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			hasElse = true
 			continue
 		}
+		v.checkMutCalls([]ast.Expr{br.Guard}, scope, cn.Span)
 		v.checkArith(br.Guard, env, scope)
+		v.evalSideEffects(br.Guard, env, scope)
 		g := v.evalBool(br.Guard, env, scope)
 		guards = append(guards, g)
 	}
@@ -637,6 +639,11 @@ func (v *verifier) execBlock(stmts []ast.Stmt, env *symEnv, scope string) bool {
 }
 
 func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
+	groups := stmtExprGroups(stmt)
+	for _, g := range groups {
+		v.checkMutCalls(g, scope, stmt.GetSpan())
+	}
+	v.havocLambdaMutArgs(groups, env)
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
 		v.checkArith(s.Value, env, scope)
@@ -665,9 +672,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		// The target is evaluated too (`xs[10 / n] += 1`).
 		v.checkArith(s.Target, env, scope)
 		if ix, ok := s.Target.(*ast.IndexExpr); ok {
+			v.evalSideEffects(ix.List, env, scope)
 			v.evalSideEffects(ix.Index, env, scope)
+		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
+			v.evalSideEffects(fe.Object, env, scope)
 		}
 		v.checkArith(s.Value, env, scope)
+		v.evalSideEffects(s.Value, env, scope)
 		if _, isInt := v.info.ExprTypes[s.Target].(*sema.IntType); isInt {
 			v.proveFitsInt64(rhsAst, env, scope)
 		}
@@ -686,6 +697,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 
 	case *ast.IndexAssignStmt:
+		v.checkArith(s.List, env, scope)
+		v.evalSideEffects(s.List, env, scope)
 		v.checkArith(s.Index, env, scope)
 		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
@@ -694,9 +707,12 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	case *ast.CallStmt:
 		if s.Call != nil {
 			v.checkArith(s.Call, env, scope)
+			v.evalSideEffects(s.Call, env, scope)
 		}
 
 	case *ast.FieldAssignStmt:
+		v.checkArith(s.Object, env, scope)
+		v.evalSideEffects(s.Object, env, scope)
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		path := ""
@@ -729,6 +745,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 		for _, br := range s.Branches {
 			v.checkArith(br.Cond, curEnv, scope)
+			v.evalSideEffects(br.Cond, curEnv, scope)
 			cond := v.evalBool(br.Cond, curEnv, scope)
 			thenEnv := curEnv.clone()
 			thenEnv.assume(cond)
@@ -812,12 +829,18 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.MatchStmt:
 		v.checkArith(s.Subject, env, scope)
+		v.evalSideEffects(s.Subject, env, scope)
 		v.verifyMatchExhaustive(s.Subject, extractMatchArmsFromStmt(s.Arms), env, scope, s.Span)
+		// A guard may run, and change what it is given as mut, without its arm.
+		for _, arm := range s.Arms {
+			v.havocMutArgs(arm.Guard, env)
+		}
 		for _, arm := range s.Arms {
 			armEnv := env.clone()
 			v.assumePattern(arm.Pattern, s.Subject, armEnv, scope)
 			if arm.Guard != nil {
 				v.checkArith(arm.Guard, armEnv, scope)
+				v.evalSideEffects(arm.Guard, armEnv, scope)
 				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
 			}
 			v.execBlock(arm.Body, armEnv, scope)
@@ -831,10 +854,12 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		// 2. Inductive step from an arbitrary iteration: only the invariants are known there.
 		stepEnv := env.clone()
 		v.havocAssigned(s.Body, stepEnv)
+		v.havocMutArgs(s.Cond, stepEnv)
 		for _, inv := range s.Invariants {
 			stepEnv.assume(v.evalBool(inv, stepEnv, scope))
 		}
 		v.checkArith(s.Cond, stepEnv, scope)
+		v.evalSideEffects(s.Cond, stepEnv, scope)
 		exitEnv := stepEnv.clone()
 		stepEnv.assume(v.evalBool(s.Cond, stepEnv, scope))
 
@@ -858,6 +883,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.ForStmt:
 		v.checkArith(s.Iterable, env, scope)
+		v.evalSideEffects(s.Iterable, env, scope)
 		var lo, hi *smt.LinearTerm
 		if r, ok := s.Iterable.(*ast.RangeExpr); ok {
 			l, h := v.evalInt(r.Lo, env, scope, true), v.evalInt(r.Hi, env, scope, true)
@@ -1090,16 +1116,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		case "and", "implies", "or":
 			// The right operand only runs when the left one does not decide the result.
 			rEnv := env.clone()
-			// A call with a mut argument in either operand may change what
-			// the left operand tested, so the guard is not kept then.
-			if !passesMutArg(reflect.ValueOf(e)) {
-				left := v.evalBool(e.Left, rEnv, scope)
-				if e.Op == "or" {
-					left = smt.Not(left)
-				}
-				rEnv.assume(left)
+			left := v.evalBool(e.Left, rEnv, scope)
+			if e.Op == "or" {
+				left = smt.Not(left)
 			}
+			rEnv.assume(left)
 			v.evalSideEffects(e.Right, rEnv, scope)
+			// Whether the right operand ran is not known afterwards.
+			v.havocMutArgs(e.Right, env)
 			return
 		}
 		v.evalSideEffects(e.Right, env, scope)
@@ -1118,9 +1142,22 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 		}
 	case *ast.CallExpr:
+		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
 		}
+		// A callee the kernel has no contract for may do anything to its
+		// mut arguments.
+		modelled := false
+		defer func() {
+			if !modelled {
+				for _, a := range e.Args {
+					if a.Mut {
+						v.havocMutArg(a, env)
+					}
+				}
+			}
+		}()
 		// Check entity constructor bounds & invariants
 		if id, ok := e.Callee.(*ast.Ident); ok {
 			if et, isEnt := v.info.Entities[id.Name]; isEnt {
@@ -1203,19 +1240,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				for idx, req := range fi.Decl.Requires {
 					v.prove(fmt.Sprintf("%s.call_%s_requires_%d", scope, id.Name, idx+1), scope, e.Span, callEnv, v.evalBool(req, callEnv, scope))
 				}
-				// The callee may change what it receives as mut: after the call
-				// the caller only knows the declared type of such an argument.
-				for _, a := range e.Args {
-					if path, ok := mutArgPath(a.Value); a.Mut && ok {
-						v.bindFresh(env, path, v.info.ExprTypes[a.Value])
-					}
-				}
 				// Check recursive termination if calling self!
 				if id.Name == v.curFuncName && v.curDecExpr != nil {
 					v.prove(scope+".rec_decreases_nonneg", scope, e.Span, env, smt.Ge(v.curDecTerm, smt.Const(0)))
 					recDec := v.evalInt(v.curDecExpr, callEnv, scope, false)
 					v.prove(scope+".rec_decreases_strict", scope, e.Span, callEnv, smt.Lt(recDec, v.curDecTerm))
 				}
+				v.applyCallEffects(fi, e.Args, env, callEnv, scope)
+				modelled = true
 			}
 		}
 		// Check ByteView bounds (std.bytes)
@@ -1250,44 +1282,77 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	case *ast.PipeExpr:
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
-	}
-}
-
-// mutArgPath is the variable path a mut argument names: s, or box.inner.
-func mutArgPath(e ast.Expr) (string, bool) {
-	switch x := e.(type) {
-	case *ast.Ident:
-		return x.Name, true
+	case *ast.RunWorkflowExpr:
+		for _, a := range e.Args {
+			v.evalSideEffects(a.Value, env, scope)
+		}
+		for _, a := range e.Args {
+			if a.Mut {
+				v.havocMutArg(a, env)
+			}
+		}
+	case *ast.MatchExpr:
+		v.evalSideEffects(e.Subject, env, scope)
+		// Only one arm runs, and a guard may run without its arm.
+		for _, arm := range e.Arms {
+			v.havocMutArgs(arm.Guard, env)
+		}
+		for _, arm := range e.Arms {
+			armEnv := env.clone()
+			v.assumePattern(arm.Pattern, e.Subject, armEnv, scope)
+			if arm.Guard != nil {
+				v.evalSideEffects(arm.Guard, armEnv, scope)
+				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
+			}
+			v.evalSideEffects(arm.Value, armEnv, scope)
+		}
+		for _, arm := range e.Arms {
+			v.havocMutArgs(arm.Value, env)
+		}
+	case *ast.LambdaExpr:
+		// The body is checked where its parameters are known: checkLambdaArith.
+	case *ast.UnaryExpr:
+		v.evalSideEffects(e.Expr, env, scope)
 	case *ast.FieldExpr:
-		base, ok := mutArgPath(x.Object)
-		return base + "." + x.Field, ok
-	}
-	return "", false
-}
-
-// passesMutArg reports whether the syntax tree under n holds a call argument
-// marked mut. It walks by reflection so that no node kind can be missed.
-func passesMutArg(n reflect.Value) bool {
-	switch n.Kind() {
-	case reflect.Interface, reflect.Pointer:
-		return !n.IsNil() && passesMutArg(n.Elem())
-	case reflect.Slice:
-		for i := 0; i < n.Len(); i++ {
-			if passesMutArg(n.Index(i)) {
-				return true
+		v.evalSideEffects(e.Object, env, scope)
+	case *ast.TryExpr:
+		v.evalSideEffects(e.Inner, env, scope)
+	case *ast.RangeExpr:
+		v.evalSideEffects(e.Lo, env, scope)
+		v.evalSideEffects(e.Hi, env, scope)
+	case *ast.ListLit:
+		for _, el := range e.Elems {
+			v.evalSideEffects(el, env, scope)
+		}
+	case *ast.MapLit:
+		for _, en := range e.Entries {
+			v.evalSideEffects(en.Key, env, scope)
+			v.evalSideEffects(en.Value, env, scope)
+		}
+	case *ast.FStrExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				v.evalSideEffects(part.Expr, env, scope)
 			}
 		}
-	case reflect.Struct:
-		if arg, ok := n.Interface().(ast.CallArg); ok && arg.Mut {
-			return true
+	case *ast.WithExpr:
+		v.evalSideEffects(e.Base, env, scope)
+		for _, f := range e.Fields {
+			v.evalSideEffects(f.Value, env, scope)
 		}
-		for i := 0; i < n.NumField(); i++ {
-			if passesMutArg(n.Field(i)) {
-				return true
-			}
+	case *ast.IntLit, *ast.BoolLit, *ast.StrLit, *ast.NoneLit, *ast.Ident, *ast.OldExpr:
+	default:
+		// An expression kind with no case of its own: its parts are checked
+		// from a copy of the state, and what they pass as mut is forgotten.
+		rv := reflect.ValueOf(expr)
+		if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+			visitExprs(rv.Elem(), func(sub ast.Expr) bool {
+				v.evalSideEffects(sub, env.clone(), scope)
+				return false
+			})
 		}
+		v.havocMutArgs(expr, env)
 	}
-	return false
 }
 
 // checkArith proves that no integer operation the runtime performs while evaluating expr
@@ -1471,6 +1536,8 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 		delete(env.listElems, name)
 		delete(env.sumInfos, name)
 	}
+	// What the statements pass as mut may change on every pass too.
+	v.havocMutArgs(stmts, env)
 }
 
 // stageName is the combinator a call names, written bare (`sum`) or through the std.fp
@@ -1541,6 +1608,7 @@ func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope strin
 		bodyEnv.intTerms[lam.Params[0]] = v.evalInt(args[0].Value, env, scope, false).Add(partial)
 		bodyEnv.intTerms[lam.Params[1]] = x
 		v.checkArith(lam.Body, bodyEnv, scope)
+		v.evalSideEffects(lam.Body, bodyEnv, scope)
 		return
 	}
 
@@ -1582,6 +1650,7 @@ func (v *verifier) checkLambdaArith(lam *ast.LambdaExpr, types []sema.Type, body
 		v.strParams[p] = isStr
 	}
 	v.checkArith(lam.Body, bodyEnv, scope)
+	v.evalSideEffects(lam.Body, bodyEnv, scope)
 	v.strParams = saved
 }
 

@@ -100,6 +100,9 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_overflow.anm", "SPARK FAILED"},
 		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
+		{"../tests/bugs/spark_mut_call_stale_fact.anm", "div_nonzero"},
+		{"../tests/bugs/spark_requires_in_condition.anm", "call_half_requires_1"},
+		{"../tests/bugs/spark_mut_call_not_alone.anm", "mut_call_alone"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
@@ -309,6 +312,7 @@ entity Box:
     v: int[0..10]
 
 def reset(mut box: Box) -> int[1..1]:
+    ensures: box.v == 0
     box.v = 0
     print("reset")
     return 1
@@ -343,10 +347,11 @@ def main() -> int:
         0 -> 3
         _ -> 4
     print(f"box={box.v} xs1={xs[1]}")
-    box.v += reset(mut box)
+    one = reset(mut box)
+    box.v += one
     print(f"compound={box.v}")
     box.v = 5
-    total = box.v + reset(mut box)
+    total = 5 + reset(mut box)
     print(f"total={total} after={box.v}")
     ch = conc.Channel[int[0..9]](cap=capacity(mut box))
     ch.close()
@@ -374,7 +379,7 @@ or-rhs-try
 guarded err=or-rhs-try
 box=7 xs1=4
 reset
-compound=8
+compound=1
 reset
 total=6 after=0
 capacity
