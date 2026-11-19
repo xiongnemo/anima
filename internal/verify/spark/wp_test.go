@@ -8,6 +8,19 @@ import (
 	"github.com/xiongnemo/anima/internal/sema"
 )
 
+// semaErr is the error sema gives for src, "" if it accepts it.
+func semaErr(t *testing.T, src string) string {
+	t.Helper()
+	prog, err := parser.Parse("test.anm", src)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if _, err := sema.Check(prog); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 func verifySrc(t *testing.T, src string) *Report {
 	t.Helper()
 	prog, err := parser.Parse("test.anm", src)
@@ -1831,8 +1844,9 @@ def f(n: P1) -> int:
     m.x = 0
     return 10 / n.x
 `
-	if failed := strings.Join(failedVCs(verifySrc(t, stale)), "\n"); !strings.Contains(failed, "div_nonzero") {
-		t.Errorf("a name rebound to another entity type: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	// Sema no longer lets a name be rebound to another entity type.
+	if err := semaErr(t, stale); !strings.Contains(err, "a variable keeps its sort") {
+		t.Errorf("a name rebound to another entity type: expected sema to refuse it, got %q", err)
 	}
 	valid := invariantPrelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    c = b\n    b.x = 0\n    return use(c)\n"
 	if failed := failedVCs(verifySrc(t, valid)); len(failed) != 0 {
@@ -2198,18 +2212,6 @@ def f() -> int:
 		}
 	}
 	rejected := map[string]string{
-		"index_bounds": `
-def f(c: bool) -> int:
-    x = {"a": 1}
-    k = len(x)
-    if c:
-        x = [1, 2]
-    else:
-        x = [3, 4]
-    m: map[str, int] = {}
-    m["a"] = 1
-    return x[5]
-`,
 		"div_nonzero": `
 entity T:
     tbl: map[str, int]
@@ -2240,6 +2242,18 @@ def f() -> int:
 		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, vc) {
 			t.Errorf("expected a failed %s, failed VCs:\n%s", vc, failed)
 		}
+	}
+	// A map variable given a list is refused by sema.
+	rebound := `
+def f(c: bool) -> int:
+    x = {"a": 1}
+    k = len(x)
+    if c:
+        x = [1, 2]
+    return x[5]
+`
+	if err := semaErr(t, rebound); !strings.Contains(err, "a variable keeps its sort") {
+		t.Errorf("a map variable given a list: expected sema to refuse it, got %q", err)
 	}
 }
 

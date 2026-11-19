@@ -1,0 +1,17 @@
+# The loop variable writes ys, which then holds a list[int], while the call
+# after the loop still read it as a list[int[1..9]].
+def first(xs: list[int[1..9]]) -> int:
+    requires: len(xs) > 0
+    return 10 / xs[0]
+
+def f(xss: list[list[int]]) -> int:
+    ys: list[int[1..9]] = [5]
+    for ys in xss:
+        print(ys)
+    if len(ys) > 0:
+        return first(ys)
+    return 0
+
+def main() -> int:
+    print(f([[0]]))
+    return 0

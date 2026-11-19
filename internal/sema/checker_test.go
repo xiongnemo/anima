@@ -830,3 +830,76 @@ def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Op
 		}
 	}
 }
+
+// A variable holds values of one sort from its first assignment on: a later
+// assignment, a loop variable and a name in a pattern all write it, and what
+// it holds after an if, a loop or a match is read with one type.
+func TestSemaVariableKeepsItsSort(t *testing.T) {
+	prelude := `
+type Shape = Circle(r: int) | Dot
+
+entity Box:
+    n: int[0..9]
+
+entity Crate:
+    n: int[0..9]
+
+def f(c: bool, n: int, s: str, xs: list[int], ss: list[str], o: Option[int], os: Option[str], xss: list[list[int]], ol: Option[list[int]], bx: Box) -> int:
+`
+	const sort = "a variable keeps its sort"
+	const elems = "a variable keeps the type of its elements"
+	cases := []struct {
+		body string
+		want string // "" when the body is accepted
+	}{
+		// Assignments.
+		{"x = 5\n    x = 7\n    if c:\n        x = n\n    return x", ""},
+		{"t = \"a\"\n    t = s\n    b = True\n    b = not c\n    return 0", ""},
+		{"q = None\n    q = Some(3)\n    q = o\n    return 0", ""},
+		{"e = bx\n    e = Box(n=1)\n    return 0", ""},
+		// What a closure hands back has no type, so nothing is known of r.
+		{"g = (v) => v\n    r = g(1)\n    r = \"s\"\n    return 0", ""},
+		{"x = 5\n    x = \"five\"\n    return 0", sort},
+		{"x = 0\n    if c:\n        x = True\n    return 0", sort},
+		{"x = 7\n    if c:\n        x = Some(3)\n    return 0", sort},
+		{"ys = [0]\n    if c:\n        ys = 5\n    return 0", sort},
+		{"ys = [0]\n    ys = {\"a\": 1}\n    return 0", sort},
+		{"e = bx\n    e = Crate(n=1)\n    return 0", sort},
+		{"q = Some(1)\n    q = Dot\n    return 0", elems},
+		{"k = n\n    while k > 0:\n        k = \"s\"\n    return 0", sort},
+		// A parameter is a variable too.
+		{"n = 3\n    return n", ""},
+		{"n = \"s\"\n    return 0", sort},
+		{"s = 1\n    return 0", sort},
+		// Loop variables.
+		{"for i in 0..3:\n        print(i)\n    for i in xs:\n        print(i)\n    return 0", ""},
+		{"x = 5\n    for x in xs:\n        print(x)\n    return x", ""},
+		{"x = 5\n    for x in ss:\n        print(x)\n    return 0", sort},
+		{"x = \"a\"\n    for x in 0..3:\n        print(x)\n    return 0", sort},
+		{"ys: list[int] = [5]\n    for ys in xss:\n        print(ys)\n    return 0", ""},
+		{"ys: list[int[1..9]] = [5]\n    for ys in xss:\n        print(ys)\n    return 0", elems},
+		// Names in patterns.
+		{"v = 4\n    match o:\n        Some(v) -> print(v)\n        None -> print(0)\n    return v", ""},
+		{"v = 4\n    match os:\n        Some(v) -> print(v)\n        None -> print(0)\n    return 0", sort},
+		{"v = \"a\"\n    r = match o:\n        Some(v) -> v\n        None -> 0\n    return r", sort},
+		{"ys: list[int[1..9]] = [5]\n    match ol:\n        Some(ys) -> print(ys)\n        None -> print(0)\n    return 0", elems},
+		{"q: Option[int[1..9]] = Some(1)\n    match Some(o):\n        Some(q) -> print(q)\n        None -> print(0)\n    return 0", elems},
+		// A lambda parameter is a variable of its own.
+		{"x = \"a\"\n    ys = xs |> filter(x => x > 0)\n    return len(x)", ""},
+		// A name first assigned in a branch ends with the branch.
+		{"if c:\n        x = 5\n        print(x)\n    else:\n        x = \"s\"\n        print(x)\n    return 0", ""},
+	}
+	for _, tc := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+tc.body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+}

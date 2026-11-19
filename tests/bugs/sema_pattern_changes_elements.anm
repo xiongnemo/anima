@@ -1,0 +1,14 @@
+# The arm that matches writes q, which then holds an Option[int], while the
+# second match still read it as an Option[int[1..9]].
+def g(o: Option[int[1..9]], p: Option[Option[int]]) -> int:
+    q = o
+    match p:
+        Some(q) -> print(q)
+        None -> print("none")
+    match q:
+        Some(v) -> return 10 / v
+        None -> return 0
+
+def main() -> int:
+    print(g(Some(1), Some(Some(0))))
+    return 0
