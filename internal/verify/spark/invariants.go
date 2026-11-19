@@ -467,7 +467,9 @@ func (v *verifier) checkWrittenObject(obj ast.Expr, field string, scope string, 
 // container, so its invariants must hold again right away. They held before
 // the write, as they do for everything a container holds; of the object's
 // other fields nothing else is known.
-func (v *verifier) proveElementWrite(obj ast.Expr, field string, term smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
+// value is the expression written, nil for a compound assignment, whose
+// result is term.
+func (v *verifier) proveElementWrite(obj ast.Expr, field string, value ast.Expr, term smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
 	et, ok := v.info.ExprTypes[obj].(*sema.EntityType)
 	if !ok || !hasInvariants(et, nil) {
 		return
@@ -477,6 +479,17 @@ func (v *verifier) proveElementWrite(obj ast.Expr, field string, term smt.Linear
 	v.noInvariants = false
 	v.bindFresh(probe, entityProbe, et)
 	v.noInvariants = saved
-	probe.intTerms[entityProbe+"."+field] = term
+	// The written field is what the write makes it; what it was, and what
+	// was inside it, is gone.
+	path := entityProbe + "." + field
+	probe.unbind(path)
+	switch et.FieldMap[field].(type) {
+	case *sema.IntType:
+		probe.intTerms[path] = term
+	case sema.BoolType:
+		if value != nil {
+			probe.boolTerms[path] = v.evalBool(value, env, scope)
+		}
+	}
 	v.proveInvariants(et, entityProbe, "element", span, probe, scope, map[*sema.EntityType]bool{})
 }

@@ -821,7 +821,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				env.intTerms[path] = rhsTerm
 				v.proveSharedEntity(fe.Object, env, scope, s.Span)
 			} else {
-				v.proveElementWrite(fe.Object, fe.Field, rhsTerm, env, scope, s.Span)
+				v.proveElementWrite(fe.Object, fe.Field, nil, rhsTerm, env, scope, s.Span)
 			}
 			v.forgetAliases(fe.Object, env)
 		}
@@ -854,7 +854,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 		rhsTerm := v.evalInt(s.Value, env, scope, true)
 		if path == "" {
-			v.proveElementWrite(s.Object, s.Field, rhsTerm, env, scope, s.Span)
+			v.proveElementWrite(s.Object, s.Field, s.Value, rhsTerm, env, scope, s.Span)
 		}
 		if objTy, ok := v.info.ExprTypes[s.Object]; ok {
 			if et, ok := objTy.(*sema.EntityType); ok {
