@@ -1047,6 +1047,18 @@ def g(mut s: S) -> int:
     y = setk(mut s, 0)
     return 10 / (s.n - 3)
 `, "def:g.div_nonzero"},
+		{"ensures about a local of the callee", `
+def zero(mut s: S) -> int[0..0]:
+    ensures: s.n == k
+    k = 0
+    s.n = k
+    return 0
+
+def g(mut s: S) -> int:
+    k = 5
+    y = zero(mut s)
+    return 10 / s.n
+`, "def:g.div_nonzero"},
 		{"lambda kept for later", `
 def g(mut s: S) -> int:
     later = () => clear(mut s)

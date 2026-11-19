@@ -480,7 +480,7 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 	}
 	var facts []smt.BoolExpr
 	for _, ens := range fi.Decl.Ensures {
-		if ensuresUsable(ens, post, false) {
+		if ensuresUsable(ens, post, params, false) {
 			facts = append(facts, v.evalBool(ens, post, scope))
 		}
 	}
@@ -492,11 +492,14 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 }
 
 // ensuresUsable reports whether an ensures clause can be assumed at a call
-// site: it is built from comparisons and arithmetic over integers that post
-// has a value for. Anything else (the result, a call, an unbound name) is
-// left out, which only makes the caller know less.
-func ensuresUsable(e ast.Expr, post *symEnv, old bool) bool {
+// site: it is built from comparisons and arithmetic over integer parameters
+// that post has a value for. Anything else (the result, a call, a local of
+// the callee) is left out, which only makes the caller know less.
+func ensuresUsable(e ast.Expr, post *symEnv, params map[string]bool, old bool) bool {
 	bound := func(path string) bool {
+		if !params[strings.SplitN(path, ".", 2)[0]] {
+			return false
+		}
 		if old {
 			_, ok := post.entryTerms[path]
 			return ok
@@ -515,14 +518,14 @@ func ensuresUsable(e ast.Expr, post *symEnv, old bool) bool {
 	case *ast.OldExpr:
 		switch x.Inner.(type) {
 		case *ast.Ident, *ast.FieldExpr:
-			return !old && ensuresUsable(x.Inner, post, true)
+			return !old && ensuresUsable(x.Inner, post, params, true)
 		}
 	case *ast.UnaryExpr:
-		return ensuresUsable(x.Expr, post, old)
+		return ensuresUsable(x.Expr, post, params, old)
 	case *ast.BinaryExpr:
 		switch x.Op {
 		case "and", "or", "implies", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*":
-			return ensuresUsable(x.Left, post, old) && ensuresUsable(x.Right, post, old)
+			return ensuresUsable(x.Left, post, params, old) && ensuresUsable(x.Right, post, params, old)
 		}
 	}
 	return false
