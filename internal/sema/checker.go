@@ -498,6 +498,9 @@ func (c *checker) resolveTypeExpr(te ast.TypeExpr) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
+			if !isMapKeyType(kt) {
+				return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", t.Span, kt)
+			}
 			return &MapType{Key: kt, Val: vt, Cap: t.Cap, HasCap: t.HasCap}, nil
 		case "Channel", "conc.Channel":
 			if len(t.Args) != 1 {
@@ -1252,6 +1255,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 				vt = unifyTypes(vt, v)
 			}
 		}
+		if !isMapKeyType(kt) {
+			return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", e.Span, kt)
+		}
 		return &MapType{Key: kt, Val: vt}, nil
 
 	case *ast.WithExpr:
@@ -1943,6 +1949,16 @@ func rootVarPath(e ast.Expr) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// isMapKeyType reports whether keys of type t are told apart by the runtimes,
+// which compare keys by their printed form.
+func isMapKeyType(t Type) bool {
+	switch t.Kind() {
+	case KindStr, KindInt, KindBool, KindUnknown:
+		return true
+	}
+	return false
 }
 
 // elementOwnerPath returns the variable path of the list or map that the

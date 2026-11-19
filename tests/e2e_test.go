@@ -101,6 +101,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
+		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},

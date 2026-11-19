@@ -172,3 +172,20 @@ workflow Tally(mut m: map[str, int[0..9]]) -> bool:
 		t.Errorf("expected a concurrent write race error, got %v", err)
 	}
 }
+
+// The runtimes compare map keys by their printed form, which only tells
+// str, int and bool keys apart.
+func TestSemaRejectsCompositeMapKeys(t *testing.T) {
+	for name, src := range map[string]string{
+		"annotation": "def f(m: map[list[int], int]) -> int:\n    return 0\n",
+		"literal":    "def f() -> int:\n    m = {[1]: 1, [2]: 2}\n    return 0\n",
+	} {
+		prog, err := parser.Parse("key.anm", src)
+		if err != nil {
+			t.Fatalf("%s: parse error: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "a map key must be") {
+			t.Errorf("%s: expected a map key error, got %v", name, err)
+		}
+	}
+}
