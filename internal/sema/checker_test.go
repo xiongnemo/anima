@@ -758,3 +758,75 @@ def g() -> int:
 		}
 	}
 }
+
+// A comparison and a logical operator take operands they are for: both
+// backends run them on anything, and do not agree on the answer.
+func TestSemaOperandsOfComparisons(t *testing.T) {
+	prelude := `
+type Shape = Circle(r: int) | Dot
+type Other = Left(n: int) | Right
+
+entity Box:
+    n: int[0..9]
+
+entity Crate:
+    n: int[0..9]
+
+def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Option[int], bx: Box, cr: Crate, ot: Other) -> int:
+`
+	cases := []struct {
+		body string
+		want string // "" when the body is accepted
+	}{
+		// == and != between values of one sort.
+		{"if n == 1:\n        return 1\n    return 0", ""},
+		{"if s == \"a\" and b == True:\n        return 1\n    return 0", ""},
+		{"if xs == [1, 2] or m != m:\n        return 1\n    return 0", ""},
+		{"if o == None or o == Some(1) or sh == Dot or sh != Circle(2):\n        return 1\n    return 0", ""},
+		{"c = bx\n    if c == bx:\n        return 1\n    return 0", ""},
+		{"g = (v) => v == 1\n    return 0", ""},
+		{"if xs == 5:\n        return 1\n    return 0", "they are never equal"},
+		{"if n == \"5\":\n        return 1\n    return 0", "they are never equal"},
+		{"if b == 1:\n        return 1\n    return 0", "they are never equal"},
+		{"if s != n:\n        return 1\n    return 0", "they are never equal"},
+		{"if bx == cr:\n        return 1\n    return 0", "they are never equal"},
+		{"if sh == ot:\n        return 1\n    return 0", "they are never equal"},
+		{"if sh == Right:\n        return 1\n    return 0", "they are never equal"},
+		{"if xs == m:\n        return 1\n    return 0", "they are never equal"},
+		// < and its kin order integers, or strings.
+		{"if n < 2 and s <= \"b\" and n >= len(xs):\n        return 1\n    return 0", ""},
+		{"g = (v) => v > n\n    return 0", ""},
+		{"if s < n:\n        return 1\n    return 0", "both sides must be integers, or both strings"},
+		{"if xs < xs:\n        return 1\n    return 0", "orders integers or strings"},
+		{"if b > False:\n        return 1\n    return 0", "orders integers or strings"},
+		{"if bx >= bx:\n        return 1\n    return 0", "orders integers or strings"},
+		// and, or, implies and not take booleans.
+		{"if b and not b or (n > 0 implies b):\n        return 1\n    return 0", ""},
+		{"g = (v) => v and b\n    return 0", ""},
+		{"if n and b:\n        return 1\n    return 0", "and needs a bool"},
+		{"if b or xs:\n        return 1\n    return 0", "or needs a bool"},
+		{"if s implies b:\n        return 1\n    return 0", "implies needs a bool"},
+		{"if not n:\n        return 1\n    return 0", "not needs a bool"},
+		// in looks into a list, a map or a string.
+		{"if n in xs or s in m or s in \"abc\" or 1 in [1, 2]:\n        return 1\n    return 0", ""},
+		{"g = (v) => v in xs\n    return 0", ""},
+		{"if n in 5:\n        return 1\n    return 0", "in looks into a list, a map or a string"},
+		{"if n in bx:\n        return 1\n    return 0", "in looks into a list, a map or a string"},
+		{"if s in xs:\n        return 1\n    return 0", "in looks for"},
+		{"if n in m:\n        return 1\n    return 0", "in looks for"},
+		{"if n in s:\n        return 1\n    return 0", "in looks for"},
+	}
+	for _, tc := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+tc.body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+}

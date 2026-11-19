@@ -1068,14 +1068,16 @@ func (g *cgen) emitExprInline(expr ast.Expr) string {
 			return fmt.Sprintf("v_bool(v_eq(%s, %s))", l, r)
 		case "!=":
 			return fmt.Sprintf("v_bool(!v_eq(%s, %s))", l, r)
-		case "<":
-			return fmt.Sprintf("v_bool((%s).u.i < (%s).u.i)", l, r)
-		case "<=":
-			return fmt.Sprintf("v_bool((%s).u.i <= (%s).u.i)", l, r)
-		case ">":
-			return fmt.Sprintf("v_bool((%s).u.i > (%s).u.i)", l, r)
-		case ">=":
-			return fmt.Sprintf("v_bool((%s).u.i >= (%s).u.i)", l, r)
+		case "<", "<=", ">", ">=":
+			// Integers are compared in place; v_order also orders strings.
+			if lt, ok := g.info.ExprTypes[e.Left]; ok && lt.Kind() == sema.KindInt {
+				if rt, ok := g.info.ExprTypes[e.Right]; ok && rt.Kind() == sema.KindInt {
+					return fmt.Sprintf("v_bool((%s).u.i %s (%s).u.i)", l, e.Op, r)
+				}
+			}
+			return fmt.Sprintf("v_bool(v_order(%s, %s) %s 0)", l, r, e.Op)
+		case "in":
+			return fmt.Sprintf("v_bool(v_in(%s, %s))", l, r)
 		}
 	case *ast.ListLit:
 		if len(e.Elems) == 0 {

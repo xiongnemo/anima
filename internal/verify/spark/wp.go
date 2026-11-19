@@ -1033,6 +1033,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if rTerm := v.tryEvalInt(s.Value, env); rTerm != nil {
 				env.intTerms["result"] = *rTerm
 			}
+			// A boolean result is read as a boolean by an ensures clause
+			// that compares it (evalEquality).
+			if t := v.info.ExprTypes[s.Value]; t != nil && t.Kind() == sema.KindBool {
+				env.boolTerms["result"] = v.evalBool(s.Value, env, scope)
+			} else {
+				delete(env.boolTerms, "result")
+			}
 		}
 		v.checkFunctionExitContracts(env, scope, s.Span, s.Value)
 		return true
@@ -2408,6 +2415,11 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		case "implies":
 			return smt.Implies(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
 		case "==", "!=", "<", "<=", ">", ">=":
+			if e.Op == "==" || e.Op == "!=" {
+				if b, ok := v.evalEquality(e, env); ok {
+					return b
+				}
+			}
 			l := v.evalInt(e.Left, env, "", false)
 			r := v.evalInt(e.Right, env, "", false)
 			switch e.Op {
@@ -2427,6 +2439,36 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		}
 	}
 	return smt.BoolVar{Name: env.freshVar("bool")}
+}
+
+// evalEquality is `==` and `!=` between values that are not integers. Two
+// booleans are equal when one holds exactly when the other does. A list, a
+// map, an entity and a variant change in place or hold what does, so that
+// nothing said of two names once stays true: the comparison is unknown.
+// Integers and strings are left to the caller.
+func (v *verifier) evalEquality(e *ast.BinaryExpr, env *symEnv) (smt.BoolExpr, bool) {
+	lt, rt := v.info.ExprTypes[e.Left], v.info.ExprTypes[e.Right]
+	known := func(t sema.Type) bool { return t != nil && t.Kind() != sema.KindUnknown }
+	isBool := func(t sema.Type) bool { return t != nil && t.Kind() == sema.KindBool }
+	var eq smt.BoolExpr
+	switch {
+	case isBool(lt) && isBool(rt):
+		l := v.evalBoolWithPrefix(e.Left, env, "")
+		r := v.evalBoolWithPrefix(e.Right, env, "")
+		eq = smt.And(smt.Implies(l, r), smt.Implies(r, l))
+	case isBool(lt) || isBool(rt):
+		// The other side has no type (a lambda parameter): it may hold
+		// something that is not a boolean and equal to none.
+		eq = smt.BoolVar{Name: env.freshVar("bool")}
+	case (known(lt) && !isScalar(lt)) || (known(rt) && !isScalar(rt)):
+		eq = smt.BoolVar{Name: env.freshVar("bool")}
+	default:
+		return nil, false
+	}
+	if e.Op == "!=" {
+		return smt.Not(eq), true
+	}
+	return eq, true
 }
 
 // ---------------------------------------------------------------------------
