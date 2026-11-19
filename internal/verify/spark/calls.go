@@ -512,7 +512,24 @@ func mentionsOutside(n reflect.Value, root string, owner ast.Expr) bool {
 		if id, ok := e.(*ast.Ident); ok && id.Name == root {
 			found = true
 		}
+		// A parameter of that name is another variable in a lambda's body,
+		// unless owner is in that body: then it is the one owner speaks of.
+		if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, root) {
+			return owner != nil && containsExpr(lam.Body, owner)
+		}
 		return true
+	})
+	return found
+}
+
+// containsExpr reports whether target is n or a part of it.
+func containsExpr(n ast.Expr, target ast.Expr) bool {
+	found := false
+	visitExprs(reflect.ValueOf(n), func(e ast.Expr) bool {
+		if e == target {
+			found = true
+		}
+		return !found
 	})
 	return found
 }

@@ -963,16 +963,17 @@ func TestSPARKMutCallAssumesEnsures(t *testing.T) {
 // the order of its reads and the call never decides a result.
 func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 	rejected := map[string]string{
-		"read beside the call":            "    y = s.n + five(mut s)\n    return 0",
-		"compound assignment":             "    s.n += five(mut s)\n    return 0",
-		"two calls":                       "    y = five(mut s) + five(mut s)\n    return 0",
-		"guard before the call":           "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
-		"field assignment":                "    s.n = five(mut s)\n    return 0",
-		"read inside a lambda":            "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
-		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
-		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
-		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
-		"a lambda's own parameter":        "    rows = [s]\n    ys = rows |> map(r => r.n + five(mut r))\n    return 0",
+		"read beside the call":             "    y = s.n + five(mut s)\n    return 0",
+		"compound assignment":              "    s.n += five(mut s)\n    return 0",
+		"two calls":                        "    y = five(mut s) + five(mut s)\n    return 0",
+		"guard before the call":            "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
+		"field assignment":                 "    s.n = five(mut s)\n    return 0",
+		"read inside a lambda":             "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
+		"guard changes the match subject":  "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
+		"condition of an if":               "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
+		"condition of a while":             "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"an element under a lambda's name": "    rows = [s]\n    ys = rows |> map(r => r.n != 0 and not clear(mut s) and 10 / r.n > 1)\n    return 0",
+		"a lambda's own parameter":         "    rows = [s]\n    ys = rows |> map(r => r.n + five(mut r))\n    return 0",
 		// The same entity under another name.
 		"read under another name":       "    t = s\n    if s.n == 0 or clear(mut t):\n        return 1\n    return 10 / s.n",
 		"another name beside the call":  "    t = s\n    y = s.n + five(mut t)\n    return 0",
@@ -995,6 +996,7 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		"two different variables":              "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
 		"another name, a statement of its own": "    t = s\n    y = five(mut t)\n    z = s.n + y\n    return 0",
 		"another name, an unrelated variable":  "    t = s\n    u = S(n=1)\n    y = u.n + five(mut t)\n    return 0",
+		"a lambda's parameter of that name":    "    ys = [five(mut s), len(xs |> map(s => s))]\n    return 0",
 		"another name, hidden by a lambda's":   "    t = s\n    ys = xs |> map(t => t + five(mut s))\n    return 0",
 	}
 	for name, body := range accepted {
@@ -1044,6 +1046,18 @@ def fail() -> Result[int, str]:
 
 def e(mut s: S) -> Result[int, str]:
     ensures: s.n == 5
+    s.n = 0
+    x = fail()?
+    s.n = 5
+    return Ok(1)
+`, "e.ensures_1"},
+		// A lambda's parameter called result is not the function's result.
+		{"early return through ?, a lambda's result", `
+def fail() -> Result[int, str]:
+    return Err("no")
+
+def e(mut s: S, xs: list[int]) -> Result[int, str]:
+    ensures: s.n == 5 or len(xs |> filter(result => result > 0)) > 99
     s.n = 0
     x = fail()?
     s.n = 5
