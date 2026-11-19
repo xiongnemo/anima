@@ -486,6 +486,89 @@ def main() -> int:
 
 // An arm that is not taken binds nothing: neither a pattern that fails
 // after one of its names was reached, nor one whose guard fails.
+// Both backends write a value the same way, with map entries and entity
+// fields in the order of their keys, and have the same pipeline stages.
+func TestE2EPrintedValuesParity(t *testing.T) {
+	runOnBothBackends(t, "printed_values", printedValuesSrc, "[1, 2, 3]\n[True, False]\n[a, b]\n{\"a\": 1, \"b\": 2}\nSome(1)\nNone\nOk(x)\nCircle(2)\nDot\nBox(n=1, tag=t)\n[Some(1), None]\n[[1], [2, 3]]\n[1, 2, 3] {\"a\": 1, \"b\": 2} Box(n=1, tag=t)\n[1, 2, 3]\nTrue\nFalse\nSome(2)\n[2, 3]\n[2, 4, 6]\n[1, 2]\n[3]\n6\n3\n[1, 1, 2, 2, 3, 3]\n3 2\n1 a True\n-5\n\n")
+	runOnBothBackends(t, "printed_edges", printedEdgesSrc, "\nPair(1, x) Zed\n[] [1, 2, 3] []\n[1, 2, 3] [] [1, 2, 3]\nNone False True\n[] False True None\n{}\n{\"Z\": 3, \"a\\nb\": 2, \"b\\\"q\": 1}\n{\"10\": x, \"9\": y}\nOuter(a=[1], z=Inner(k=1))\nOuter(a=[1], z=Inner(k=1)) Pair(2, y)\nTrue [2, 3]\n")
+}
+
+const printedValuesSrc = `type Shape = Circle(r: int) | Dot
+
+entity Box:
+    n: int[0..9]
+    tag: str
+
+def main() -> int:
+    xs = [1, 2, 3]
+    print(xs)
+    print([True, False])
+    print(["a", "b"])
+    m: map[str, int] = {"a": 1, "b": 2}
+    print(m)
+    print(Some(1))
+    print(None)
+    print(Ok("x"))
+    print(Circle(2))
+    print(Dot)
+    b = Box(n=1, tag="t")
+    print(b)
+    print([Some(1), None])
+    print([[1], [2, 3]])
+    print(f"{xs} {m} {b}")
+    print(str(xs))
+    print(xs |> any((v) => v > 1))
+    print(xs |> all((v) => v > 1))
+    print(xs |> find((v) => v > 1))
+    print(xs |> filter((v) => v > 1))
+    print(xs |> map((v) => v * 2))
+    print(xs |> take(2))
+    print(xs |> drop(2))
+    print(xs |> sum)
+    print(xs |> fold(0, (a, v) => v))
+    print(xs |> flat_map((v) => [v, v]))
+    print(len(xs), len(m))
+    print(1, "a", True)
+    print(-5)
+    print("")
+    return 0
+`
+
+const printedEdgesSrc = `type P = Pair(a: int, b: str) | Zed
+
+entity Inner:
+    k: int[0..9]
+
+entity Outer:
+    z: Inner
+    a: list[int]
+
+def main() -> int:
+    xs = [1, 2, 3]
+    print()
+    print(Pair(1, "x"), Zed)
+    print(xs |> take(0), xs |> take(9), xs |> take(-1))
+    print(xs |> drop(0), xs |> drop(9), xs |> drop(-1))
+    print(xs |> find((v) => v > 5), xs |> any((v) => v > 5), xs |> all((v) => v > 0))
+    es: list[int] = []
+    print(es, es |> any((v) => v > 0), es |> all((v) => v > 0), es |> find((v) => v > 0))
+    m: map[str, int] = {}
+    print(m)
+    m["b\"q"] = 1
+    m["a\nb"] = 2
+    m["Z"] = 3
+    print(m)
+    mi: map[int, str] = {10: "x", 9: "y"}
+    print(mi)
+    o = Outer(z=Inner(k=1), a=[1])
+    print(o)
+    p = Pair(2, "y")
+    print(f"{o} {p}")
+    g = (v) => v > 1
+    print(xs |> any(g), xs |> filter(g))
+    return 0
+`
+
 func TestE2EUntakenArmBindsNothing(t *testing.T) {
 	runOnBothBackends(t, "untaken_arm", untakenArmSrc, "2 2 2\n7\n5\n300\n7 5 300\n")
 }
