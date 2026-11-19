@@ -353,12 +353,11 @@ func hasFixedLen(t sema.Type) bool {
 	return false
 }
 
-// forgetMapLens drops every map length: a map may have been inserted into,
-// and maps are references, so which one is not known.
+// forgetMapLens makes every map length an unknown one: a map may have been
+// inserted into, and maps are references, so which one is not known.
 func (e *symEnv) forgetMapLens() {
-	for k := range e.mapLens {
-		delete(e.listLens, k)
-		delete(e.mapLens, k)
+	for _, k := range sortedKeys(e.mapLens) {
+		e.listLens[k] = e.freshLen(k)
 	}
 }
 
