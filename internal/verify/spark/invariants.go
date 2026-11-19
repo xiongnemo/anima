@@ -274,7 +274,10 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 		keeps := false
 		switch c := x.Callee.(type) {
 		case *ast.Ident:
-			if fi := v.info.Funcs[c.Name]; fi != nil {
+			if v.curLocals[c.Name] {
+				// A closure: it can hand back what it is given.
+				keeps = true
+			} else if fi := v.info.Funcs[c.Name]; fi != nil {
 				for _, a := range x.Args {
 					if v.mayKeepArgument(fi.Type.Params, fi.Type.Return, v.info.ExprTypes[a.Value]) {
 						stored(a.Value)
@@ -461,7 +464,8 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 		}
 	case *ast.CallExpr:
 		id, ok := x.Callee.(*ast.Ident)
-		if !ok {
+		if !ok || v.curLocals[id.Name] {
+			// A closure can hand back what it captured.
 			return false
 		}
 		if v.info.Entities[id.Name] != nil || v.isVariantConstructor(x) {
@@ -472,6 +476,31 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 	return false
 }
 
+// boundNames lists the names a function binds: its parameters and, in its
+// body, assigned variables, loop variables, lambda parameters and the
+// variables of patterns.
+func boundNames(params []sema.FuncParamInfo, body any) map[string]bool {
+	out := map[string]bool{}
+	for _, p := range params {
+		out[p.Name] = true
+	}
+	visitNodes(reflect.ValueOf(body), func(n any) {
+		switch x := n.(type) {
+		case *ast.LetAssignStmt:
+			out[x.Name] = true
+		case *ast.ForStmt:
+			out[x.Var] = true
+		case *ast.LambdaExpr:
+			for _, p := range x.Params {
+				out[p] = true
+			}
+		case *ast.VarPat:
+			out[x.Name] = true
+		}
+	})
+	return out
+}
+
 // sharedIn lists the variables that the code under node can make shared.
 func (v *verifier) sharedIn(node any) []string {
 	var out []string
@@ -480,10 +509,8 @@ func (v *verifier) sharedIn(node any) []string {
 			// A lambda's parameter is not the outer variable of that name.
 			inner := v.sharedIn(lam.Body)
 			// What the lambda yields ends up where its caller puts it.
-			if _, ok := v.info.ExprTypes[lam.Body].(*sema.EntityType); ok {
-				if p, ok := mutArgPath(lam.Body); ok {
-					inner = append(inner, pathRoot(p))
-				}
+			if mayHoldEntity(v.info.ExprTypes[lam.Body]) {
+				inner = append(inner, v.valueRoots(lam.Body)...)
 			}
 			for _, name := range inner {
 				if !slices.Contains(lam.Params, name) {

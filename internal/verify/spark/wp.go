@@ -373,9 +373,12 @@ type verifier struct {
 	info        *sema.ProgramInfo
 	report      *Report
 	curFuncName string
-	curDecExpr  ast.Expr
-	curDecTerm  smt.LinearTerm
-	curMutEnts  []struct {
+	// curLocals: the names the current function binds. A call of one of
+	// them calls a closure, not the function of that name.
+	curLocals  map[string]bool
+	curDecExpr ast.Expr
+	curDecTerm smt.LinearTerm
+	curMutEnts []struct {
 		varName string
 		ent     *sema.EntityType
 	}
@@ -638,6 +641,7 @@ func (v *verifier) verifyFunc(fn *ast.FuncDecl) {
 	v.curEnsures = fn.Ensures
 	v.curRetType = fi.Type.Return
 	v.curMutEnts = nil
+	v.curLocals = boundNames(fi.Type.Params, fn.Body)
 	v.checkParamsNotRebound(fi.Type.Params, fn.Body, scope, fn.Span)
 	v.checkReadonlyWrites(fi.Type.Params, fn.Body, scope)
 
@@ -697,6 +701,7 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 	v.curEnsures = nil
 	v.curRetType = wi.Return
 	v.curMutEnts = nil
+	v.curLocals = boundNames(wi.Params, wf.Nodes)
 	v.checkParamsNotRebound(wi.Params, wf.Nodes, scope, wf.Span)
 	v.checkReadonlyWrites(wi.Params, wf.Nodes, scope)
 
