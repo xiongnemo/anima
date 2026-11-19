@@ -140,6 +140,20 @@ func (e *symEnv) freshVar(prefix string) string {
 	return fmt.Sprintf("__%s_%d", prefix, e.freshID)
 }
 
+// unbind drops every binding of name, so a callee parameter cannot resolve to a caller variable of the same name.
+func (e *symEnv) unbind(name string) {
+	delete(e.intTerms, name)
+	delete(e.boolTerms, name)
+	delete(e.listLens, name)
+	delete(e.listElems, name)
+	delete(e.sumInfos, name)
+	for k := range e.intTerms {
+		if strings.HasPrefix(k, name+".") {
+			delete(e.intTerms, k)
+		}
+	}
+}
+
 func (e *symEnv) assume(b smt.BoolExpr) {
 	if b != nil {
 		e.pc = append(e.pc, b)
@@ -958,18 +972,39 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				for i, a := range e.Args {
 					if i < len(fi.Type.Params) {
 						p := fi.Type.Params[i]
-						if it, ok := p.Type.(*sema.IntType); ok && it.IsBounded {
-							valT := v.evalInt(a.Value, env, scope, true)
-							v.checkIntRange(valT, a.Value, env, it, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
+						callEnv.unbind(p.Name)
+						switch pt := p.Type.(type) {
+						case *sema.IntType:
+							valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
+							if pt.IsBounded {
+								v.checkIntRange(valT, a.Value, env, pt, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
+							}
 							callEnv.intTerms[p.Name] = valT
-						}
-						if et, ok := p.Type.(*sema.EntityType); ok {
+						case sema.BoolType:
+							callEnv.boolTerms[p.Name] = v.evalBool(a.Value, env, scope)
+						case *sema.ListType:
+							callEnv.listLens[p.Name] = smt.Var(callEnv.freshVar("arglen"))
 							if argID, ok := a.Value.(*ast.Ident); ok {
-								for _, f := range et.Fields {
-									if t, ok := env.intTerms[argID.Name+"."+f.Name]; ok {
-										callEnv.intTerms[p.Name+"."+f.Name] = t
+								if lt, ok := env.listLens[argID.Name]; ok {
+									callEnv.listLens[p.Name] = lt
+								}
+								if iv, ok := env.listElems[argID.Name]; ok {
+									callEnv.listElems[p.Name] = iv
+								}
+							}
+						case *sema.EntityType:
+							argID, _ := a.Value.(*ast.Ident)
+							for _, f := range pt.Fields {
+								if _, isInt := f.Type.(*sema.IntType); !isInt {
+									continue
+								}
+								t := smt.Var(callEnv.freshVar("argfield"))
+								if argID != nil {
+									if known, ok := env.intTerms[argID.Name+"."+f.Name]; ok {
+										t = known
 									}
 								}
+								callEnv.intTerms[p.Name+"."+f.Name] = t
 							}
 						}
 					}

@@ -1,6 +1,7 @@
 package spark
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xiongnemo/anima/internal/parser"
@@ -132,5 +133,108 @@ workflow BadChoice(x: int[0..100]):
 `)
 	if repChoice.OK() {
 		t.Fatalf("expected non-exclusive choice guard failure")
+	}
+}
+
+func failedVCs(rep *Report) []string {
+	var names []string
+	for _, vc := range rep.VCs {
+		if vc.Status != VCProved {
+			names = append(names, vc.Name)
+		}
+	}
+	return names
+}
+
+func TestSPARKCallRequiresUsesArgumentNotCallerVariable(t *testing.T) {
+	cases := []struct {
+		name     string
+		src      string
+		wantFail string
+	}{
+		{"int arg violates, caller has same-named int", `
+def idn(x: int) -> int:
+    requires: x >= 0
+    return x
+
+def main() -> int:
+    x = 5
+    y = 0 - 3
+    r = idn(y)
+    return 0
+`, "call_idn_requires_1"},
+		{"int literal satisfies", `
+def idn(x: int) -> int:
+    requires: x >= 0
+    return x
+
+def main() -> int:
+    r = idn(5)
+    return 0
+`, ""},
+		{"int arg satisfies, caller's same-named int would not", `
+def idn(x: int) -> int:
+    requires: x >= 0
+    return x
+
+def main() -> int:
+    x = 0 - 3
+    r = idn(7)
+    return 0
+`, ""},
+		{"bool arg violates, caller has same-named bool", `
+def need(flag: bool) -> int:
+    requires: flag
+    return 0
+
+def main() -> int:
+    flag = True
+    other = False
+    r = need(other)
+    return 0
+`, "call_need_requires_1"},
+		{"bool literal satisfies", `
+def need(flag: bool) -> int:
+    requires: flag
+    return 0
+
+def main() -> int:
+    r = need(True)
+    return 0
+`, ""},
+		{"entity arg violates, caller has same-named entity", `
+type Money = int[0..1000]
+
+entity Account:
+    balance: Money
+
+def spend(acc: Account) -> int:
+    requires: acc.balance >= 100
+    return 0
+
+def main() -> int:
+    acc = Account(balance=500)
+    poor = Account(balance=1)
+    r = spend(poor)
+    return 0
+`, "call_spend_requires_1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := verifySrc(t, tc.src)
+			failed := failedVCs(rep)
+			if tc.wantFail == "" {
+				if len(failed) != 0 {
+					t.Fatalf("expected all VCs proved, got: %v", rep.Errors())
+				}
+				return
+			}
+			for _, name := range failed {
+				if strings.HasSuffix(name, tc.wantFail) {
+					return
+				}
+			}
+			t.Fatalf("expected a failed VC ending in %q, failed VCs: %v", tc.wantFail, failed)
+		})
 	}
 }
