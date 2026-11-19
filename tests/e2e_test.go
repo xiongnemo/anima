@@ -129,6 +129,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
+		{"../tests/bugs/spark_match_nested_literal.anm", "match_exhaustive_adt"},
+		{"../tests/bugs/spark_match_str_no_default.anm", "match_exhaustive_default"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},
 		{"../tests/bugs/dining_philosophers_deadlock.anm", "DEADLOCK"},
@@ -428,6 +430,51 @@ def main() -> int:
     a = m["a"]
     b = m["b"]
     print(f"a={a} b={b} xs={xs[0]},{xs[1]}")
+    return 0
+`
+
+// A literal or range nested in a variant pattern must be compared, on both
+// backends, instead of matching every value of the variant.
+func TestE2ENestedPatternParity(t *testing.T) {
+	runOnBothBackends(t, "nested_patterns", nestedPatternSrc,
+		"zero small other 5 too big\nempty circle circle 2 flat rect 2x3 dot\nfive some 6 none\n")
+}
+
+const nestedPatternSrc = `type Shape = Circle(r: int[0..9]) | Rect(w: int[0..9], h: int[0..9]) | Dot
+
+def get(n: int[0..9]) -> Result[int, str]:
+    if n > 7:
+        return Err("big")
+    return Ok(n)
+
+def classify(n: int[0..9]) -> str:
+    match get(n):
+        Ok(0) -> return "zero"
+        Ok(1..3) -> return "small"
+        Ok(k) -> return f"other {k}"
+        Err("big") -> return "too big"
+        Err(e) -> return e
+    return "?"
+
+def area(s: Shape) -> str:
+    return match s:
+        Circle(0) -> "empty circle"
+        Circle(r) -> f"circle {r}"
+        Rect(w, 0) -> "flat"
+        Rect(w, h) -> f"rect {w}x{h}"
+        Dot -> "dot"
+
+def opt(o: Option[int]) -> str:
+    match o:
+        Some(5) -> return "five"
+        Some(x) -> return f"some {x}"
+        None -> return "none"
+    return "?"
+
+def main() -> int:
+    print(f"{classify(0)} {classify(2)} {classify(5)} {classify(9)}")
+    print(f"{area(Circle(r=0))} {area(Circle(r=2))} {area(Rect(w=2, h=0))} {area(Rect(w=2, h=3))} {area(Dot)}")
+    print(f"{opt(Some(5))} {opt(Some(6))} {opt(None)}")
     return 0
 `
 

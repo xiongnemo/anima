@@ -1,0 +1,6 @@
+# A match on a string cannot list every value: it needs a `_` arm.
+def dispatch(cmd: str) -> int:
+    match cmd:
+        "get" -> return 0
+        "set" -> return 1
+    return 2

@@ -1,0 +1,6 @@
+# Ok(0) matches only the value 0, so Ok(5) runs no arm.
+def classify(r: Result[int, str]) -> int:
+    match r:
+        Ok(0) -> return 0
+        Err(e) -> return 1
+    return 2

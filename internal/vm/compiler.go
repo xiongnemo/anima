@@ -811,20 +811,25 @@ func (f *fnCompiler) compilePatternCheck(pat ast.Pattern, subjSlot int, line int
 		f.emit(EncodeImm(OpLoadLocal, uint32(subjSlot)), line)
 		f.emit(EncodeImm(OpCheckVariant, f.root.addStrConst(p.Name)), line)
 		if len(p.Fields) > 0 {
-			jf := f.emitJump(OpJmpIfFalse, line)
+			// The pattern matches only if every field pattern matches too.
+			fails := []int{f.emitJump(OpJmpIfFalse, line)}
 			for i, sub := range p.Fields {
 				f.emit(EncodeImm(OpLoadLocal, uint32(subjSlot)), line)
 				f.emit(EncodeImm(OpExtractField, uint32(i)), line)
-				subSlot := f.declareLocal(fmt.Sprintf("__pat_%d_%d", line, i))
+				// A fresh slot per field: a nested variant pattern must not
+				// overwrite the value its parent is still reading from.
+				subSlot := f.declareLocal(fmt.Sprintf("__pat_%d", f.proto.NumLocals))
 				f.emit(EncodeImm(OpStoreLocal, uint32(subSlot)), line)
 				if err := f.compilePatternCheck(sub, subSlot, line); err != nil {
 					return err
 				}
-				f.emit(EncodeImm(OpPop, 0), line)
+				fails = append(fails, f.emitJump(OpJmpIfFalse, line))
 			}
 			f.emit(EncodeABC(OpPushBool, 1, 0), line)
 			endJ := f.emitJump(OpJmp, line)
-			f.patchJump(jf)
+			for _, jf := range fails {
+				f.patchJump(jf)
+			}
 			f.emit(EncodeABC(OpPushBool, 0, 0), line)
 			f.patchJump(endJ)
 		}

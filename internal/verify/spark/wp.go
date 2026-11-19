@@ -2459,6 +2459,17 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 	if subjTy == nil {
 		return
 	}
+	if _, unknown := subjTy.(sema.UnknownType); unknown {
+		// e.g. the result of a future: take the ADT from the variant patterns.
+		for _, arm := range arms {
+			if vp, ok := arm.pat.(*ast.VariantPat); ok {
+				if adt := v.info.Variants[vp.Name]; adt != nil {
+					subjTy = adt
+					break
+				}
+			}
+		}
+	}
 	switch t := subjTy.(type) {
 	case *sema.IntType:
 		st := v.evalInt(subj, env, scope, false)
@@ -2498,7 +2509,10 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 			case *ast.WildcardPat, *ast.VarPat:
 				hasWildcard = true
 			case *ast.VariantPat:
-				covered[p.Name] = true
+				// `Ok(0)` covers only some values of the variant.
+				if variantPatIrrefutable(p) {
+					covered[p.Name] = true
+				}
 			}
 		}
 		if hasWildcard {
@@ -2540,7 +2554,34 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 		} else {
 			v.record(scope+".match_exhaustive_bool", scope, span, "bool", VCFailed, "non-exhaustive bool match", nil)
 		}
+	default:
+		// Strings and other values cannot be enumerated: some arm must
+		// accept everything, or the match could silently run no arm.
+		for _, arm := range arms {
+			if arm.guard != nil {
+				continue
+			}
+			switch arm.pat.(type) {
+			case *ast.WildcardPat, *ast.VarPat:
+				v.record(scope+".match_exhaustive_default", scope, span, subjTy.String(), VCProved, "catch-all arm covers every value", nil)
+				return
+			}
+		}
+		v.record(scope+".match_exhaustive_default", scope, span, subjTy.String(), VCFailed,
+			fmt.Sprintf("non-exhaustive match on %s: add a `_` arm", subjTy), nil)
 	}
+}
+
+// variantPatIrrefutable reports whether p matches every value of its variant.
+func variantPatIrrefutable(p *ast.VariantPat) bool {
+	for _, f := range p.Fields {
+		switch f.(type) {
+		case *ast.WildcardPat, *ast.VarPat:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (v *verifier) patternCond(pat ast.Pattern, st smt.LinearTerm, env *symEnv) smt.BoolExpr {

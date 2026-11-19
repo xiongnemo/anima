@@ -906,7 +906,15 @@ func (g *cgen) emitPatternCond(pat ast.Pattern, subj string) string {
 	case *ast.StrPat:
 		return fmt.Sprintf("(%s.kind == VAL_STR && strcmp(%s.u.s, %s) == 0)", subj, subj, cEscapeStr(p.Value))
 	case *ast.VariantPat:
-		return fmt.Sprintf("v_is_variant(%s, %s)", subj, cEscapeStr(p.Name))
+		cond := fmt.Sprintf("v_is_variant(%s, %s)", subj, cEscapeStr(p.Name))
+		for i, sub := range p.Fields {
+			switch sub.(type) {
+			case *ast.WildcardPat, *ast.VarPat:
+				continue
+			}
+			cond += " && " + g.emitPatternCond(sub, fmt.Sprintf("v_variant_field(%s, %d)", subj, i))
+		}
+		return "(" + cond + ")"
 	}
 	return "true"
 }
@@ -918,10 +926,7 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 		g.line("%s = %s;", dst, subj)
 	case *ast.VariantPat:
 		for i, sub := range p.Fields {
-			if vp, ok := sub.(*ast.VarPat); ok {
-				dst := g.ensureVarDeclared(vp.Name)
-				g.line("%s = v_variant_field(%s, %d);", dst, subj, i)
-			}
+			g.emitPatternBinds(sub, fmt.Sprintf("v_variant_field(%s, %d)", subj, i))
 		}
 	}
 }

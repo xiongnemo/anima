@@ -2704,3 +2704,64 @@ def wait(t: int) -> int:
 		}
 	}
 }
+
+// A literal nested in a variant pattern matches only that value, so it does
+// not cover the variant; a match on a string needs a catch-all arm.
+func TestSPARKMatchExhaustivenessWithNestedAndStringPatterns(t *testing.T) {
+	cases := []struct {
+		name, src, wantFailed string
+	}{
+		{"nested literal does not cover Ok", `
+def f(r: Result[int, str]) -> int:
+    match r:
+        Ok(0) -> return 0
+        Err(e) -> return 1
+    return 2
+`, "match_exhaustive_adt"},
+		{"nested literal plus a binding arm covers Ok", `
+def f(r: Result[int, str]) -> int:
+    match r:
+        Ok(0) -> return 0
+        Ok(n) -> return 1
+        Err(e) -> return 2
+    return 3
+`, ""},
+		{"nested literal in Some", `
+def f(o: Option[int]) -> int:
+    match o:
+        Some(5) -> return 0
+        None -> return 1
+    return 2
+`, "match_exhaustive_adt"},
+		{"string match without a catch-all", `
+def f(cmd: str) -> int:
+    match cmd:
+        "get" -> return 0
+        "set" -> return 1
+    return 2
+`, "match_exhaustive_default"},
+		{"string match with a catch-all", `
+def f(cmd: str) -> int:
+    match cmd:
+        "get" -> return 0
+        _ -> return 1
+    return 2
+`, ""},
+		{"guarded catch-all is not a catch-all", `
+def f(cmd: str, n: int) -> int:
+    match cmd:
+        "get" -> return 0
+        other if n > 0 -> return 1
+    return 2
+`, "match_exhaustive_default"},
+	}
+	for _, c := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n")
+		switch {
+		case c.wantFailed == "" && failed != "":
+			t.Errorf("%s: expected every VC to be proved, failed:\n%s", c.name, failed)
+		case c.wantFailed != "" && !strings.Contains(failed, c.wantFailed):
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", c.name, c.wantFailed, failed)
+		}
+	}
+}
