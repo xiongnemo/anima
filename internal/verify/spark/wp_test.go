@@ -783,22 +783,436 @@ def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
 	}
 }
 
-// A guard is not trusted across a call that may change what it tested.
-func TestSPARKGuardNotKeptAcrossMutCall(t *testing.T) {
-	src := `
+const mutCallPrelude = `
 entity S:
     n: int[0..9]
 
 def clear(mut s: S) -> bool:
+    ensures: s.n == 0
     s.n = 0
     return True
 
-def f(mut s: S) -> bool:
-    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1
-    return ok
+def five(mut s: S) -> int[0..0]:
+    ensures: s.n == 5
+    s.n = 5
+    return 0
+
+def bump(mut s: S) -> int[0..0]:
+    requires: s.n < 9
+    ensures: s.n == old(s.n) + 1
+    s.n = s.n + 1
+    return 0
+
+def idn(x: int) -> int:
+    requires: x >= 0
+    return x
 `
-	failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
-	if !strings.Contains(failed, "div_nonzero") {
-		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
+
+// mutCallVCs verifies body as the body of a function that owns a mutable S.
+func mutCallVCs(t *testing.T, body string) string {
+	t.Helper()
+	src := mutCallPrelude + "\ndef f(mut s: S, a: bool, xs: list[int[0..9]]) -> int:\n" + body + "\n"
+	return strings.Join(failedVCs(verifySrc(t, src)), "\n")
+}
+
+// A call may change its mut arguments, so nothing the caller knew about them
+// before the call is kept, wherever in the statement the call is written.
+func TestSPARKMutCallForgetsCallerFacts(t *testing.T) {
+	cases := map[string]string{
+		"statement": `
+    if s.n != 0:
+        y = clear(mut s)
+        return 10 / s.n
+    return 0`,
+		"short-circuit operand": `
+    if s.n != 0:
+        ok = a and clear(mut s)
+        return 10 / s.n
+    return 0`,
+		"if condition": `
+    if s.n != 0:
+        if clear(mut s):
+            return 10 / s.n
+    return 0`,
+		"elif condition": `
+    if s.n != 0:
+        if a:
+            return 1
+        elif clear(mut s):
+            return 2
+        return 10 / s.n
+    return 0`,
+		"while condition": `
+    i: int = 0
+    if s.n != 0:
+        while clear(mut s) and i < 3:
+            invariant: i >= 0
+            i += 1
+        return 10 / s.n
+    return 0`,
+		"match expression arm": `
+    if s.n != 0:
+        y = match len(xs):
+            0 -> clear(mut s)
+            _ -> False
+        return 10 / s.n
+    return 0`,
+		"match guard": `
+    if s.n != 0:
+        match len(xs):
+            0 if clear(mut s) -> return 1
+            _ -> return 10 / s.n
+    return 0`,
+		"lambda": `
+    if s.n != 0:
+        ys = xs |> map(x => clear(mut s))
+        return 10 / s.n
+    return 0`,
+		"earlier pass of a while body": `
+    i: int = 0
+    if s.n != 0:
+        while i < 3:
+            invariant: i >= 0
+            decreases: 3 - i
+            x = 10 / s.n
+            y = clear(mut s)
+            i += 1
+    return 0`,
+		"earlier pass of a for body": `
+    if s.n != 0:
+        for x in xs:
+            z = 10 / s.n
+            y = clear(mut s)
+    return 0`,
+		"function value": `
+    g = clear
+    if s.n != 0:
+        y = g(mut s)
+        return 10 / s.n
+    return 0`,
+		"old value in ensures": `
+    if s.n == 3:
+        y = bump(mut s)
+        return 10 / (s.n - 4)
+    return 0`,
+	}
+	for name, body := range cases {
+		if failed := mutCallVCs(t, body); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// After the call the caller knows the argument's type and what the callee
+// ensures about it.
+func TestSPARKMutCallAssumesEnsures(t *testing.T) {
+	cases := map[string]string{
+		"ensures": `
+    y = five(mut s)
+    return 10 / s.n`,
+		"ensures with old": `
+    if s.n == 3:
+        y = bump(mut s)
+        return 10 / (s.n - 3)
+    return 0`,
+		"calls in sequence": `
+    y = five(mut s)
+    z = bump(mut s)
+    return 10 / (s.n - 5)`,
+		"declared range": `
+    y = clear(mut s)
+    return 10 / (s.n + 1)`,
+		"condition": `
+    if not clear(mut s):
+        return 1
+    return 10 / (s.n + 1)`,
+		"another variable keeps its facts": `
+    if s.n != 0:
+        t = S(n=1)
+        y = clear(mut t)
+        return 10 / s.n
+    return 0`,
+	}
+	for name, body := range cases {
+		if failed := mutCallVCs(t, body); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+	// A requires is proved from what the previous calls ensure.
+	failed := mutCallVCs(t, `
+    y = five(mut s)
+    z = bump(mut s)
+    z = bump(mut s)
+    z = bump(mut s)
+    z = bump(mut s)
+    z = bump(mut s)
+    return 0`)
+	if strings.Count(failed, "call_bump_requires_1") != 1 {
+		t.Errorf("expected only the fifth bump to fail its requires, failed VCs:\n%s", failed)
+	}
+}
+
+// A variable passed as mut is used nowhere else in the same statement, so
+// the order of its reads and the call never decides a result.
+func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
+	rejected := map[string]string{
+		"read beside the call":  "    y = s.n + five(mut s)\n    return 0",
+		"compound assignment":   "    s.n += five(mut s)\n    return 0",
+		"two calls":             "    y = five(mut s) + five(mut s)\n    return 0",
+		"guard before the call": "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
+		"field assignment":      "    s.n = five(mut s)\n    return 0",
+		"read inside a lambda":  "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
+		"condition of an if":    "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
+		"condition of a while":  "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+	}
+	for name, body := range rejected {
+		if failed := mutCallVCs(t, body); !strings.Contains(failed, "mut_call_alone") {
+			t.Errorf("%s: expected a failed mut_call_alone, failed VCs:\n%s", name, failed)
+		}
+	}
+	accepted := map[string]string{
+		"statement":               "    y = five(mut s)\n    return 0",
+		"operand":                 "    y = 1 + five(mut s)\n    return 0",
+		"condition":               "    if clear(mut s) and a:\n        return 1\n    return 0",
+		"next statement reads":    "    y = five(mut s)\n    z = s.n + y\n    return 0",
+		"while with invariant":    "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
+		"two different variables": "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+	}
+	for name, body := range accepted {
+		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {
+			t.Errorf("%s: expected mut_call_alone to hold, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// A callee's requires is checked wherever the call is written.
+func TestSPARKCallRequiresCheckedInEveryPosition(t *testing.T) {
+	forms := map[string]string{
+		"assignment":      "    y = idn(%s)",
+		"compound":        "    y: int = 0\n    y += idn(%s)",
+		"if condition":    "    if idn(%s) > 0:\n        return 1",
+		"while condition": "    i: int = 0\n    while idn(%s) > i:\n        invariant: i >= 0\n        i += 1",
+		"for bound":       "    for i in 0..idn(%s):\n        print(i)",
+		"negated":         "    b = not (idn(%s) > 0)",
+		"list literal":    "    ys = [idn(%s)]",
+		"f-string":        "    t = f\"{idn(%s)}\"",
+		"match subject":   "    match idn(%s):\n        0 -> return 1\n        _ -> return 2",
+		"match arm":       "    y = match len(xs):\n        0 -> idn(%s)\n        _ -> 2",
+		"lambda":          "    ys = xs |> map(x => idn(%s))",
+		"argument":        "    print(idn(%s))",
+		"short-circuit":   "    b = a and idn(%s) > 0",
+		"return":          "    return idn(%s)",
+	}
+	for name, form := range forms {
+		bad := mutCallVCs(t, strings.Replace(form, "%s", "-3", 1)+"\n    return 0")
+		if !strings.Contains(bad, "call_idn_requires_1") {
+			t.Errorf("%s: expected idn(-3) to fail its requires, failed VCs:\n%s", name, bad)
+		}
+		good := mutCallVCs(t, strings.Replace(form, "%s", "3", 1)+"\n    return 0")
+		if strings.Contains(good, "call_idn_requires_1") {
+			t.Errorf("%s: expected idn(3) to meet its requires, failed VCs:\n%s", name, good)
+		}
+	}
+}
+
+// What a caller assumes after a call has to hold on every return, and to be
+// about the caller's own variable.
+func TestSPARKMutCallContractsHoldForTheCaller(t *testing.T) {
+	cases := []struct{ name, src, wantFailed string }{
+		{"early return through ?", `
+def fail() -> Result[int, str]:
+    return Err("no")
+
+def e(mut s: S) -> Result[int, str]:
+    ensures: s.n == 5
+    s.n = 0
+    x = fail()?
+    s.n = 5
+    return Ok(1)
+`, "e.ensures_1"},
+		{"mut parameter rebound", `
+def reb(mut s: S) -> int[0..0]:
+    ensures: s.n == 5
+    s = S(n=5)
+    return 0
+`, "def:reb.mut_s_not_rebound"},
+		{"ensures about a parameter the callee reassigns", `
+def setk(mut s: S, k: int[0..9]) -> int[0..0]:
+    ensures: s.n == k
+    k = 3
+    s.n = 3
+    return 0
+
+def g(mut s: S) -> int:
+    y = setk(mut s, 0)
+    return 10 / (s.n - 3)
+`, "def:g.div_nonzero"},
+		{"ensures about a local of the callee", `
+def zero(mut s: S) -> int[0..0]:
+    ensures: s.n == k
+    k = 0
+    s.n = k
+    return 0
+
+def g(mut s: S) -> int:
+    k = 5
+    y = zero(mut s)
+    return 10 / s.n
+`, "def:g.div_nonzero"},
+		{"lambda kept for later", `
+def g(mut s: S) -> int:
+    later = () => clear(mut s)
+    if s.n != 0:
+        y = later()
+        return 10 / s.n
+    return 0
+`, "def:g.mut_capture"},
+	}
+	for _, tc := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, mutCallPrelude+tc.src)), "\n")
+		if !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
+	}
+	// A `?` in a lambda leaves the lambda, so the function's contracts are
+	// not due there.
+	inLambda := mutCallPrelude + `
+def check(x: int[0..9]) -> Result[int, str]:
+    return Ok(x)
+
+def g(mut s: S, xs: list[int[0..9]]) -> int:
+    ensures: s.n == 5
+    s.n = 0
+    ys = xs |> map(x => check(x)?)
+    s.n = 5
+    return 0
+`
+	if failed := failedVCs(verifySrc(t, inLambda)); len(failed) != 0 {
+		t.Errorf("a ? inside a lambda is not a return of the function, failed VCs: %v", failed)
+	}
+	stage := mutCallVCs(t, "    ys = xs |> map(x => five(mut s))\n    return 10 / (s.n + 1)")
+	if stage != "" {
+		t.Errorf("a pipeline stage may pass an outer variable as mut, failed VCs:\n%s", stage)
+	}
+}
+
+// An entity's invariant is only known after a call that certainly ran.
+func TestSPARKInvariantNotAssumedWhenCallMayNotRun(t *testing.T) {
+	prelude := `
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+def keep(mut a: A) -> bool:
+    return True
+`
+	cases := map[string]string{
+		"short-circuit": `
+def g(mut a: A, c: bool) -> int:
+    a.x = 10
+    ok = c and keep(mut a)
+    z = 100 / (11 - a.x - a.y)
+    a.x = 0
+    return z
+`,
+		"loop": `
+def g(mut a: A, c: bool) -> int:
+    i: int = 0
+    z: int = 0
+    while i < 2:
+        invariant: i >= 0
+        decreases: 2 - i
+        z = 100 / (11 - a.x - a.y)
+        ok = keep(mut a)
+        a.x = 10
+        i += 1
+    a.x = 0
+    return z
+`,
+	}
+	for name, src := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, prelude+src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	// After a call that ran, the callee has re-established it.
+	ok := `
+def g(mut a: A) -> int:
+    done = keep(mut a)
+    return 100 / (11 - a.x - a.y)
+`
+	if failed := failedVCs(verifySrc(t, prelude+ok)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// `x |> f(a)` calls f(x, a): the piped value is the first argument when the
+// callee's contract is checked and applied.
+func TestSPARKPipedCallBindsThePipedValueFirst(t *testing.T) {
+	prelude := mutCallPrelude + `
+def inv(x: int[0..9]) -> int:
+    requires: x != 0
+    return 10 / x
+
+def set_to(x: int[0..9], mut s: S, other: int[0..9]) -> int[0..0]:
+    ensures: s.n == x
+    s.n = x
+    return 0
+`
+	cases := []struct{ name, body, wantFailed string }{
+		{"bare stage", "    z: int[0..9] = 0\n    y = z |> inv\n    return 0", "call_inv_requires_1"},
+		{"stage with arguments", "    z: int[0..9] = 0\n    y = z |> inv()\n    return 0", "call_inv_requires_1"},
+		{"ensures uses the piped value", "    x: int[0..9] = 0\n    y = x |> set_to(mut s, 5)\n    return 10 / s.n", "div_nonzero"},
+	}
+	for _, tc := range cases {
+		src := prelude + "\ndef g(mut s: S) -> int:\n" + tc.body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
+	}
+	ok := prelude + `
+def g(mut s: S) -> int:
+    x: int[0..9] = 4
+    y = x |> set_to(mut s, 0)
+    q = 10 / s.n
+    r = x |> inv
+    return 0
+`
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// A keyword argument is bound to the parameter it names.
+func TestSPARKKeywordArgumentsBindByName(t *testing.T) {
+	prelude := `
+def divide(a: int[0..9], b: int[0..9]) -> int:
+    requires: a != 0
+    return b / a
+`
+	cases := []struct{ name, call, wantFailed string }{
+		{"reordered, safe", "divide(b=0, a=2)", ""},
+		{"reordered, zero divisor", "divide(b=1, a=0)", "call_divide_requires_1"},
+		{"piped and reordered", "2 |> divide(b=0)", ""},
+		{"keyword first, then by position", "divide(a=2, 0)", ""},
+		{"by position, then keyword", "divide(2, b=0)", ""},
+		{"zero divisor by position after a keyword", "divide(b=1, 0)", "call_divide_args"},
+		{"parameter given twice", "divide(4, a=6)", "call_divide_args"},
+		{"unknown keyword", "divide(typo=0, 1)", "call_divide_args"},
+		{"piped value with a keyword for the rest", "2 |> divide(b=1)", ""},
+		{"piped value and keyword for the same parameter", "0 |> divide(b=1, a=0)", "call_divide_args"},
+	}
+	for _, tc := range cases {
+		src := prelude + "\ndef g() -> int:\n    y = " + tc.call + "\n    return 0\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if tc.wantFailed == "" && failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", tc.name, failed)
+		}
+		if tc.wantFailed != "" && !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
 	}
 }

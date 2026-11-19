@@ -2,12 +2,12 @@ package spark
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
 	"github.com/xiongnemo/anima/internal/verify/smt"
-	"reflect"
 )
 
 type VCStatus string
@@ -88,7 +88,9 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
-	freshID    int
+	// fresh numbers the symbols this env and every clone of it invent, so
+	// that two branches never use one name for two values.
+	fresh *int
 }
 
 func newSymEnv() *symEnv {
@@ -100,6 +102,7 @@ func newSymEnv() *symEnv {
 		listElems:  map[string]smt.Interval{},
 		sumInfos:   map[string]listSumInfo{},
 		entryTerms: map[string]smt.LinearTerm{},
+		fresh:      new(int),
 	}
 }
 
@@ -113,7 +116,7 @@ func (e *symEnv) clone() *symEnv {
 		sumInfos:   make(map[string]listSumInfo, len(e.sumInfos)),
 		entryTerms: e.entryTerms,
 		pc:         append([]smt.BoolExpr{}, e.pc...),
-		freshID:    e.freshID,
+		fresh:      e.fresh,
 	}
 	for k, v := range e.intTerms {
 		c.intTerms[k] = v.Clone()
@@ -137,20 +140,36 @@ func (e *symEnv) clone() *symEnv {
 }
 
 func (e *symEnv) freshVar(prefix string) string {
-	e.freshID++
-	return fmt.Sprintf("__%s_%d", prefix, e.freshID)
+	*e.fresh++
+	return fmt.Sprintf("__%s_%d", prefix, *e.fresh)
 }
 
 // unbind drops every binding of name, so a callee parameter cannot resolve to a caller variable of the same name.
 func (e *symEnv) unbind(name string) {
-	delete(e.intTerms, name)
-	delete(e.boolTerms, name)
-	delete(e.listLens, name)
-	delete(e.listElems, name)
-	delete(e.sumInfos, name)
+	under := func(k string) bool { return k == name || strings.HasPrefix(k, name+".") }
 	for k := range e.intTerms {
-		if strings.HasPrefix(k, name+".") {
+		if under(k) {
 			delete(e.intTerms, k)
+		}
+	}
+	for k := range e.boolTerms {
+		if under(k) {
+			delete(e.boolTerms, k)
+		}
+	}
+	for k := range e.listLens {
+		if under(k) {
+			delete(e.listLens, k)
+		}
+	}
+	for k := range e.listElems {
+		if under(k) {
+			delete(e.listElems, k)
+		}
+	}
+	for k := range e.sumInfos {
+		if under(k) {
+			delete(e.sumInfos, k)
 		}
 	}
 }
@@ -175,13 +194,17 @@ func (e *symEnv) rename(from, to string) {
 			e.boolTerms[nk] = b
 		}
 	}
-	if t, ok := e.listLens[from]; ok {
-		delete(e.listLens, from)
-		e.listLens[to] = t
+	for k, t := range e.listLens {
+		if nk, ok := move(k); ok {
+			delete(e.listLens, k)
+			e.listLens[nk] = t
+		}
 	}
-	if iv, ok := e.listElems[from]; ok {
-		delete(e.listElems, from)
-		e.listElems[to] = iv
+	for k, iv := range e.listElems {
+		if nk, ok := move(k); ok {
+			delete(e.listElems, k)
+			e.listElems[nk] = iv
+		}
 	}
 }
 
@@ -236,6 +259,10 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// lambdaDepth counts the lambda bodies being checked.
+	lambdaDepth int
+	// noInvariants makes bindVarType bind an entity without assuming its invariants.
+	noInvariants bool
 	// bindingEnts holds the entity types bindVarType is currently expanding.
 	bindingEnts map[*sema.EntityType]bool
 }
@@ -350,6 +377,9 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 			v.bindVarType(env, fPath, f.Type)
 		}
 		// Assume entity invariants at entry
+		if v.noInvariants {
+			return
+		}
 		for _, inv := range t.Invariants {
 			b := v.evalBoolWithPrefix(inv, env, name+".")
 			env.assume(b)
@@ -478,6 +508,7 @@ func (v *verifier) verifyFunc(fn *ast.FuncDecl) {
 	v.curEnsures = fn.Ensures
 	v.curRetType = fi.Type.Return
 	v.curMutEnts = nil
+	v.checkParamsNotRebound(fi.Type.Params, fn.Body, scope, fn.Span)
 
 	for _, p := range fi.Type.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -540,6 +571,7 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 	v.curEnsures = nil
 	v.curRetType = wi.Return
 	v.curMutEnts = nil
+	v.checkParamsNotRebound(wi.Params, wf.Nodes, scope, wf.Span)
 
 	for _, p := range wi.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -581,7 +613,10 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			hasElse = true
 			continue
 		}
+		v.checkMutCalls([]ast.Expr{br.Guard}, scope, cn.Span)
+		v.checkMutCaptures([]ast.Expr{br.Guard}, scope, cn.Span)
 		v.checkArith(br.Guard, env, scope)
+		v.evalSideEffects(br.Guard, env, scope)
 		g := v.evalBool(br.Guard, env, scope)
 		guards = append(guards, g)
 	}
@@ -614,6 +649,12 @@ func (v *verifier) execBlock(stmts []ast.Stmt, env *symEnv, scope string) bool {
 }
 
 func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
+	groups := stmtExprGroups(stmt)
+	for _, g := range groups {
+		v.checkMutCalls(g, scope, stmt.GetSpan())
+		v.checkMutCaptures(g, scope, stmt.GetSpan())
+	}
+	v.havocLambdaMutArgs(groups, env)
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
 		v.checkArith(s.Value, env, scope)
@@ -642,9 +683,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		// The target is evaluated too (`xs[10 / n] += 1`).
 		v.checkArith(s.Target, env, scope)
 		if ix, ok := s.Target.(*ast.IndexExpr); ok {
+			v.evalSideEffects(ix.List, env, scope)
 			v.evalSideEffects(ix.Index, env, scope)
+		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
+			v.evalSideEffects(fe.Object, env, scope)
 		}
 		v.checkArith(s.Value, env, scope)
+		v.evalSideEffects(s.Value, env, scope)
 		if _, isInt := v.info.ExprTypes[s.Target].(*sema.IntType); isInt {
 			v.proveFitsInt64(rhsAst, env, scope)
 		}
@@ -663,6 +708,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 
 	case *ast.IndexAssignStmt:
+		v.checkArith(s.List, env, scope)
+		v.evalSideEffects(s.List, env, scope)
 		v.checkArith(s.Index, env, scope)
 		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
@@ -671,9 +718,12 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	case *ast.CallStmt:
 		if s.Call != nil {
 			v.checkArith(s.Call, env, scope)
+			v.evalSideEffects(s.Call, env, scope)
 		}
 
 	case *ast.FieldAssignStmt:
+		v.checkArith(s.Object, env, scope)
+		v.evalSideEffects(s.Object, env, scope)
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		path := ""
@@ -706,6 +756,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 		for _, br := range s.Branches {
 			v.checkArith(br.Cond, curEnv, scope)
+			v.evalSideEffects(br.Cond, curEnv, scope)
 			cond := v.evalBool(br.Cond, curEnv, scope)
 			thenEnv := curEnv.clone()
 			thenEnv.assume(cond)
@@ -713,7 +764,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if !term {
 				allTerm = false
 				outs = append(outs, branchOut{
-					cond:  smt.And(curEnv.pathCond(), cond),
+					// The whole path through the branch, so what the body
+					// learned (a callee's guarantees, a loop's exit) survives.
+					cond:  thenEnv.pathCond(),
 					terms: thenEnv.intTerms,
 					bools: thenEnv.boolTerms,
 				})
@@ -787,12 +840,18 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.MatchStmt:
 		v.checkArith(s.Subject, env, scope)
+		v.evalSideEffects(s.Subject, env, scope)
 		v.verifyMatchExhaustive(s.Subject, extractMatchArmsFromStmt(s.Arms), env, scope, s.Span)
+		// A guard may run, and change what it is given as mut, without its arm.
+		for _, arm := range s.Arms {
+			v.havocMutArgs(arm.Guard, env)
+		}
 		for _, arm := range s.Arms {
 			armEnv := env.clone()
 			v.assumePattern(arm.Pattern, s.Subject, armEnv, scope)
 			if arm.Guard != nil {
 				v.checkArith(arm.Guard, armEnv, scope)
+				v.evalSideEffects(arm.Guard, armEnv, scope)
 				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
 			}
 			v.execBlock(arm.Body, armEnv, scope)
@@ -806,10 +865,12 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		// 2. Inductive step from an arbitrary iteration: only the invariants are known there.
 		stepEnv := env.clone()
 		v.havocAssigned(s.Body, stepEnv)
+		v.havocMutArgs(s.Cond, stepEnv)
 		for _, inv := range s.Invariants {
 			stepEnv.assume(v.evalBool(inv, stepEnv, scope))
 		}
 		v.checkArith(s.Cond, stepEnv, scope)
+		v.evalSideEffects(s.Cond, stepEnv, scope)
 		exitEnv := stepEnv.clone()
 		stepEnv.assume(v.evalBool(s.Cond, stepEnv, scope))
 
@@ -833,6 +894,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.ForStmt:
 		v.checkArith(s.Iterable, env, scope)
+		v.evalSideEffects(s.Iterable, env, scope)
 		var lo, hi *smt.LinearTerm
 		if r, ok := s.Iterable.(*ast.RangeExpr); ok {
 			l, h := v.evalInt(r.Lo, env, scope, true), v.evalInt(r.Hi, env, scope, true)
@@ -1065,16 +1127,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		case "and", "implies", "or":
 			// The right operand only runs when the left one does not decide the result.
 			rEnv := env.clone()
-			// A call with a mut argument in either operand may change what
-			// the left operand tested, so the guard is not kept then.
-			if !passesMutArg(reflect.ValueOf(e)) {
-				left := v.evalBool(e.Left, rEnv, scope)
-				if e.Op == "or" {
-					left = smt.Not(left)
-				}
-				rEnv.assume(left)
+			left := v.evalBool(e.Left, rEnv, scope)
+			if e.Op == "or" {
+				left = smt.Not(left)
 			}
+			rEnv.assume(left)
 			v.evalSideEffects(e.Right, rEnv, scope)
+			// Whether the right operand ran is not known afterwards.
+			v.havocMutArgs(e.Right, env)
 			return
 		}
 		v.evalSideEffects(e.Right, env, scope)
@@ -1093,9 +1153,22 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 		}
 	case *ast.CallExpr:
+		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
 		}
+		// A callee the kernel has no contract for may do anything to its
+		// mut arguments.
+		modelled := false
+		defer func() {
+			if !modelled {
+				for _, a := range e.Args {
+					if a.Mut {
+						v.havocMutArg(a, env, false)
+					}
+				}
+			}
+		}()
 		// Check entity constructor bounds & invariants
 		if id, ok := e.Callee.(*ast.Ident); ok {
 			if et, isEnt := v.info.Entities[id.Name]; isEnt {
@@ -1122,12 +1195,19 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				// Arguments are evaluated in the caller's env before it is cloned, so the call env
 				// inherits their assumptions and never reuses one of their fresh names.
 				var binds []func(*symEnv)
-				for i, a := range e.Args {
-					if i >= len(fi.Type.Params) {
-						break
-					}
-					p := fi.Type.Params[i]
+				argParam, problem := argParams(fi.Type.Params, e.Args)
+				if problem != "" {
+					v.record(fmt.Sprintf("%s.call_%s_args", scope, id.Name), scope, e.Span, "each parameter is given once", VCFailed,
+						fmt.Sprintf("in the call of %s, %s", id.Name, problem), nil)
+				}
+				for _, p := range fi.Type.Params {
 					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
+				}
+				for i, a := range e.Args {
+					if argParam[i] < 0 {
+						continue
+					}
+					p := fi.Type.Params[argParam[i]]
 					switch pt := p.Type.(type) {
 					case *sema.IntType:
 						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
@@ -1184,6 +1264,8 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					recDec := v.evalInt(v.curDecExpr, callEnv, scope, false)
 					v.prove(scope+".rec_decreases_strict", scope, e.Span, callEnv, smt.Lt(recDec, v.curDecTerm))
 				}
+				v.applyCallEffects(fi, e.Args, argParam, env, callEnv, scope)
+				modelled = true
 			}
 		}
 		// Check ByteView bounds (std.bytes)
@@ -1216,34 +1298,87 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 		}
 	case *ast.PipeExpr:
+		if call := v.pipedCall(e); call != nil {
+			v.evalSideEffects(call, env, scope)
+			return
+		}
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
-	}
-}
-
-// passesMutArg reports whether the syntax tree under n holds a call argument
-// marked mut. It walks by reflection so that no node kind can be missed.
-func passesMutArg(n reflect.Value) bool {
-	switch n.Kind() {
-	case reflect.Interface, reflect.Pointer:
-		return !n.IsNil() && passesMutArg(n.Elem())
-	case reflect.Slice:
-		for i := 0; i < n.Len(); i++ {
-			if passesMutArg(n.Index(i)) {
-				return true
+	case *ast.RunWorkflowExpr:
+		for _, a := range e.Args {
+			v.evalSideEffects(a.Value, env, scope)
+		}
+		for _, a := range e.Args {
+			if a.Mut {
+				v.havocMutArg(a, env, v.info.Workflows[e.Name] != nil)
 			}
 		}
-	case reflect.Struct:
-		if arg, ok := n.Interface().(ast.CallArg); ok && arg.Mut {
-			return true
+	case *ast.MatchExpr:
+		v.evalSideEffects(e.Subject, env, scope)
+		// Only one arm runs, and a guard may run without its arm.
+		for _, arm := range e.Arms {
+			v.havocMutArgs(arm.Guard, env)
 		}
-		for i := 0; i < n.NumField(); i++ {
-			if passesMutArg(n.Field(i)) {
-				return true
+		for _, arm := range e.Arms {
+			armEnv := env.clone()
+			v.assumePattern(arm.Pattern, e.Subject, armEnv, scope)
+			if arm.Guard != nil {
+				v.evalSideEffects(arm.Guard, armEnv, scope)
+				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
+			}
+			v.evalSideEffects(arm.Value, armEnv, scope)
+		}
+		for _, arm := range e.Arms {
+			v.havocMutArgs(arm.Value, env)
+		}
+	case *ast.LambdaExpr:
+		// The body is checked where its parameters are known: checkLambdaArith.
+	case *ast.UnaryExpr:
+		v.evalSideEffects(e.Expr, env, scope)
+	case *ast.FieldExpr:
+		v.evalSideEffects(e.Object, env, scope)
+	case *ast.TryExpr:
+		v.evalSideEffects(e.Inner, env, scope)
+		// Inside a lambda `?` returns from the lambda, not from the function.
+		if v.lambdaDepth == 0 {
+			v.checkTryExit(env, scope, e.Span)
+		}
+	case *ast.RangeExpr:
+		v.evalSideEffects(e.Lo, env, scope)
+		v.evalSideEffects(e.Hi, env, scope)
+	case *ast.ListLit:
+		for _, el := range e.Elems {
+			v.evalSideEffects(el, env, scope)
+		}
+	case *ast.MapLit:
+		for _, en := range e.Entries {
+			v.evalSideEffects(en.Key, env, scope)
+			v.evalSideEffects(en.Value, env, scope)
+		}
+	case *ast.FStrExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				v.evalSideEffects(part.Expr, env, scope)
 			}
 		}
+	case *ast.WithExpr:
+		v.evalSideEffects(e.Base, env, scope)
+		for _, f := range e.Fields {
+			v.evalSideEffects(f.Value, env, scope)
+		}
+	case *ast.IntLit, *ast.BoolLit, *ast.StrLit, *ast.NoneLit, *ast.Ident, *ast.OldExpr:
+	default:
+		// An expression kind with no case of its own: its parts are checked
+		// from a copy of the state, and what they pass as mut is forgotten.
+		rv := reflect.ValueOf(expr)
+		if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+			visitExprs(rv.Elem(), func(sub ast.Expr) bool {
+				v.evalSideEffects(sub, env.clone(), scope)
+				return false
+			})
+		}
+		v.havocMutArgs(expr, env)
 	}
-	return false
 }
 
 // checkArith proves that no integer operation the runtime performs while evaluating expr
@@ -1427,6 +1562,8 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 		delete(env.listElems, name)
 		delete(env.sumInfos, name)
 	}
+	// What the statements pass as mut may change on every pass too.
+	v.havocMutArgs(stmts, env)
 }
 
 // stageName is the combinator a call names, written bare (`sum`) or through the std.fp
@@ -1497,6 +1634,9 @@ func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope strin
 		bodyEnv.intTerms[lam.Params[0]] = v.evalInt(args[0].Value, env, scope, false).Add(partial)
 		bodyEnv.intTerms[lam.Params[1]] = x
 		v.checkArith(lam.Body, bodyEnv, scope)
+		v.lambdaDepth++
+		v.evalSideEffects(lam.Body, bodyEnv, scope)
+		v.lambdaDepth--
 		return
 	}
 
@@ -1538,6 +1678,9 @@ func (v *verifier) checkLambdaArith(lam *ast.LambdaExpr, types []sema.Type, body
 		v.strParams[p] = isStr
 	}
 	v.checkArith(lam.Body, bodyEnv, scope)
+	v.lambdaDepth++
+	v.evalSideEffects(lam.Body, bodyEnv, scope)
+	v.lambdaDepth--
 	v.strParams = saved
 }
 

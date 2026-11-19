@@ -1,0 +1,21 @@
+# A call may change what it is given as `mut`. What the caller knew about
+# `s.n` before `clear(mut s)` says nothing about it afterwards, so the
+# division is not proved (it divides by zero whenever the branch is taken).
+
+entity S:
+    n: int[0..9]
+
+def clear(mut s: S) -> bool:
+    s.n = 0
+    return True
+
+def f(mut s: S) -> int:
+    if s.n != 0:
+        done = clear(mut s)
+        return 10 / s.n
+    return 0
+
+def main() -> int:
+    s = S(n=5)
+    print(f(mut s))
+    return 0
