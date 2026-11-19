@@ -1693,6 +1693,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			return nil, err
 		}
 	}
+	if err := c.checkCallAliasing(e.Args, true); err != nil {
+		return nil, err
+	}
 	if ft, ok := calleeTy.(*FuncType); ok {
 		return ft.Return, nil
 	}

@@ -288,3 +288,27 @@ func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
 		}
 	}
 }
+
+// The element-alias rule also holds for a call through a function value.
+func TestSemaRejectsElementAliasThroughFunctionValue(t *testing.T) {
+	src := `
+entity Row:
+    n: int[0..9]
+
+def bump(mut rs: list[Row], r: Row) -> int:
+    return 0
+
+def f(mut rows: list[Row]) -> int:
+    g = bump
+    if len(rows) > 0:
+        return g(mut rows, rows[0])
+    return 0
+`
+	prog, err := parser.Parse("fnval.anm", src)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "anti-aliasing") {
+		t.Errorf("expected an anti-aliasing error, got %v", err)
+	}
+}
