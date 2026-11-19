@@ -560,3 +560,34 @@ def g() -> int:
 		}
 	}
 }
+
+// The backends give a workflow its arguments by position, so a keyword
+// argument has to name the parameter at its place.
+func TestSemaWorkflowArgumentsInOrder(t *testing.T) {
+	prelude := `
+workflow Sub(a: int[0..9], b: int[0..9]) -> int:
+    verify: sound
+    start -> work
+    step work -> done:
+        return a - b
+
+def g() -> int:
+`
+	cases := map[string]bool{
+		"Sub(1, 0)":     true,
+		"Sub(a=1, b=0)": true,
+		"Sub(1, b=0)":   true,
+		"Sub(b=1, a=0)": false,
+		"Sub(1, a=0)":   false,
+		"Sub(1, zz=0)":  false,
+	}
+	for call, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    r = run_workflow "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", call, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%s: accepted = %v, want %v (%v)", call, err == nil, ok, err)
+		}
+	}
+}

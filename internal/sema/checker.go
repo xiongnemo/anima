@@ -1447,18 +1447,19 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			pi, ok := boundParam(wi.Params, arg, i)
-			if !ok {
-				return nil, fmt.Errorf("%s: workflow %s has no parameter %q", arg.Span, e.Name, arg.Name)
+			// Both backends give a workflow its arguments in the order
+			// they are written, whatever they are named.
+			if arg.Name != "" && arg.Name != wi.Params[i].Name {
+				return nil, fmt.Errorf("%s: parameter %d of workflow %s is %s, not %s: the arguments of a workflow are given in order", arg.Span, i+1, e.Name, wi.Params[i].Name, arg.Name)
 			}
-			if wi.Params[pi].Mut && !arg.Mut {
+			if wi.Params[i].Mut && !arg.Mut {
 				return nil, fmt.Errorf("%s: argument %d to workflow %s must be marked 'mut'", arg.Span, i+1, e.Name)
 			}
 			if arg.Own {
 				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
 			}
-			if !c.assignable(wi.Params[pi].Type, at, arg.Value) {
-				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[pi].Type, at)
+			if !c.assignable(wi.Params[i].Type, at, arg.Value) {
+				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
 		}
 		if err := c.checkCallAliasing(e.Args, true); err != nil {
