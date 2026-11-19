@@ -224,3 +224,21 @@ def main() -> int:
 		t.Fatalf("unexpected stdout: %q", stdout)
 	}
 }
+
+// A map and an entity are written in the order of their keys, not in the
+// order Go walks a map, which changes from one run to the next.
+func TestValueStringIsDeterministic(t *testing.T) {
+	m := VMap(map[string]Value{"b\"q": VInt(1), "a\nb": VInt(2), "Z": VInt(3), "k": VStr("v")})
+	want := `{"Z": 3, "a\nb": 2, "b\"q": 1, "k": v}`
+	for i := 0; i < 50; i++ {
+		if got := m.String(); got != want {
+			t.Fatalf("map printed as %s, want %s", got, want)
+		}
+	}
+	e := Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: "Box", Fields: map[string]Value{"tag": VStr("t"), "n": VInt(1), "a": VBool(true)}}}
+	for i := 0; i < 50; i++ {
+		if got := e.String(); got != "Box(a=True, n=1, tag=t)" {
+			t.Fatalf("entity printed as %s", got)
+		}
+	}
+}

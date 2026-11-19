@@ -232,6 +232,14 @@ static AnimaVal v_map_get(AnimaVal mv, const char *k) {
 static AnimaVal v_index_get(AnimaVal c, AnimaVal i) {
     if (c.kind == VAL_LIST && c.u.list && i.u.i >= 0 && (size_t)i.u.i < c.u.list->len) return c.u.list->items[i.u.i];
     if (c.kind == VAL_MAP) { char *k = v_to_cstr(i); AnimaVal r = v_map_get(c, k); free(k); return r; }
+    if (c.kind == VAL_STR && c.u.s && i.u.i >= 0 && (size_t)i.u.i < strlen(c.u.s)) {
+        // One byte of the string as a character, as the VM gives it.
+        unsigned char b = (unsigned char)c.u.s[i.u.i];
+        char out[3] = {0};
+        if (b < 0x80) { out[0] = (char)b; }
+        else { out[0] = (char)(0xC0 | (b >> 6)); out[1] = (char)(0x80 | (b & 0x3F)); }
+        return v_str(out);
+    }
     return v_none();
 }
 
@@ -324,25 +332,102 @@ static bool v_eq(AnimaVal a, AnimaVal b) {
     }
 }
 
-static char *v_to_cstr(AnimaVal v) {
-    char buf[128];
-    switch (v.kind) {
-        case VAL_VOID: return strdup("()");
-        case VAL_NONE: return strdup("None");
-        case VAL_INT: snprintf(buf, sizeof(buf), "%lld", (long long)v.u.i); return strdup(buf);
-        case VAL_BOOL: return strdup(v.u.b ? "True" : "False");
-        case VAL_STR: return strdup(v.u.s ? v.u.s : "");
-        case VAL_VARIANT: {
-            if (!v.u.var || v.u.var->len == 0) return strdup(v.u.var ? v.u.var->name : "None");
-            char *inner = v_to_cstr(v.u.var->fields[0]);
-            size_t len = strlen(v.u.var->name) + strlen(inner) + 4;
-            char *out = malloc(len);
-            snprintf(out, len, "%s(%s)", v.u.var->name, inner);
-            free(inner);
-            return out;
-        }
-        default: return strdup("<val>");
+// A value as text, the same as Value.String in the VM: map entries and
+// entity fields in the order of their keys.
+typedef struct { char *p; size_t len; size_t cap; } AnimaBuf;
+
+static void buf_put(AnimaBuf *b, const char *s) {
+    size_t n = strlen(s);
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->p = realloc(b->p, b->cap);
     }
+    memcpy(b->p + b->len, s, n + 1);
+    b->len += n;
+}
+
+static void v_fmt_key(AnimaBuf *b, const char *k) {
+    char esc[8];
+    buf_put(b, "\"");
+    for (const unsigned char *c = (const unsigned char *)k; *c; c++) {
+        if (*c == '"' || *c == '\\') { esc[0] = '\\'; esc[1] = (char)*c; esc[2] = 0; }
+        else if (*c == '\n') strcpy(esc, "\\n");
+        else if (*c == '\t') strcpy(esc, "\\t");
+        else if (*c == '\r') strcpy(esc, "\\r");
+        else if (*c < 0x20 || *c == 0x7f) snprintf(esc, sizeof(esc), "\\x%02x", *c);
+        else { esc[0] = (char)*c; esc[1] = 0; }
+        buf_put(b, esc);
+    }
+    buf_put(b, "\"");
+}
+
+static int v_entry_cmp(const void *a, const void *b) {
+    return strcmp((*(AnimaMapEntry *const *)a)->key, (*(AnimaMapEntry *const *)b)->key);
+}
+
+static void v_fmt(AnimaBuf *b, AnimaVal v);
+
+// The entries of a map or the fields of an entity, sorted by key.
+static void v_fmt_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, bool quoted) {
+    AnimaMapEntry **order = malloc((len ? len : 1) * sizeof(*order));
+    for (size_t i = 0; i < len; i++) order[i] = &entries[i];
+    qsort(order, len, sizeof(*order), v_entry_cmp);
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0) buf_put(b, ", ");
+        if (quoted) { v_fmt_key(b, order[i]->key); buf_put(b, ": "); }
+        else { buf_put(b, order[i]->key); buf_put(b, "="); }
+        v_fmt(b, order[i]->val);
+    }
+    free(order);
+}
+
+static void v_fmt(AnimaBuf *b, AnimaVal v) {
+    char num[32];
+    switch (v.kind) {
+        case VAL_VOID: buf_put(b, "()"); break;
+        case VAL_NONE: buf_put(b, "None"); break;
+        case VAL_INT: snprintf(num, sizeof(num), "%lld", (long long)v.u.i); buf_put(b, num); break;
+        case VAL_BOOL: buf_put(b, v.u.b ? "True" : "False"); break;
+        case VAL_STR: buf_put(b, v.u.s ? v.u.s : ""); break;
+        case VAL_LIST:
+            buf_put(b, "[");
+            for (size_t i = 0; v.u.list && i < v.u.list->len; i++) {
+                if (i > 0) buf_put(b, ", ");
+                v_fmt(b, v.u.list->items[i]);
+            }
+            buf_put(b, "]");
+            break;
+        case VAL_MAP:
+            buf_put(b, "{");
+            if (v.u.map) v_fmt_entries(b, v.u.map->entries, v.u.map->len, true);
+            buf_put(b, "}");
+            break;
+        case VAL_ENTITY:
+            buf_put(b, v.u.ent && v.u.ent->type_name ? v.u.ent->type_name : "");
+            buf_put(b, "(");
+            if (v.u.ent) v_fmt_entries(b, v.u.ent->fields, v.u.ent->len, false);
+            buf_put(b, ")");
+            break;
+        case VAL_VARIANT:
+            if (!v.u.var) { buf_put(b, "None"); break; }
+            buf_put(b, v.u.var->name);
+            if (v.u.var->len == 0) break;
+            buf_put(b, "(");
+            for (size_t i = 0; i < v.u.var->len; i++) {
+                if (i > 0) buf_put(b, ", ");
+                v_fmt(b, v.u.var->fields[i]);
+            }
+            buf_put(b, ")");
+            break;
+        default: buf_put(b, "<val>"); break;
+    }
+}
+
+static char *v_to_cstr(AnimaVal v) {
+    AnimaBuf b = {0};
+    buf_put(&b, "");
+    v_fmt(&b, v);
+    return b.p;
 }
 
 static AnimaVal v_str_cat(AnimaVal a, AnimaVal b) {
@@ -388,7 +473,67 @@ static AnimaVal anima_print(AnimaVal v) {
     return v_void();
 }
 
+// print(a, b, ...) writes its arguments on one line with a space between.
+// The line goes out in one call, so that the lines of two threads do not mix.
+static AnimaVal anima_print_n(int argc, AnimaVal *argv) {
+    AnimaBuf b = {0};
+    buf_put(&b, "");
+    for (int i = 0; i < argc; i++) {
+        if (i > 0) buf_put(&b, " ");
+        v_fmt(&b, argv[i]);
+    }
+    printf("%s\n", b.p);
+    fflush(stdout);
+    free(b.p);
+    return v_void();
+}
+
 // ─── std.fp combinators ───
+
+static AnimaVal fp_any(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (v_truthy(v_call_clos(fn, 1, &arg))) return v_bool(true);
+        }
+    }
+    return v_bool(false);
+}
+
+static AnimaVal fp_all(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (!v_truthy(v_call_clos(fn, 1, &arg))) return v_bool(false);
+        }
+    }
+    return v_bool(true);
+}
+
+static AnimaVal fp_find(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (v_truthy(v_call_clos(fn, 1, &arg))) return v_some(arg);
+        }
+    }
+    return v_none();
+}
+
+// The elements of a list from index lo up to hi, in a list of their own.
+static AnimaVal fp_slice(AnimaVal listv, int64_t lo, int64_t hi) {
+    AnimaVal out = v_list_new(0, NULL);
+    if (listv.kind != VAL_LIST || !listv.u.list) return out;
+    int64_t len = (int64_t)listv.u.list->len;
+    if (lo < 0) lo = 0;
+    if (hi > len) hi = len;
+    for (int64_t i = lo; i < hi; i++) v_list_push(out, listv.u.list->items[i]);
+    return out;
+}
+
+static AnimaVal fp_take(AnimaVal listv, AnimaVal n) { return fp_slice(listv, 0, n.u.i); }
+
+static AnimaVal fp_drop(AnimaVal listv, AnimaVal n) { return fp_slice(listv, n.u.i, INT64_MAX); }
 static AnimaVal fp_filter(AnimaVal listv, AnimaVal fn) {
     AnimaVal out = v_list_new(0, NULL);
     if (listv.kind == VAL_LIST && listv.u.list) {

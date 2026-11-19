@@ -1340,7 +1340,15 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 		case "len":
 			return fmt.Sprintf("v_int(anima_len(%s))", args[0])
 		case "print":
-			return fmt.Sprintf("anima_print(%s)", args[0])
+			if len(args) == 1 {
+				return fmt.Sprintf("anima_print(%s)", args[0])
+			}
+			if len(args) == 0 {
+				return "anima_print_n(0, NULL)"
+			}
+			arr := g.freshTmp("pargs")
+			g.line("AnimaVal %s[%d] = {%s};", arr, len(args), strings.Join(args, ", "))
+			return fmt.Sprintf("anima_print_n(%d, %s)", len(args), arr)
 		case "str", "to_str":
 			tmp := g.freshTmp("s")
 			g.line("char *%s_c = v_to_cstr(%s); AnimaVal %s = v_str(%s_c); free(%s_c);", tmp, args[0], tmp, tmp, tmp)
@@ -1370,6 +1378,16 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 			return fmt.Sprintf("fp_fold(%s, %s, %s)", args[0], args[1], args[2])
 		case "sum":
 			return fmt.Sprintf("fp_sum(%s)", args[0])
+		case "any":
+			return fmt.Sprintf("fp_any(%s, %s)", args[0], args[1])
+		case "all":
+			return fmt.Sprintf("fp_all(%s, %s)", args[0], args[1])
+		case "find":
+			return fmt.Sprintf("fp_find(%s, %s)", args[0], args[1])
+		case "take":
+			return fmt.Sprintf("fp_take(%s, %s)", args[0], args[1])
+		case "drop":
+			return fmt.Sprintf("fp_drop(%s, %s)", args[0], args[1])
 		case "filter_ok":
 			return fmt.Sprintf("fp_filter_ok(%s)", args[0])
 		case "unwrap_or":
