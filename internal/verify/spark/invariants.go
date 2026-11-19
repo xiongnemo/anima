@@ -389,12 +389,14 @@ func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type, a
 }
 
 // resultMayBe reports whether a result of type ret can be a value of type
-// arg, or hold one: a list of numbers is not an entity and holds none.
+// arg, hold one, or come out of one: a list of numbers is not a flat
+// entity, holds none and is not inside one.
 func (v *verifier) resultMayBe(ret, arg sema.Type) bool {
 	if ret == nil || !mayHoldEntity(ret) || !mayHoldEntity(arg) {
 		return false
 	}
-	if v.hasRoom(ret) {
+	// The result holds the argument, or was taken out of it.
+	if v.hasRoom(ret) || v.hasRoom(arg) {
 		return true
 	}
 	switch ret.(type) {

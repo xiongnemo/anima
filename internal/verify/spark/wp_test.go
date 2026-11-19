@@ -2299,6 +2299,10 @@ def idf(a: A) -> A:
 	if failed := failedVCs(verifySrc(t, numbers)); len(failed) != 0 {
 		t.Errorf("a call returning numbers keeps no entity: expected every VC proved, failed VCs: %v", failed)
 	}
+	taken := prelude + "\ndef first(rows: list[A]) -> A:\n    requires: len(rows) > 0\n    return rows[0]\n\ndef f() -> int:\n    b = A(x=5, y=5)\n    rows = [b]\n    c = first(rows)\n    c.x = 6\n    return use(b)\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, taken)), "\n"); !strings.Contains(failed, "entity_c_invariant_1") {
+		t.Errorf("an entity taken out of a list by a call: expected a failed entity_c_invariant_1, failed VCs:\n%s", failed)
+	}
 	piped := prelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    c = b |> idf\n    b.x = 6\n    return use(c)\n"
 	if failed := strings.Join(failedVCs(verifySrc(t, piped)), "\n"); !strings.Contains(failed, "entity_b_invariant_1") {
 		t.Errorf("an entity handed back by a piped call: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
