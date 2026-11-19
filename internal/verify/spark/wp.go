@@ -746,106 +746,37 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.IfStmt:
 		curEnv := env.clone()
-		allTerm := true
-		type branchOut struct {
-			cond  smt.BoolExpr
-			terms map[string]smt.LinearTerm
-			bools map[string]smt.BoolExpr
-		}
-		var outs []branchOut
-
+		var outs []*symEnv
 		for _, br := range s.Branches {
 			v.checkArith(br.Cond, curEnv, scope)
 			v.evalSideEffects(br.Cond, curEnv, scope)
 			cond := v.evalBool(br.Cond, curEnv, scope)
 			thenEnv := curEnv.clone()
 			thenEnv.assume(cond)
-			term := v.execBlock(br.Body, thenEnv, scope)
-			if !term {
-				allTerm = false
-				outs = append(outs, branchOut{
-					// The whole path through the branch, so what the body
-					// learned (a callee's guarantees, a loop's exit) survives.
-					cond:  thenEnv.pathCond(),
-					terms: thenEnv.intTerms,
-					bools: thenEnv.boolTerms,
-				})
+			if !v.execBlock(br.Body, thenEnv, scope) {
+				outs = append(outs, thenEnv)
 			}
 			curEnv.assume(smt.Not(cond))
 		}
-		if len(s.Else) > 0 {
-			term := v.execBlock(s.Else, curEnv, scope)
-			if !term {
-				allTerm = false
-				outs = append(outs, branchOut{
-					cond:  curEnv.pathCond(),
-					terms: curEnv.intTerms,
-					bools: curEnv.boolTerms,
-				})
-			}
-		} else {
-			allTerm = false
-			outs = append(outs, branchOut{
-				cond:  curEnv.pathCond(),
-				terms: curEnv.intTerms,
-				bools: curEnv.boolTerms,
-			})
+		// curEnv is now the path on which no condition held.
+		if len(s.Else) == 0 || !v.execBlock(s.Else, curEnv, scope) {
+			outs = append(outs, curEnv)
 		}
-		if allTerm {
+		if len(outs) == 0 {
 			return true
 		}
-		if len(outs) == 1 {
-			env.intTerms = outs[0].terms
-			env.boolTerms = outs[0].bools
-			env.pc = []smt.BoolExpr{outs[0].cond}
-		} else if len(outs) > 1 {
-			var branchDisj []smt.BoolExpr
-			allKeys := map[string]bool{}
-			for _, o := range outs {
-				branchDisj = append(branchDisj, o.cond)
-				for k := range o.terms {
-					allKeys[k] = true
-				}
-			}
-			for k := range allKeys {
-				same := true
-				var firstStr string
-				for idx, o := range outs {
-					t, ok := o.terms[k]
-					if !ok {
-						same = false
-						break
-					}
-					if idx == 0 {
-						firstStr = t.String()
-					} else if t.String() != firstStr {
-						same = false
-						break
-					}
-				}
-				if same {
-					env.intTerms[k] = outs[0].terms[k]
-					continue
-				}
-				mv := smt.Var(env.freshVar("phi_" + k))
-				env.intTerms[k] = mv
-				for _, o := range outs {
-					if t, ok := o.terms[k]; ok {
-						env.assume(smt.Implies(o.cond, smt.Eq(mv, t)))
-					}
-				}
-			}
-			env.assume(smt.Or(branchDisj...))
-		}
+		v.joinBranches(env, outs)
 
 	case *ast.MatchStmt:
 		v.checkArith(s.Subject, env, scope)
 		v.evalSideEffects(s.Subject, env, scope)
-		v.verifyMatchExhaustive(s.Subject, extractMatchArmsFromStmt(s.Arms), env, scope, s.Span)
+		arms := extractMatchArmsFromStmt(s.Arms)
+		v.verifyMatchExhaustive(s.Subject, arms, env, scope, s.Span)
 		// A guard may run, and change what it is given as mut, without its arm.
 		for _, arm := range s.Arms {
 			v.havocMutArgs(arm.Guard, env)
 		}
+		var outs []*symEnv
 		for _, arm := range s.Arms {
 			armEnv := env.clone()
 			v.assumePattern(arm.Pattern, s.Subject, armEnv, scope)
@@ -854,8 +785,17 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				v.evalSideEffects(arm.Guard, armEnv, scope)
 				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
 			}
-			v.execBlock(arm.Body, armEnv, scope)
+			if !v.execBlock(arm.Body, armEnv, scope) {
+				outs = append(outs, armEnv)
+			}
 		}
+		if !v.matchIsTotal(s.Subject, arms) {
+			outs = append(outs, env.clone())
+		}
+		if len(outs) == 0 {
+			return true
+		}
+		v.joinBranches(env, outs)
 
 	case *ast.WhileStmt:
 		// 1. Prove invariant holds at entry
