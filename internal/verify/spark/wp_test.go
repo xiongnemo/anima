@@ -1868,3 +1868,57 @@ func TestSPARKWithCopySharesNestedEntities(t *testing.T) {
 		t.Errorf("copy of a read-only entity holding an entity: expected a failed readonly_c, failed VCs:\n%s", failed)
 	}
 }
+
+// Review round 2 of the aliasing work: three ways to get a value that does
+// not fit what its type promises.
+func TestSPARKElementCompoundWriteWithRangeAndRelations(t *testing.T) {
+	compound := `
+entity A:
+    x: int[0..10]
+    invariant: x >= 1
+
+def f() -> int:
+    b = A(x=5)
+    rows = [b]
+    rows[0].x *= 0
+    return 10 / b.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, compound)), "\n"); !strings.Contains(failed, "entity_element_invariant_1") {
+		t.Errorf("compound write on an element: expected a failed entity_element_invariant_1, failed VCs:\n%s", failed)
+	}
+	with := `
+entity P1:
+    x: int[1..10]
+
+def inv(p: P1) -> int:
+    return 10 / p.x
+
+def f() -> int:
+    b = P1(x=5)
+    c = b with {x: 0}
+    return inv(c)
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, with)), "\n"); !strings.Contains(failed, "with_x_bounds") {
+		t.Errorf("with outside the field's range: expected a failed with_x_bounds, failed VCs:\n%s", failed)
+	}
+	inRange := strings.Replace(with, "{x: 0}", "{x: 2}", 1)
+	if failed := failedVCs(verifySrc(t, inRange)); len(failed) != 0 {
+		t.Errorf("with inside the field's range: expected every VC proved, failed VCs: %v", failed)
+	}
+	relation := `
+entity Acc:
+    bal: int[0..10]
+
+entity Ord:
+    amount: int[0..9]
+    rel buyer -> 1 Acc
+
+def f(o: Ord) -> int:
+    c = o with {amount: 1}
+    c.buyer.bal = 0
+    return 0
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, relation)), "\n"); !strings.Contains(failed, "readonly_c") {
+		t.Errorf("copy of a read-only entity with a relation: expected a failed readonly_c, failed VCs:\n%s", failed)
+	}
+}
