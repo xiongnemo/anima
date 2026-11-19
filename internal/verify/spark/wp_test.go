@@ -994,6 +994,7 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		"two different variables":              "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
 		"another name, a statement of its own": "    t = s\n    y = five(mut t)\n    z = s.n + y\n    return 0",
 		"another name, an unrelated variable":  "    t = s\n    u = S(n=1)\n    y = u.n + five(mut t)\n    return 0",
+		"another name, hidden by a lambda's":   "    t = s\n    ys = xs |> map(t => t + five(mut s))\n    return 0",
 	}
 	for name, body := range accepted {
 		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {

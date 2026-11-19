@@ -3,6 +3,7 @@ package spark
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -512,6 +513,10 @@ func mentionsOutside(n reflect.Value, root string, owner ast.Expr) bool {
 		}
 		if id, ok := e.(*ast.Ident); ok && id.Name == root {
 			found = true
+		}
+		// A lambda's parameter of that name is another variable.
+		if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, root) {
+			return false
 		}
 		return true
 	})
