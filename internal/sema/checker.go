@@ -731,6 +731,21 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 								sc.defineLocal(la.Name, b)
 							}
 						}
+						// An element write or an in-place update changes the
+						// variable it reaches, like an assignment to it.
+						var written ast.Expr
+						switch st := op.Stmt.(type) {
+						case *ast.IndexAssignStmt:
+							written = st.List
+						case *ast.CompoundAssignStmt:
+							written = st.Target
+						}
+						if path, ok := elementOwnerPath(written); written != nil && ok {
+							if prevBr, dup := branchWrites[path]; dup && prevBr != br.Name {
+								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, path, prevBr, br.Name)
+							}
+							branchWrites[path] = br.Name
+						}
 					}
 				}
 			}

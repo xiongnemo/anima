@@ -1,0 +1,14 @@
+workflow Tally(mut m: map[str, int[0..9]]) -> bool:
+    verify: sound
+    start -> work
+    fork work:
+        branch a:
+            m["a"] = 1
+        branch b:
+            m["b"] = 2
+    join j
+    step finish after j -> done:
+        return True
+
+def main() -> int:
+    return 0

@@ -147,3 +147,28 @@ def f() -> int:
 		t.Errorf("expected a map value type error, got %v", err)
 	}
 }
+
+// Two fork branches that write elements of the same map race, like two
+// branches assigning the same variable.
+func TestSemaRejectsElementWriteRaceInFork(t *testing.T) {
+	src := `
+workflow Tally(mut m: map[str, int[0..9]]) -> bool:
+    verify: sound
+    start -> work
+    fork work:
+        branch a:
+            m["a"] = 1
+        branch b:
+            m["b"] = 2
+    join j
+    step finish after j -> done:
+        return True
+`
+	prog, err := parser.Parse("race.anm", src)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "concurrent write race") {
+		t.Errorf("expected a concurrent write race error, got %v", err)
+	}
+}
