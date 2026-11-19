@@ -1884,6 +1884,27 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		elemTy = lt.Elem
 	}
 
+	// The function a stage takes is a lambda or a variable holding one.
+	fnArg := -1
+	switch fnName {
+	case "filter", "map", "flat_map", "any", "all", "find", "and_then":
+		fnArg = 0
+	case "fold":
+		fnArg = 1
+	}
+	if fnArg >= 0 && fnArg < len(callArgs) {
+		if _, isLam := callArgs[fnArg].Value.(*ast.LambdaExpr); !isLam {
+			at, err := c.checkExpr(callArgs[fnArg].Value, sc)
+			if err != nil {
+				return nil, err
+			}
+			switch at.Kind() {
+			case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
+				return nil, fmt.Errorf("%s: %s takes a function, got %s", callArgs[fnArg].Value.GetSpan(), fnName, at)
+			}
+		}
+	}
+
 	switch fnName {
 	case "filter":
 		if len(callArgs) == 1 {
