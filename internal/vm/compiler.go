@@ -471,6 +471,13 @@ func (f *fnCompiler) declareLocal(name string) int {
 	return slot
 }
 
+// newTemp reserves a local slot that no source name can refer to.
+func (f *fnCompiler) newTemp() int {
+	slot := f.proto.NumLocals
+	f.proto.NumLocals++
+	return slot
+}
+
 func (f *fnCompiler) resolveVar(name string) (isLocal bool, isUpval bool, slot int) {
 	if s, ok := f.locals[name]; ok {
 		return true, false, s
@@ -557,12 +564,12 @@ func (f *fnCompiler) compileStmt(stmt ast.Stmt) error {
 			if err := f.compileExpr(tgt.List); err != nil {
 				return err
 			}
-			listSlot := f.declareLocal(fmt.Sprintf("__cidx_list_%d", f.proto.NumLocals))
+			listSlot := f.newTemp()
 			f.emit(EncodeImm(OpStoreLocal, uint32(listSlot)), line)
 			if err := f.compileExpr(tgt.Index); err != nil {
 				return err
 			}
-			idxSlot := f.declareLocal(fmt.Sprintf("__cidx_idx_%d", f.proto.NumLocals))
+			idxSlot := f.newTemp()
 			f.emit(EncodeImm(OpStoreLocal, uint32(idxSlot)), line)
 			f.emit(EncodeImm(OpLoadLocal, uint32(listSlot)), line)
 			f.emit(EncodeImm(OpLoadLocal, uint32(idxSlot)), line)
