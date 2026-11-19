@@ -252,3 +252,53 @@ func (v *verifier) checkReadonlyWrites(params []sema.FuncParamInfo, body any, sc
 		return true
 	})
 }
+
+// checkMutAliases rejects a call that passes as mut something another of
+// its arguments may reach too. The callee is verified with its parameters
+// taken for separate values, which the caller therefore has to guarantee:
+// of a mut argument and any other argument that can hold an entity, one at
+// least is rooted in a variable that is not shared.
+func (v *verifier) checkMutAliases(groups [][]ast.Expr, env *symEnv, scope string) {
+	unshared := func(e ast.Expr) bool {
+		r := mutRoot(e)
+		return r != nil && !env.shared[r.Name]
+	}
+	visitExprs(reflect.ValueOf(groups), func(e ast.Expr) bool {
+		if _, ok := e.(*ast.LambdaExpr); ok {
+			// Its parameters are not this function's variables.
+			return false
+		}
+		var args []ast.CallArg
+		name := "call"
+		switch x := e.(type) {
+		case *ast.PipeExpr:
+			if c := v.pipedCall(x); c != nil {
+				args = c.Args
+				if id, ok := c.Callee.(*ast.Ident); ok {
+					name = id.Name
+				}
+			}
+		case *ast.CallExpr:
+			args = x.Args
+			if id, ok := x.Callee.(*ast.Ident); ok {
+				name = id.Name
+			}
+		case *ast.RunWorkflowExpr:
+			args, name = x.Args, x.Name
+		}
+		for i, m := range args {
+			if !m.Mut || !mayHoldEntity(v.info.ExprTypes[m.Value]) || unshared(m.Value) {
+				continue
+			}
+			for j, o := range args {
+				if i == j || !mayHoldEntity(v.info.ExprTypes[o.Value]) || v.isFreshValue(o.Value) || unshared(o.Value) {
+					continue
+				}
+				v.record(fmt.Sprintf("%s.call_%s_mut_alias", scope, name), scope, e.GetSpan(), "a mut argument is not reachable from another argument", VCFailed,
+					fmt.Sprintf("in the call of %s, the mut argument %d and argument %d may be, or hold, the same entity", name, i+1, j+1), nil)
+				return true
+			}
+		}
+		return true
+	})
+}

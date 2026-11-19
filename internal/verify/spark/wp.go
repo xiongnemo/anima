@@ -695,6 +695,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)
+	v.checkMutAliases(groups, env, scope)
 	v.noteShared(stmt, groups, env)
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:

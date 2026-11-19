@@ -159,26 +159,56 @@ func pathRoot(path string) string {
 }
 
 // sharingOf lists the variables that node, on its own, makes shared, and
-// whether it gives the variable `fresh` an entity nothing else can reach.
+// whether it gives the variable `fresh` a value nothing else can reach.
+// After it, two variables that can reach one entity are both shared.
 func (v *verifier) sharingOf(node any) (names []string, fresh string) {
-	stored := func(e ast.Expr) {
-		if _, ok := v.info.ExprTypes[e].(*sema.EntityType); !ok {
-			return
+	root := func(e ast.Expr) {
+		if r := mutRoot(e); r != nil {
+			names = append(names, r.Name)
 		}
-		if p, ok := mutArgPath(e); ok {
-			names = append(names, pathRoot(p))
+	}
+	// stored: the value of e stays reachable from somewhere else.
+	stored := func(e ast.Expr) bool {
+		r := mutRoot(e)
+		if r == nil || !mayHoldEntity(v.info.ExprTypes[e]) {
+			return false
 		}
+		names = append(names, r.Name)
+		return true
+	}
+	bindsVar := func(pats ...ast.Pattern) bool {
+		found := false
+		for _, p := range pats {
+			visitNodes(reflect.ValueOf(p), func(n any) {
+				if _, ok := n.(*ast.VarPat); ok {
+					found = true
+				}
+			})
+		}
+		return found
 	}
 	switch x := node.(type) {
 	case *ast.ForStmt:
 		if _, isRange := x.Iterable.(*ast.RangeExpr); !isRange {
 			names = append(names, x.Var)
+			root(x.Iterable)
 		}
 	case *ast.VarPat:
 		names = append(names, x.Name)
+	case *ast.MatchStmt:
+		for _, arm := range x.Arms {
+			if bindsVar(arm.Pattern) {
+				root(x.Subject)
+			}
+		}
+	case *ast.MatchExpr:
+		for _, arm := range x.Arms {
+			if bindsVar(arm.Pattern) {
+				root(x.Subject)
+			}
+		}
 	case *ast.LetAssignStmt:
-		switch v.info.ExprTypes[x.Value].(type) {
-		case *sema.IntType, sema.BoolType, sema.StrType:
+		if isScalar(v.info.ExprTypes[x.Value]) {
 			// A number read out of an entity is not a way to reach it.
 			// A value of any other type may be one, an element of an
 			// untyped map for instance.
@@ -192,19 +222,24 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 			src = t.Inner
 		}
-		if p, ok := mutArgPath(src); ok {
-			names = append(names, x.Name, pathRoot(p))
-		} else if v.isFreshValue(src) {
+		if r := mutRoot(src); r != nil {
+			// A second name, or a name for something inside another value.
+			names = append(names, x.Name, r.Name)
+		} else if v.isFreshValue(src) && len(v.sharedIn(x.Value)) == 0 {
 			fresh = x.Name
 		} else {
-			// An element of a list, or what a call hands back, which may
-			// be one of its arguments.
+			// What a call hands back may be one of its arguments, and a
+			// new value may hold a variable's entity.
 			names = append(names, x.Name)
 		}
 	case *ast.IndexAssignStmt:
-		stored(x.Value)
+		if stored(x.Value) {
+			root(x.List)
+		}
 	case *ast.FieldAssignStmt:
-		stored(x.Value)
+		if stored(x.Value) {
+			root(x.Object)
+		}
 	case *ast.ListLit:
 		for _, el := range x.Elems {
 			stored(el)
@@ -218,7 +253,7 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 		switch c := x.Callee.(type) {
 		case *ast.Ident:
 			if fi := v.info.Funcs[c.Name]; fi != nil {
-				keeps = mayKeepArgument(fi.Type.Params, fi.Type.Return)
+				keeps = v.mayKeepArgument(fi.Type.Params, fi.Type.Return)
 			} else {
 				keeps = v.info.Entities[c.Name] != nil || v.isVariantConstructor(x)
 			}
@@ -232,7 +267,7 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 		}
 	case *ast.RunWorkflowExpr:
-		if wi := v.info.Workflows[x.Name]; wi != nil && mayKeepArgument(wi.Params, wi.Return) {
+		if wi := v.info.Workflows[x.Name]; wi != nil && v.mayKeepArgument(wi.Params, wi.Return) {
 			for _, a := range x.Args {
 				stored(a.Value)
 			}
@@ -245,15 +280,51 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 	return names, fresh
 }
 
+// mayHoldEntity reports whether a value of type t can be, or contain, an
+// entity. A type that is not known is taken to.
+func mayHoldEntity(t sema.Type) bool {
+	return mayHoldEntityIn(t, 0)
+}
+
+func mayHoldEntityIn(t sema.Type, depth int) bool {
+	if depth > 8 {
+		return true
+	}
+	switch x := t.(type) {
+	case *sema.IntType, sema.BoolType, sema.StrType, *sema.HandleType, *sema.FuncType:
+		return false
+	case *sema.ListType:
+		return mayHoldEntityIn(x.Elem, depth+1)
+	case *sema.MapType:
+		return mayHoldEntityIn(x.Val, depth+1)
+	case *sema.ADTType:
+		for _, a := range x.TypeArgs {
+			if mayHoldEntityIn(a, depth+1) {
+				return true
+			}
+		}
+		for _, vi := range x.Variants {
+			for _, f := range vi.Fields {
+				if _, isVar := f.Type.(sema.TypeVar); !isVar && mayHoldEntityIn(f.Type, depth+1) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // mayKeepArgument reports whether a function with these parameters and
 // result can leave one of its arguments reachable after it returns: inside
-// a mut argument, through a handle (a channel, a pool), or as its result.
-func mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) bool {
-	if ret != nil && !isScalar(ret) {
+// a mut argument that has room for an entity, through a handle (a channel,
+// a pool), or as its result.
+func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) bool {
+	if ret != nil && mayHoldEntity(ret) {
 		return true
 	}
 	for _, p := range params {
-		if p.Mut {
+		if p.Mut && mayHoldEntity(p.Type) && !v.isFlatEntity(p.Type) {
 			return true
 		}
 		switch p.Type.(type) {
@@ -270,7 +341,7 @@ func mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) bool {
 func (v *verifier) isFreshValue(e ast.Expr) bool {
 	scalarArgs := func(args []ast.CallArg) bool {
 		for _, a := range args {
-			if !isScalar(v.info.ExprTypes[a.Value]) {
+			if mayHoldEntity(v.info.ExprTypes[a.Value]) {
 				return false
 			}
 		}
