@@ -324,25 +324,102 @@ static bool v_eq(AnimaVal a, AnimaVal b) {
     }
 }
 
-static char *v_to_cstr(AnimaVal v) {
-    char buf[128];
-    switch (v.kind) {
-        case VAL_VOID: return strdup("()");
-        case VAL_NONE: return strdup("None");
-        case VAL_INT: snprintf(buf, sizeof(buf), "%lld", (long long)v.u.i); return strdup(buf);
-        case VAL_BOOL: return strdup(v.u.b ? "True" : "False");
-        case VAL_STR: return strdup(v.u.s ? v.u.s : "");
-        case VAL_VARIANT: {
-            if (!v.u.var || v.u.var->len == 0) return strdup(v.u.var ? v.u.var->name : "None");
-            char *inner = v_to_cstr(v.u.var->fields[0]);
-            size_t len = strlen(v.u.var->name) + strlen(inner) + 4;
-            char *out = malloc(len);
-            snprintf(out, len, "%s(%s)", v.u.var->name, inner);
-            free(inner);
-            return out;
-        }
-        default: return strdup("<val>");
+// A value as text, the same as Value.String in the VM: map entries and
+// entity fields in the order of their keys.
+typedef struct { char *p; size_t len; size_t cap; } AnimaBuf;
+
+static void buf_put(AnimaBuf *b, const char *s) {
+    size_t n = strlen(s);
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->p = realloc(b->p, b->cap);
     }
+    memcpy(b->p + b->len, s, n + 1);
+    b->len += n;
+}
+
+static void v_fmt_key(AnimaBuf *b, const char *k) {
+    char esc[8];
+    buf_put(b, "\"");
+    for (const unsigned char *c = (const unsigned char *)k; *c; c++) {
+        if (*c == '"' || *c == '\\') { esc[0] = '\\'; esc[1] = (char)*c; esc[2] = 0; }
+        else if (*c == '\n') strcpy(esc, "\\n");
+        else if (*c == '\t') strcpy(esc, "\\t");
+        else if (*c == '\r') strcpy(esc, "\\r");
+        else if (*c < 0x20 || *c == 0x7f) snprintf(esc, sizeof(esc), "\\x%02x", *c);
+        else { esc[0] = (char)*c; esc[1] = 0; }
+        buf_put(b, esc);
+    }
+    buf_put(b, "\"");
+}
+
+static int v_entry_cmp(const void *a, const void *b) {
+    return strcmp((*(AnimaMapEntry *const *)a)->key, (*(AnimaMapEntry *const *)b)->key);
+}
+
+static void v_fmt(AnimaBuf *b, AnimaVal v);
+
+// The entries of a map or the fields of an entity, sorted by key.
+static void v_fmt_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, bool quoted) {
+    AnimaMapEntry **order = malloc((len ? len : 1) * sizeof(*order));
+    for (size_t i = 0; i < len; i++) order[i] = &entries[i];
+    qsort(order, len, sizeof(*order), v_entry_cmp);
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0) buf_put(b, ", ");
+        if (quoted) { v_fmt_key(b, order[i]->key); buf_put(b, ": "); }
+        else { buf_put(b, order[i]->key); buf_put(b, "="); }
+        v_fmt(b, order[i]->val);
+    }
+    free(order);
+}
+
+static void v_fmt(AnimaBuf *b, AnimaVal v) {
+    char num[32];
+    switch (v.kind) {
+        case VAL_VOID: buf_put(b, "()"); break;
+        case VAL_NONE: buf_put(b, "None"); break;
+        case VAL_INT: snprintf(num, sizeof(num), "%lld", (long long)v.u.i); buf_put(b, num); break;
+        case VAL_BOOL: buf_put(b, v.u.b ? "True" : "False"); break;
+        case VAL_STR: buf_put(b, v.u.s ? v.u.s : ""); break;
+        case VAL_LIST:
+            buf_put(b, "[");
+            for (size_t i = 0; v.u.list && i < v.u.list->len; i++) {
+                if (i > 0) buf_put(b, ", ");
+                v_fmt(b, v.u.list->items[i]);
+            }
+            buf_put(b, "]");
+            break;
+        case VAL_MAP:
+            buf_put(b, "{");
+            if (v.u.map) v_fmt_entries(b, v.u.map->entries, v.u.map->len, true);
+            buf_put(b, "}");
+            break;
+        case VAL_ENTITY:
+            buf_put(b, v.u.ent && v.u.ent->type_name ? v.u.ent->type_name : "");
+            buf_put(b, "(");
+            if (v.u.ent) v_fmt_entries(b, v.u.ent->fields, v.u.ent->len, false);
+            buf_put(b, ")");
+            break;
+        case VAL_VARIANT:
+            if (!v.u.var) { buf_put(b, "None"); break; }
+            buf_put(b, v.u.var->name);
+            if (v.u.var->len == 0) break;
+            buf_put(b, "(");
+            for (size_t i = 0; i < v.u.var->len; i++) {
+                if (i > 0) buf_put(b, ", ");
+                v_fmt(b, v.u.var->fields[i]);
+            }
+            buf_put(b, ")");
+            break;
+        default: buf_put(b, "<val>"); break;
+    }
+}
+
+static char *v_to_cstr(AnimaVal v) {
+    AnimaBuf b = {0};
+    buf_put(&b, "");
+    v_fmt(&b, v);
+    return b.p;
 }
 
 static AnimaVal v_str_cat(AnimaVal a, AnimaVal b) {
