@@ -59,9 +59,17 @@ func CheckSat(f BoolExpr) SolveResult {
 	}
 
 	const maxTheoryLoops = 2000
+	// Assignments the theory solver could not decide are skipped so another one can still prove SAT;
+	// once any was skipped, exhausting the search no longer proves UNSAT.
+	const maxUndecided = 4
+	var undecided int
+	var undecidedExplain string
 	for loop := 0; loop < maxTheoryLoops; loop++ {
 		sat := solver.solveSAT()
 		if !sat {
+			if undecided > 0 {
+				return SolveResult{Status: StatusUnknown, Explain: undecidedExplain}
+			}
 			return SolveResult{
 				Status:      StatusUnsat,
 				Explain:     fmt.Sprintf("proved UNSAT via CDCL(LIA) in %d theory refinements", loop),
@@ -118,6 +126,9 @@ func CheckSat(f BoolExpr) SolveResult {
 				block[i] = -lit
 			}
 			if !solver.addLearnedTheoryClause(block) {
+				if undecided > 0 {
+					return SolveResult{Status: StatusUnknown, Explain: undecidedExplain}
+				}
 				return SolveResult{
 					Status:      StatusUnsat,
 					Explain:     fmt.Sprintf("CDCL+LIA UNSAT after %d theory conflicts (%s)", loop+1, liaRes.Explain),
@@ -127,7 +138,15 @@ func CheckSat(f BoolExpr) SolveResult {
 			}
 
 		case LIAUnknown:
-			return SolveResult{Status: StatusUnknown, Explain: liaRes.Explain}
+			undecided++
+			undecidedExplain = liaRes.Explain
+			block := make([]int, 0, len(tagged))
+			for _, ta := range tagged {
+				block = append(block, -ta.LitID)
+			}
+			if undecided >= maxUndecided || len(block) == 0 || !solver.addLearnedTheoryClause(block) {
+				return SolveResult{Status: StatusUnknown, Explain: undecidedExplain}
+			}
 		}
 	}
 	return SolveResult{Status: StatusUnknown, Explain: "DPLL(T) loop limit reached"}

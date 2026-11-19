@@ -132,7 +132,11 @@ func solveLIA_BnB(tagged []TaggedAtom, budget *int) LIAResult {
 		core := mergeCore(lRes.Core, rRes.Core)
 		return LIAResult{Status: LIAUnsat, Core: core, Explain: "integer branch-and-bound infeasible"}
 	}
-	return LIAResult{Status: LIAUnknown}
+	explain := lRes.Explain
+	if lRes.Status != LIAUnknown {
+		explain = rRes.Explain
+	}
+	return LIAResult{Status: LIAUnknown, Explain: explain}
 }
 
 func ratFloor(r *big.Rat) int64 {
