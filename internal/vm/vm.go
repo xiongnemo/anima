@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -203,6 +204,41 @@ func (v Value) Equals(o Value) bool {
 	}
 }
 
+func sortedKeys(m map[string]Value) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// quoteKey writes a map key between double quotes. The native runtime has
+// the same escapes (v_fmt_key in runtime_c.go).
+func quoteKey(k string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(k); i++ {
+		switch c := k[i]; {
+		case c == '"' || c == '\\':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case c == '\n':
+			b.WriteString(`\n`)
+		case c == '\t':
+			b.WriteString(`\t`)
+		case c == '\r':
+			b.WriteString(`\r`)
+		case c < 0x20 || c == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 func (v Value) String() string {
 	switch v.Kind {
 	case ValVoid:
@@ -228,15 +264,17 @@ func (v Value) String() string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case ValMap:
+		// In the order of the keys: the order of a Go map changes from one
+		// run to the next, and the native backend has to print the same.
 		var parts []string
-		for k, val := range v.Map {
-			parts = append(parts, fmt.Sprintf("%q: %s", k, val.String()))
+		for _, k := range sortedKeys(v.Map) {
+			parts = append(parts, quoteKey(k)+": "+v.Map[k].String())
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
 	case ValEntity:
 		var parts []string
-		for k, val := range v.Entity.Fields {
-			parts = append(parts, fmt.Sprintf("%s=%s", k, val.String()))
+		for _, k := range sortedKeys(v.Entity.Fields) {
+			parts = append(parts, fmt.Sprintf("%s=%s", k, v.Entity.Fields[k].String()))
 		}
 		return fmt.Sprintf("%s(%s)", v.Entity.TypeName, strings.Join(parts, ", "))
 	case ValVariant:
