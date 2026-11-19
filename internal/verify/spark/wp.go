@@ -284,6 +284,8 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// assignDepth counts the assignSymbolic calls in progress.
+	assignDepth int
 	// effectsDone tells the next assignSymbolic that the right-hand side
 	// has been checked and its effects applied already.
 	effectsDone bool
@@ -935,7 +937,12 @@ const assignTarget = "\x00assigned"
 // old value survives: what the kernel cannot work out about the new one is
 // an arbitrary value of its type.
 func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
-	v.assignValue(assignTarget, rhs, env, scope, span)
+	// A value being worked out may itself assign an entity to one of its
+	// fields, so each level has a temporary of its own.
+	target := fmt.Sprintf("%s%d", assignTarget, v.assignDepth)
+	v.assignDepth++
+	v.assignValue(target, rhs, env, scope, span)
+	v.assignDepth--
 	env.unbind(name)
 	ty := v.info.ExprTypes[rhs]
 	switch ty.(type) {
@@ -947,7 +954,7 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 		v.bindFresh(env, name, ty)
 		v.noInvariants = saved
 	}
-	env.rename(assignTarget, name)
+	env.rename(target, name)
 	_, isInt := env.intTerms[name]
 	_, isBool := env.boolTerms[name]
 	if _, isList := env.listLens[name]; !isInt && !isBool && !isList {

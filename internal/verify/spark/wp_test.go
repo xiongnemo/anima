@@ -1504,6 +1504,24 @@ entity Holder:
 			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
 		}
 	}
+	// A field of the outer entity is not mistaken for one of the new inner entity.
+	outer := `
+entity P:
+    x: int[0..10]
+
+entity Wide:
+    inner: P
+    x: int[0..10]
+
+def f(mut b: Wide) -> int:
+    b.x = 5
+    c = b with {inner: P(x=0)}
+    a = c.inner
+    return 10 / a.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, outer)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("outer field with the inner field's name: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
 	ok := prelude + "\ndef f(mut b: Holder) -> int:\n    b.inner = P(x=2)\n    a = b.inner\n    return 10 / a.x\n"
 	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
 		t.Errorf("the new contents are known, failed VCs: %v", failed)
