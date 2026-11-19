@@ -844,6 +844,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			// its type holds across every later assignment.
 			valTy = NewUnboundedInt()
 		}
+		if err := keepsSort(sc, s.Name, valTy, s.Span); err != nil {
+			return err
+		}
 		if c.curFuncInfo != nil {
 			c.addUnique(&c.curFuncInfo.Frame.Writes, s.Name)
 		}
@@ -1008,6 +1011,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if lt.Kind() != KindInt || ht.Kind() != KindInt {
 				return fmt.Errorf("%s: range bounds must be int", r.Span)
 			}
+			if err := keepsSort(sc, s.Var, NewUnboundedInt(), s.Span); err != nil {
+				return err
+			}
 			sub.defineLocal(s.Var, varBinding{ty: NewUnboundedInt(), span: s.Span})
 		} else {
 			ity, err := c.checkExpr(s.Iterable, sc)
@@ -1017,6 +1023,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			var elem Type = UnknownType{}
 			if lt, ok := ity.(*ListType); ok {
 				elem = lt.Elem
+			}
+			if err := keepsElements(sc, s.Var, elem, s.Span); err != nil {
+				return err
 			}
 			sub.defineLocal(s.Var, varBinding{ty: elem, span: s.Span})
 		}
@@ -1121,6 +1130,9 @@ func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
 	case *ast.StrPat:
 		return fits(p.Span, "a string", KindStr)
 	case *ast.VarPat:
+		if err := keepsElements(sc, p.Name, subjTy, p.Span); err != nil {
+			return err
+		}
 		sc.defineLocal(p.Name, varBinding{ty: subjTy, span: p.Span})
 		return nil
 	case *ast.VariantPat:
@@ -1577,6 +1589,31 @@ func sameSort(a, b Type) bool {
 		return !ok || x.Name == y.Name
 	}
 	return true
+}
+
+// keepsSort refuses to give the variable name, when there is one in scope, a
+// value of another sort than it has: an assignment, a loop variable and a
+// name in a pattern all write the one variable, and what it holds after an
+// if, a loop or a match is read with one type, whichever branch ran.
+func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
+	if prev, found := sc.lookup(name); found && !sameSort(prev.ty, ty) {
+		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps its sort", span, name, prev.ty, ty)
+	}
+	return nil
+}
+
+// keepsElements is keepsSort for a loop variable and a name in a pattern,
+// which take the type of what they are bound to: a list, a map or a variant
+// already in scope under that name must have that very type, as the kernel
+// reads the range of its elements from the type the variable has afterwards.
+func keepsElements(sc *scope, name string, ty Type, span ast.Span) error {
+	if err := keepsSort(sc, name, ty, span); err != nil {
+		return err
+	}
+	if prev, found := sc.lookup(name); found && keepsType(prev.ty) && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
+		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of its elements", span, name, prev.ty, ty)
+	}
+	return nil
 }
 
 // checkComparison checks the operands of a comparison or a logical operator.
