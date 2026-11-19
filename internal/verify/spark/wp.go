@@ -835,6 +835,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		if ix, ok := s.Target.(*ast.IndexExpr); ok {
 			v.evalSideEffects(ix.List, env, scope)
 			v.evalSideEffects(ix.Index, env, scope)
+			v.proveIndex(ix.List, v.evalInt(ix.Index, env, scope, false), env, scope, s.Span)
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
 			v.evalSideEffects(fe.Object, env, scope)
 		}
@@ -871,6 +872,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
+		// The index is evaluated before the value, the write comes last.
+		v.proveIndex(s.List, v.evalInt(s.Index, env, scope, false), env, scope, s.Span)
 		v.proveEntityValue(s.Value, env, scope)
 		v.proveElemAssign(s.List, s.Value, env, scope, s.Span)
 		env.forgetElemHulls()
@@ -1190,6 +1193,9 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 						if t := v.tryEvalInt(arg.Value, env); t != nil {
 							env.intTerms[name+"."+field] = *t
 						}
+						if lt, ok := v.lenOfValue(arg.Value, env); ok {
+							env.listLens[name+"."+field] = lt
+						}
 					}
 				}
 			}
@@ -1201,12 +1207,16 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 				if iv := v.literalHull(ll, env, scope); iv.HasLo && iv.HasHi {
 					env.listElems[name] = iv
 				}
-			} else if id, ok := rhs.(*ast.Ident); ok {
+			} else if from, ok := mutArgPath(rhs); ok {
 				// A list never changes its length, so a second name for it has the same one.
-				env.listLens[name] = env.lenOf(id.Name)
-				if iv, ok := env.listElems[id.Name]; ok {
+				env.listLens[name] = env.lenOf(from)
+				if iv, ok := env.listElems[from]; ok {
 					env.listElems[name] = iv
 				}
+			}
+		case sema.StrType:
+			if lt, ok := v.lenOfValue(rhs, env); ok {
+				env.listLens[name] = lt
 			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
@@ -1394,19 +1404,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	case *ast.IndexExpr:
 		v.evalSideEffects(e.List, env, scope)
 		v.evalSideEffects(e.Index, env, scope)
-		idx := v.evalInt(e.Index, env, scope, true)
-		if id, ok := e.List.(*ast.Ident); ok {
-			lt, exists := env.listLens[id.Name]
-			// A list whose length was forgotten, by a loop that assigns it
-			// or a pattern that names it, has some length all the same.
-			if _, isList := v.info.ExprTypes[e.List].(*sema.ListType); isList && !exists {
-				lt, exists = env.lenOf(id.Name), true
-			}
-			if exists {
-				v.prove(scope+".index_bounds", scope, e.Span, env,
-					smt.And(smt.Ge(idx, smt.Const(0)), smt.Lt(idx, lt)))
-			}
-		}
+		v.proveIndex(e.List, v.evalInt(e.Index, env, scope, true), env, scope, e.Span)
 	case *ast.CallExpr:
 		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
@@ -1494,12 +1492,15 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					case sema.BoolType:
 						valB := v.evalBool(a.Value, env, scope)
 						binds = append(binds, func(c *symEnv) { c.boolTerms[p.Name] = valB })
+					case sema.StrType:
+						lt, known := v.lenOfValue(a.Value, env)
+						if !known {
+							lt = env.freshLen("arg")
+						}
+						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
 					case *sema.ListType:
 						argID, _ := a.Value.(*ast.Ident)
-						lt, known := smt.LinearTerm{}, false
-						if argID != nil {
-							lt, known = env.listLens[argID.Name]
-						}
+						lt, known := v.lenOfValue(a.Value, env)
 						if !known {
 							lt = smt.Var(env.freshVar("arglen"))
 						}
@@ -1512,6 +1513,15 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					case *sema.EntityType:
 						argID, _ := a.Value.(*ast.Ident)
 						for _, f := range pt.Fields {
+							// The lists and strings in the fields are as long as the caller knows.
+							switch f.Type.(type) {
+							case *sema.ListType, sema.StrType:
+								if argID != nil {
+									lt := env.lenOf(argID.Name + "." + f.Name)
+									path := p.Name + "." + f.Name
+									binds = append(binds, func(c *symEnv) { c.listLens[path] = lt })
+								}
+							}
 							if _, isInt := f.Type.(*sema.IntType); !isInt {
 								continue
 							}
@@ -2365,11 +2375,12 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 		}
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
-			if argID, ok := e.Args[0].Value.(*ast.Ident); ok {
-				if !hasFixedLen(v.info.ExprTypes[argID]) {
-					env.mapLens[argID.Name] = true
+			// The length of what a variable holds, or a field of one.
+			if path, ok := mutArgPath(e.Args[0].Value); ok {
+				if !hasFixedLen(v.info.ExprTypes[e.Args[0].Value]) {
+					env.mapLens[path] = true
 				}
-				return env.lenOf(argID.Name)
+				return env.lenOf(path)
 			}
 		}
 	}

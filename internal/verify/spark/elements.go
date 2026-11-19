@@ -96,3 +96,58 @@ func (v *verifier) elemHull(ix *ast.IndexExpr, env *symEnv) (smt.Interval, bool)
 	iv, ok := env.listElems[id.Name]
 	return iv, ok && iv.HasLo && iv.HasHi
 }
+
+// proveIndex proves idx inside the list or string that indexed evaluates
+// to: out of it a read gives None, whatever the element type says, and a
+// write is dropped. The length is known of a literal and of what a
+// variable or a field of one holds; any other list or string has to be
+// given a name first. A map is keyed, and takes any key.
+func (v *verifier) proveIndex(indexed ast.Expr, idx smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
+	name := scope + ".index_bounds"
+	path, named := mutArgPath(indexed)
+	var length smt.LinearTerm
+	switch v.info.ExprTypes[indexed].(type) {
+	case *sema.ListType, sema.StrType:
+		lt, known := v.lenOfValue(indexed, env)
+		if !known {
+			if smt.CheckSat(smt.And(smt.Int64Pins(), env.pathCond())).Status == smt.StatusUnsat {
+				v.record(name, scope, span, "index < len", VCProved, "unreachable", nil)
+				return
+			}
+			v.record(name, scope, span, "index < len", VCFailed,
+				"the length of what is indexed is not known here: give it a name first, as in `row = rows[i]`", nil)
+			return
+		}
+		length = lt
+	case *sema.MapType:
+		return
+	default:
+		// A value sema has no type for is checked when its length is known.
+		lt, known := env.listLens[path]
+		if !named || !known || env.mapLens[path] {
+			return
+		}
+		length = lt
+	}
+	v.prove(name, scope, span, env, smt.And(smt.Ge(idx, smt.Const(0)), smt.Lt(idx, length)))
+}
+
+// lenOfValue is the length of the list or string e evaluates to, when e is
+// a literal, a variable or a field of one.
+func (v *verifier) lenOfValue(e ast.Expr, env *symEnv) (smt.LinearTerm, bool) {
+	switch v.info.ExprTypes[e].(type) {
+	case *sema.ListType, sema.StrType:
+	default:
+		return smt.LinearTerm{}, false
+	}
+	switch x := e.(type) {
+	case *ast.ListLit:
+		return smt.Const(int64(len(x.Elems))), true
+	case *ast.StrLit:
+		return smt.Const(int64(len(x.Value))), true
+	}
+	if path, ok := mutArgPath(e); ok {
+		return env.lenOf(path), true
+	}
+	return smt.LinearTerm{}, false
+}
