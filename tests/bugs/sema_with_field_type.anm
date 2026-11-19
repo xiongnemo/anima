@@ -1,0 +1,10 @@
+entity Box:
+    vals: list[int[1..9]]
+    n: int
+
+def main() -> int:
+    b = Box(vals=[1, 2], n=1)
+    ys: list[int] = [0]
+    c = b with {vals: ys}
+    print(10 / c.vals[0])
+    return 0

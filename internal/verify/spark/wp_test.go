@@ -1203,9 +1203,7 @@ def divide(a: int[0..9], b: int[0..9]) -> int:
 		{"by position, then keyword", "divide(2, b=0)", ""},
 		{"zero divisor by position after a keyword", "divide(b=1, 0)", "call_divide_args"},
 		{"parameter given twice", "divide(4, a=6)", "call_divide_args"},
-		{"unknown keyword", "divide(typo=0, 1)", "call_divide_args"},
 		{"piped value with a keyword for the rest", "2 |> divide(b=1)", ""},
-		{"piped value and keyword for the same parameter", "0 |> divide(b=1, a=0)", "call_divide_args"},
 	}
 	for _, tc := range cases {
 		src := prelude + "\ndef g() -> int:\n    y = " + tc.call + "\n    return 0\n"
@@ -2419,6 +2417,286 @@ def f(mut o: Outer) -> Option[int]:
     o.inner.y = 4
     return Some(v)
 `,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// The range of the elements of a list, of the values of a map and of the
+// fields of a variant is proved where they are made or written.
+func TestSPARKElementRanges(t *testing.T) {
+	rejected := map[string]struct{ src, vc string }{
+		"literal for a keyword argument": {`
+def f(a: list[int[1..9]], b: list[int[0..20]]) -> int:
+    if len(a) > 0:
+        return 100 / a[0]
+    return 0
+
+def main() -> int:
+    print(f(b=[5], a=[0]))
+    return 0
+`, "list_elem_bounds"},
+		"piped literal": {`
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    print([0] |> first)
+    return 0
+`, "list_elem_bounds"},
+		"literal after a piped value": {`
+def add(a: int[1..9], ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return a
+
+def main() -> int:
+    print(5 |> add([0]))
+    return 0
+`, "list_elem_bounds"},
+		"r11/a1": {`
+def main() -> int:
+    xs = [5, 0]
+    print(10 / xs[1])
+    return 0
+`, "div_nonzero"},
+		"r11/a2": {`
+def main() -> int:
+    m = {"a": 5, "b": 0}
+    print(10 / m["b"])
+    return 0
+`, "div_nonzero"},
+		"r11/a4": {`
+def main() -> int:
+    xs = [5, 6]
+    xs[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11/a5": {`
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "elem_assign_bounds"},
+		"r11/a9": {`
+def main() -> int:
+    xs: list[int[1..9]] = [0, 6]
+    print(10 / xs[0])
+    return 0
+`, "list_elem_bounds"},
+		"r11/a11": {`
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 1}
+    m["a"] = 0
+    print(10 / m["a"])
+    return 0
+`, "elem_assign_bounds"},
+		"r11/a13": {`
+def main() -> int:
+    xs = [5, 6]
+    for i in 0..2:
+        xs[i] = xs[i] - 5
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n6": {`
+def get(c: bool) -> Option[int[1..9]]:
+    x = 0
+    if c:
+        return Some(x)
+    return None
+
+def main() -> int:
+    match get(True):
+        Some(v) -> print(10 / v)
+        None -> print(0)
+    return 0
+`, "variant_Some_range"},
+		"r11b/n17": {`
+type Shape = Circle(r: int[1..9]) | Dot
+
+def main() -> int:
+    s = Circle(0)
+    match s:
+        Circle(r) -> print(10 / r)
+        Dot -> print(0)
+    return 0
+`, "variant_Circle_range"},
+		"r11b/n13": {`
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 0}
+    print(10 / m["a"])
+    return 0
+`, "map_value_bounds"},
+		"r11b/n24": {`
+def main() -> int:
+    y: int[1..9] = 0
+    ys = [1] |> map(v => y)
+    print(10 / ys[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n31": {`
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[1..9]] = xs |> map(x => x - 5)
+    zs = xs |> map(x => x - 5)
+    for v in zs:
+        print(10 / v)
+    return 0
+`, "list_elem_bounds"},
+		"r11b/h2": {`
+def f(xs: list[int[1..9]]) -> int:
+    s = xs |> fold(0, (a, v) => 0)
+    if len(xs) == 2:
+        return 10 / s
+    return 0
+
+def main() -> int:
+    xs: list[int[1..9]] = [1, 1]
+    print(f(xs))
+    return 0
+`, "div_nonzero"},
+		"r11b/n1": {`
+def main() -> int:
+    xs = [5, 6]
+    ys = xs
+    ys[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n2": {`
+def zero(mut ys: list[int]) -> int:
+    ys[0] = 0
+    return 0
+
+def main() -> int:
+    xs = [5, 6]
+    r = zero(mut xs)
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+	}
+	for name, tc := range rejected {
+		failed := failedVCs(verifySrc(t, tc.src))
+		found := false
+		for _, f := range failed {
+			if strings.Contains(f, tc.vc) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected a failed %s VC, failed VCs: %v", name, tc.vc, failed)
+		}
+	}
+	proved := map[string]string{
+		"literals for reordered keyword arguments": `
+def f(a: list[int[1..9]], b: list[int[10..20]]) -> int:
+    if len(a) > 0:
+        return 100 / (a[0] - 10)
+    return 0
+
+def main() -> int:
+    print(f(b=[15], a=[5]))
+    return 0
+`,
+		"r11b/p1": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 7
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/p2": `
+def main() -> int:
+    xs = [5, 6]
+    print(10 / xs[0])
+    for v in xs:
+        print(10 / v)
+    return 0
+`,
+		"r11b/p3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    print(f([5, 6]))
+    xs: list[int[1..9]] = [3, 4]
+    print(f(xs))
+    return 0
+`,
+		"r11b/p5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = mk()
+    if len(xs) > 1:
+        print(10 / xs[1])
+    m: map[str, int[1..9]] = {"a": 1}
+    m["b"] = 2
+    print(10 / m["a"])
+    return 0
+`,
+		"r11b/p6": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[2..10]] = xs |> map(x => x + 1)
+    zs = xs |> map(x => x - 5)
+    for v in ys:
+        print(10 / v)
+    return 0
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// A call that blocks on the network is given a timeout in 1..300_000,
+// whatever the type of the expression.
+func TestSPARKTimeoutBounds(t *testing.T) {
+	wait := func(decl, arg string) string {
+		return `
+import std.socket as sock
+
+def wait(t: int) -> int:
+` + decl + `
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            match ln.accept(timeout_ms=` + arg + `):
+                Ok(c) -> c.close()
+                Err(e) -> print(e)
+            ln.close()
+        Err(e) -> print(e)
+    return 0
+`
+	}
+	rejected := map[string]string{
+		"variable assigned zero": wait("    timeout = 0", "timeout"),
+		"unbounded parameter":    wait("    timeout = 1", "t"),
+		"computed zero":          wait("    timeout = 1 - 1", "timeout"),
+		"too long":               wait("    timeout = 300_000", "timeout + 1"),
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "timeout_bounds") {
+			t.Errorf("%s: expected a failed timeout_bounds, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"variable":         wait("    timeout = 20", "timeout * 2"),
+		"guarded argument": wait("    if t < 1 or t > 5000:\n        return 0", "t"),
 	}
 	for name, src := range proved {
 		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {

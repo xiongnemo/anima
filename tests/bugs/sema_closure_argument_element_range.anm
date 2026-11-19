@@ -1,0 +1,10 @@
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    ys: list[int] = [0]
+    h = (v) => first(v)
+    print(h(ys))
+    return 0

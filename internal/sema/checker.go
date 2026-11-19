@@ -13,21 +13,23 @@ import (
 func Check(prog *ast.Program) (*ProgramInfo, error) {
 	c := &checker{
 		info: &ProgramInfo{
-			Program:    prog,
-			Types:      map[string]Type{},
-			Entities:   map[string]*EntityType{},
-			ADTs:       map[string]*ADTType{},
-			Variants:   map[string]*ADTType{},
-			Ports:      map[string]*PortType{},
-			Machines:   map[string]*ast.MachineDecl{},
-			Properties: map[string]*ast.PropertyDecl{},
-			Progresses: map[string]*ast.ProgressDecl{},
-			Workflows:  map[string]*WorkflowInfo{},
-			Systems:    map[string]*ast.SystemDecl{},
-			Funcs:      map[string]*FuncInfo{},
-			ExprTypes:  map[ast.Expr]Type{},
-			Imports:    map[string]string{},
-			StdHandles: defaultStdHandles(),
+			Program:        prog,
+			Types:          map[string]Type{},
+			Entities:       map[string]*EntityType{},
+			ADTs:           map[string]*ADTType{},
+			Variants:       map[string]*ADTType{},
+			Ports:          map[string]*PortType{},
+			Machines:       map[string]*ast.MachineDecl{},
+			Properties:     map[string]*ast.PropertyDecl{},
+			Progresses:     map[string]*ast.ProgressDecl{},
+			Workflows:      map[string]*WorkflowInfo{},
+			Systems:        map[string]*ast.SystemDecl{},
+			Funcs:          map[string]*FuncInfo{},
+			ExprTypes:      map[ast.Expr]Type{},
+			LiteralTargets: map[ast.Expr]Type{},
+			TimeoutArgs:    map[*ast.CallExpr]ast.Expr{},
+			Imports:        map[string]string{},
+			StdHandles:     defaultStdHandles(),
 		},
 	}
 	c.registerBuiltins()
@@ -815,14 +817,32 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			if !isAssignable(annoTy, valTy) && !(emptyMap && annoTy.Kind() == KindMap) {
+			if !(emptyMap && annoTy.Kind() == KindMap) && !c.assignable(annoTy, valTy, s.Value) {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s)", s.Span, valTy, s.Name, annoTy)
+			}
+			// A variable keeps the type of its lists, maps and variants:
+			// the kernel reads the range of an element from it.
+			if prev, found := sc.lookup(s.Name); found && keepsType(prev.ty) && !(isAssignable(prev.ty, annoTy) && isAssignable(annoTy, prev.ty)) {
+				return fmt.Errorf("%s: %s is a %s and cannot be declared again as a %s", s.Span, s.Name, prev.ty, annoTy)
 			}
 			valTy = annoTy
 		} else if emptyMap {
 			if prev, found := sc.lookup(s.Name); found && prev.ty != nil && prev.ty.Kind() == KindMap {
 				valTy = prev.ty
 			}
+		} else if prev, found := sc.lookup(s.Name); found && keepsType(prev.ty) && valTy != nil && prev.ty.Kind() == valTy.Kind() {
+			target, ok := fillUnknown(prev.ty, valTy, false)
+			if !ok {
+				return fmt.Errorf("%s: cannot assign %s to %s (%s): give %s a type where it is first assigned", s.Span, valTy, s.Name, prev.ty, s.Name)
+			}
+			if !c.assignable(target, valTy, s.Value) {
+				return fmt.Errorf("%s: cannot assign %s to %s (%s): a variable keeps the type of its elements", s.Span, valTy, s.Name, target)
+			}
+			valTy = target
+		} else if _, isInt := valTy.(*IntType); isInt {
+			// The value of an int variable is the kernel's to work out;
+			// its type holds across every later assignment.
+			valTy = NewUnboundedInt()
 		}
 		if c.curFuncInfo != nil {
 			c.addUnique(&c.curFuncInfo.Frame.Writes, s.Name)
@@ -874,7 +894,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !exists {
 				return fmt.Errorf("%s: entity %s has no field %q", s.Span, et.Name, s.Field)
 			}
-			if !isAssignable(ft, valTy) {
+			if !c.assignable(ft, valTy, s.Value) {
 				return fmt.Errorf("%s: field %s.%s expects %s, got %s", s.Span, et.Name, s.Field, ft, valTy)
 			}
 		}
@@ -897,7 +917,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if ity.Kind() != KindInt {
 				return fmt.Errorf("%s: list index must be int, got %s", s.Span, ity)
 			}
-			if !isAssignable(lt.Elem, vty) {
+			if !c.assignable(lt.Elem, vty, s.Value) {
 				return fmt.Errorf("%s: list element expects %s, got %s", s.Span, lt.Elem, vty)
 			}
 		}
@@ -905,7 +925,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
 				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
 			}
-			if !isAssignable(mt.Val, vty) {
+			if !c.assignable(mt.Val, vty, s.Value) {
 				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
 			}
 		}
@@ -1050,7 +1070,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			return err
 		}
 		if c.curReturn != nil && c.curReturn.Kind() != KindVoid {
-			if !isAssignable(c.curReturn, vty) {
+			if !c.assignable(c.curReturn, vty, s.Value) {
 				return fmt.Errorf("%s: return type mismatch: expected %s, got %s", s.Span, c.curReturn, vty)
 			}
 		}
@@ -1236,13 +1256,13 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			if elem.Kind() == KindUnknown {
-				elem = et
-			} else if et.Kind() != KindUnknown && !elem.Equals(et) {
-				// Allow Ok/Err variants of Result or Option unification
-				elem = unifyTypes(elem, et)
-			}
+			// The element type covers every element: the ranges of ints
+			// are joined, as are the arguments of Result and Option.
+			elem = unifyTypes(elem, et)
 		}
+		// On its own a literal is a list of int: a narrower element range
+		// is one it is given where it goes (assignable).
+		elem = widenInt(elem)
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
 	case *ast.MapLit:
@@ -1269,6 +1289,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if !isMapKeyType(kt) {
 			return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", e.Span, kt)
 		}
+		vt = widenInt(vt)
 		return &MapType{Key: kt, Val: vt}, nil
 
 	case *ast.WithExpr:
@@ -1277,12 +1298,17 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		for _, f := range e.Fields {
-			if _, err := c.checkExpr(f.Value, sc); err != nil {
+			vt, err := c.checkExpr(f.Value, sc)
+			if err != nil {
 				return nil, err
 			}
 			if et, ok := baseTy.(*EntityType); ok {
-				if _, exists := et.FieldMap[f.Name]; !exists {
+				ft, exists := et.FieldMap[f.Name]
+				if !exists {
 					return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
+				}
+				if !c.assignable(ft, vt, f.Value) {
+					return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
 				}
 			}
 		}
@@ -1421,13 +1447,18 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
+			// Both backends give a workflow its arguments in the order
+			// they are written, whatever they are named.
+			if arg.Name != "" && arg.Name != wi.Params[i].Name {
+				return nil, fmt.Errorf("%s: parameter %d of workflow %s is %s, not %s: the arguments of a workflow are given in order", arg.Span, i+1, e.Name, wi.Params[i].Name, arg.Name)
+			}
 			if wi.Params[i].Mut && !arg.Mut {
 				return nil, fmt.Errorf("%s: argument %d to workflow %s must be marked 'mut'", arg.Span, i+1, e.Name)
 			}
 			if arg.Own {
 				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
 			}
-			if !isAssignable(wi.Params[i].Type, at) {
+			if !c.assignable(wi.Params[i].Type, at, arg.Value) {
 				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
 		}
@@ -1505,7 +1536,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return c.instantiateADT("Option", []Type{vt}), nil
+			return c.instantiateADT("Option", []Type{widenInt(vt)}), nil
 		case "Ok":
 			if len(e.Args) != 1 {
 				return nil, fmt.Errorf("%s: Ok() expects 1 argument", e.Span)
@@ -1514,7 +1545,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return c.instantiateADT("Result", []Type{vt, UnknownType{}}), nil
+			return c.instantiateADT("Result", []Type{widenInt(vt), UnknownType{}}), nil
 		case "Err":
 			if len(e.Args) != 1 {
 				return nil, fmt.Errorf("%s: Err() expects 1 argument", e.Span)
@@ -1523,7 +1554,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return c.instantiateADT("Result", []Type{UnknownType{}, et}), nil
+			return c.instantiateADT("Result", []Type{UnknownType{}, widenInt(et)}), nil
 		}
 
 		// Entity constructor: Account(balance=10, frozen=0)
@@ -1546,7 +1577,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 						if !isRel {
 							return nil, fmt.Errorf("%s: entity %s has no field %q", a.Span, et.Name, a.Name)
 						}
-					} else if !isAssignable(ft, at) {
+					} else if !c.assignable(ft, at, a.Value) {
 						return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", a.Span, et.Name, a.Name, ft, at)
 					}
 				}
@@ -1556,9 +1587,23 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 
 		// User ADT variant constructor
 		if adt, ok := c.info.Variants[id.Name]; ok {
-			for _, a := range e.Args {
-				if _, err := c.checkExpr(a.Value, sc); err != nil {
+			vi := adt.VariantMap[id.Name]
+			for i, a := range e.Args {
+				at, err := c.checkExpr(a.Value, sc)
+				if err != nil {
 					return nil, err
+				}
+				// Both backends fill the fields of a variant in the order
+				// the arguments are written, whatever they are named.
+				if i >= len(vi.Fields) {
+					return nil, fmt.Errorf("%s: %s has %d field(s), got %d arguments", e.Span, id.Name, len(vi.Fields), len(e.Args))
+				}
+				if a.Name != "" && a.Name != vi.Fields[i].Name {
+					return nil, fmt.Errorf("%s: field %d of %s is %s, not %s: the fields of a variant are given in order", a.Span, i+1, id.Name, vi.Fields[i].Name, a.Name)
+				}
+				ft := vi.Fields[i].Type
+				if !c.assignable(ft, at, a.Value) {
+					return nil, fmt.Errorf("%s: field %d of %s expects %s, got %s", a.Span, i+1, id.Name, ft, at)
 				}
 			}
 			return adt, nil
@@ -1566,43 +1611,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 
 		// User function call
 		if fi, ok := c.info.Funcs[id.Name]; ok {
-			if len(e.Args) != len(fi.Type.Params) {
-				return nil, fmt.Errorf("%s: function %s expects %d args, got %d", e.Span, id.Name, len(fi.Type.Params), len(e.Args))
-			}
-			for i, a := range e.Args {
-				at, err := c.checkExpr(a.Value, sc)
-				if err != nil {
-					return nil, err
-				}
-				if fi.Type.Params[i].Mut {
-					if !a.Mut {
-						return nil, fmt.Errorf("%s: argument %d to %s requires 'mut'", a.Span, i+1, id.Name)
-					}
-					if root, ok := rootVarPath(a.Value); ok {
-						if err := c.ensureMutableTarget(root, sc, a.Span); err != nil {
-							return nil, err
-						}
-					} else {
-						return nil, fmt.Errorf("%s: 'mut' argument must be a variable or field", a.Span)
-					}
-				} else if a.Mut {
-					return nil, fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, i+1, id.Name)
-				}
-				if fi.Type.Params[i].Own {
-					if !a.Own {
-						return nil, fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, id.Name)
-					}
-					if _, ok := a.Value.(*ast.Ident); !ok {
-						return nil, fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
-					}
-				} else if a.Own {
-					return nil, fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, i+1, id.Name)
-				}
-				if !isAssignable(fi.Type.Params[i].Type, at) {
-					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
-				}
-			}
-			if err := c.checkCallAliasing(e.Args, true); err != nil {
+			if err := c.checkFuncArgs(id.Name, fi, e.Args, sc, e.Span); err != nil {
 				return nil, err
 			}
 			if c.curFuncInfo != nil {
@@ -1623,14 +1632,14 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		// Enforce std.requests explicit bounded timeout_ms contract!
 		if mt, ok := objTy.(*ModuleType); ok && mt.Path == "std.requests" {
 			if fe.Field == "get" || fe.Field == "post" {
-				if err := c.checkRequestsTimeout(fe.Field, e.Args, sc, e.Span); err != nil {
+				if err := c.checkRequestsTimeout(e, fe.Field, sc); err != nil {
 					return nil, err
 				}
 			}
 		}
 		if ht, ok := objTy.(*HandleType); ok && (ht.Name == "req.Session" || ht.Name == "sock.TcpListener") {
 			if fe.Field == "get" || fe.Field == "post" || fe.Field == "get_async" || fe.Field == "accept" {
-				if err := c.checkRequestsTimeout(fe.Field, e.Args, sc, e.Span); err != nil {
+				if err := c.checkRequestsTimeout(e, fe.Field, sc); err != nil {
 					return nil, err
 				}
 			}
@@ -1700,7 +1709,11 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
-func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *scope, span ast.Span) error {
+// checkRequestsTimeout requires a blocking call to name its timeout. A
+// timeout whose type has a range is checked here; the kernel proves the
+// value in 1..300_000 whatever its type (ProgramInfo.TimeoutArgs).
+func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *scope) error {
+	args, span := call.Args, call.Span
 	var timeoutExpr ast.Expr
 	for _, a := range args {
 		if a.Name == "timeout_ms" {
@@ -1725,6 +1738,7 @@ func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *sc
 	if err != nil {
 		return err
 	}
+	c.info.TimeoutArgs[call] = timeoutExpr
 	if it, ok := ty.(*IntType); ok && it.IsBounded {
 		if it.Lo < 1 || it.Hi > 300_000 {
 			return fmt.Errorf("%s: timeout_ms range [%d..%d] exceeds legal contract int[1..300_000]", timeoutExpr.GetSpan(), it.Lo, it.Hi)
@@ -1735,6 +1749,68 @@ func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *sc
 	return nil
 }
 
+// boundParam returns the index of the parameter that argument i of a call
+// is bound to, as both backends do: the one a keyword argument names, else
+// the one at its position.
+func boundParam(params []FuncParamInfo, a ast.CallArg, i int) (int, bool) {
+	if a.Name == "" {
+		return i, i < len(params)
+	}
+	for k, p := range params {
+		if p.Name == a.Name {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// checkFuncArgs checks the arguments of a call of the function name
+// against its parameters.
+func (c *checker) checkFuncArgs(name string, fi *FuncInfo, args []ast.CallArg, sc *scope, span ast.Span) error {
+	if len(args) != len(fi.Type.Params) {
+		return fmt.Errorf("%s: function %s expects %d args, got %d", span, name, len(fi.Type.Params), len(args))
+	}
+	for i, a := range args {
+		at, err := c.checkExpr(a.Value, sc)
+		if err != nil {
+			return err
+		}
+		pi, ok := boundParam(fi.Type.Params, a, i)
+		if !ok {
+			return fmt.Errorf("%s: function %s has no parameter %q", a.Span, name, a.Name)
+		}
+		p := fi.Type.Params[pi]
+		if p.Mut {
+			if !a.Mut {
+				return fmt.Errorf("%s: argument %d to %s requires 'mut'", a.Span, i+1, name)
+			}
+			if root, ok := rootVarPath(a.Value); ok {
+				if err := c.ensureMutableTarget(root, sc, a.Span); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("%s: 'mut' argument must be a variable or field", a.Span)
+			}
+		} else if a.Mut {
+			return fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, pi+1, name)
+		}
+		if p.Own {
+			if !a.Own {
+				return fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, name)
+			}
+			if _, ok := a.Value.(*ast.Ident); !ok {
+				return fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
+			}
+		} else if a.Own {
+			return fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, pi+1, name)
+		}
+		if !c.assignable(p.Type, at, a.Value) {
+			return fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, name, p.Type, at)
+		}
+	}
+	return c.checkCallAliasing(args, true)
+}
+
 func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	lhsTy, err := c.checkExpr(e.Left, sc)
 	if err != nil {
@@ -1743,17 +1819,18 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	// Determine function name and arguments on RHS
 	var fnName string
 	var callArgs []ast.CallArg
+	direct := false // the stage names a function: `x |> f` or `x |> f(a)`
 	switch rhs := e.Right.(type) {
 	case *ast.CallExpr:
 		callArgs = rhs.Args
 		switch cal := rhs.Callee.(type) {
 		case *ast.Ident:
-			fnName = cal.Name
+			fnName, direct = cal.Name, true
 		case *ast.FieldExpr:
 			fnName = cal.Field
 		}
 	case *ast.Ident:
-		fnName = rhs.Name
+		fnName, direct = rhs.Name, true
 	}
 
 	var elemTy Type = UnknownType{}
@@ -1795,7 +1872,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 				if lt, ok := lhsTy.(*ListType); ok {
 					capVal, hasCap = lt.Cap, lt.HasCap
 				}
-				return &ListType{Elem: rty, Cap: capVal, HasCap: hasCap}, nil
+				return &ListType{Elem: widenInt(rty), Cap: capVal, HasCap: hasCap}, nil
 			}
 		}
 		return &ListType{Elem: UnknownType{}}, nil
@@ -1900,10 +1977,17 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 
 	// Generic pipe: `x |> f(a)` -> call f(x, a)
 	if fi, ok := c.info.Funcs[fnName]; ok {
-		for _, a := range callArgs {
-			if _, err := c.checkExpr(a.Value, sc); err != nil {
-				return nil, err
+		if !direct {
+			for _, a := range callArgs {
+				if _, err := c.checkExpr(a.Value, sc); err != nil {
+					return nil, err
+				}
 			}
+			return fi.Type.Return, nil
+		}
+		args := append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+		if err := c.checkFuncArgs(fnName, fi, args, sc, e.Span); err != nil {
+			return nil, err
 		}
 		return fi.Type.Return, nil
 	}
@@ -2243,17 +2327,17 @@ func isAssignable(expected, actual Type) bool {
 	if expected.Kind() == KindList && actual.Kind() == KindList {
 		el := expected.(*ListType)
 		al := actual.(*ListType)
-		return isAssignable(el.Elem, al.Elem)
+		return isAssignable(el.Elem, al.Elem) && sameElemRange(el.Elem, al.Elem)
 	}
 	if expected.Kind() == KindMap && actual.Kind() == KindMap {
 		em := expected.(*MapType)
 		am := actual.(*MapType)
-		return isAssignable(em.Key, am.Key) && isAssignable(em.Val, am.Val)
+		return isAssignable(em.Key, am.Key) && isAssignable(em.Val, am.Val) && sameElemRange(em.Val, am.Val)
 	}
 	if ea, ok := expected.(*ADTType); ok {
 		if aa, ok := actual.(*ADTType); ok && ea.Name == aa.Name {
 			for i := 0; i < len(ea.TypeArgs) && i < len(aa.TypeArgs); i++ {
-				if !isAssignable(ea.TypeArgs[i], aa.TypeArgs[i]) {
+				if !isAssignable(ea.TypeArgs[i], aa.TypeArgs[i]) || !withinRange(ea.TypeArgs[i], aa.TypeArgs[i]) {
 					return false
 				}
 			}
@@ -2263,12 +2347,266 @@ func isAssignable(expected, actual Type) bool {
 	return expected.Equals(actual)
 }
 
+// sameElemRange reports whether two element types of a list or map agree on
+// the range of an int. A list is a reference: seen as a list of int[1..9]
+// by one name and as a list of int by another, a write through the second
+// breaks what the first relies on, so the two ranges have to be the same.
+func sameElemRange(expected, actual Type) bool {
+	e, ok := expected.(*IntType)
+	a, ok2 := actual.(*IntType)
+	if _, unknown := actual.(UnknownType); unknown && ok && e.IsBounded {
+		return false
+	}
+	if !ok || !ok2 {
+		return true
+	}
+	if e.IsBounded != a.IsBounded {
+		return false
+	}
+	return !e.IsBounded || (e.Lo == a.Lo && e.Hi == a.Hi)
+}
+
+// withinRange reports whether an int in a variant of type actual is one of
+// type expected. A variant is not written after it is made, so a narrower
+// range is accepted where a wider one is expected.
+func withinRange(expected, actual Type) bool {
+	e, ok := expected.(*IntType)
+	a, ok2 := actual.(*IntType)
+	if _, unknown := actual.(UnknownType); unknown && ok && e.IsBounded {
+		return false
+	}
+	if !ok || !ok2 || !e.IsBounded {
+		return true
+	}
+	return a.IsBounded && e.Lo <= a.Lo && a.Hi <= e.Hi
+}
+
+// widenInt drops the range of an int that becomes the element of a list or
+// the field of a variant without a declared type: the range sema infers for
+// an expression is not one the kernel proves.
+func widenInt(t Type) Type {
+	if _, ok := t.(*IntType); ok {
+		return NewUnboundedInt()
+	}
+	return t
+}
+
+// isMapStage reports whether e is a pipeline that ends in map(lambda): its
+// value is a new list.
+func isMapStage(e ast.Expr) bool {
+	pe, ok := e.(*ast.PipeExpr)
+	if !ok {
+		return false
+	}
+	call, ok := pe.Right.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Ident)
+	_, isLam := call.Args[0].Value.(*ast.LambdaExpr)
+	return ok && id.Name == "map" && isLam
+}
+
+// fillUnknown is the type a variable of type prev has once a value of type
+// val is assigned to it: prev, with what was not known yet taken from val.
+// An unknown element type of a list or map does not become a bounded int,
+// since the elements written so far were not proved in that range.
+func fillUnknown(prev, val Type, inContainer bool) (Type, bool) {
+	if prev == nil || prev.Kind() == KindUnknown {
+		if inContainer && hasBoundedInt(val) {
+			return prev, false
+		}
+		return val, true
+	}
+	switch p := prev.(type) {
+	case *ListType:
+		if v, ok := val.(*ListType); ok {
+			elem, ok := fillUnknown(p.Elem, v.Elem, true)
+			cp := *p
+			cp.Elem = elem
+			return &cp, ok
+		}
+	case *MapType:
+		if v, ok := val.(*MapType); ok {
+			vt, ok := fillUnknown(p.Val, v.Val, true)
+			cp := *p
+			cp.Val = vt
+			return &cp, ok
+		}
+	case *ADTType:
+		if v, ok := val.(*ADTType); ok && v.Name == p.Name && len(v.TypeArgs) == len(p.TypeArgs) {
+			cp := *p
+			cp.TypeArgs = make([]Type, len(p.TypeArgs))
+			all := true
+			for i := range p.TypeArgs {
+				var ok bool
+				cp.TypeArgs[i], ok = fillUnknown(p.TypeArgs[i], v.TypeArgs[i], inContainer)
+				all = all && ok
+			}
+			return &cp, all
+		}
+	}
+	return prev, true
+}
+
+// hasBoundedInt reports whether a bounded int appears in t.
+func hasBoundedInt(t Type) bool {
+	switch x := t.(type) {
+	case *IntType:
+		return x.IsBounded
+	case *ListType:
+		return hasBoundedInt(x.Elem)
+	case *MapType:
+		return hasBoundedInt(x.Val)
+	case *ADTType:
+		for _, a := range x.TypeArgs {
+			if hasBoundedInt(a) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// keepsType reports whether a variable of type t keeps it when assigned
+// again: the types whose parts have a range of their own.
+func keepsType(t Type) bool {
+	switch t.(type) {
+	case *ListType, *MapType, *ADTType:
+		return true
+	}
+	return false
+}
+
+// assignable is isAssignable for the value of expr. A list or map literal
+// is a new value, so it takes the element type of where it goes: its type
+// becomes expected, and the kernel proves each element in that range
+// (ProgramInfo.LiteralTargets).
+func (c *checker) assignable(expected, actual Type, expr ast.Expr) bool {
+	if expected == nil || actual == nil {
+		return true
+	}
+	// A value of unknown type (a lambda parameter) carries no element
+	// range for the kernel to rely on.
+	if _, unknown := actual.(UnknownType); unknown && keepsType(expected) && hasBoundedInt(expected) {
+		return false
+	}
+	switch lit := expr.(type) {
+	case *ast.ListLit:
+		el, ok := expected.(*ListType)
+		if !ok {
+			break
+		}
+		for _, x := range lit.Elems {
+			if !c.assignable(el.Elem, c.info.ExprTypes[x], x) {
+				return false
+			}
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	case *ast.MapLit:
+		em, ok := expected.(*MapType)
+		if !ok {
+			break
+		}
+		for _, en := range lit.Entries {
+			if !isAssignable(em.Key, c.info.ExprTypes[en.Key]) || !c.assignable(em.Val, c.info.ExprTypes[en.Value], en.Value) {
+				return false
+			}
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	case *ast.MatchExpr:
+		for _, arm := range lit.Arms {
+			if !c.assignable(expected, c.info.ExprTypes[arm.Value], arm.Value) {
+				return false
+			}
+		}
+		if isAssignable(expected, actual) {
+			return true
+		}
+		// Every arm took the expected type.
+		if expected.Kind() == actual.Kind() {
+			c.info.ExprTypes[lit] = expected
+			return true
+		}
+		return false
+	case *ast.PipeExpr:
+		// The list a map stage makes: the kernel proves what the lambda
+		// yields in the expected element range.
+		el, ok := expected.(*ListType)
+		al, ok2 := actual.(*ListType)
+		if !ok || !ok2 || !isMapStage(lit) {
+			break
+		}
+		ei, ok := el.Elem.(*IntType)
+		ai, ok2 := al.Elem.(*IntType)
+		if !ok || !ok2 || !ei.IsBounded || ai.IsBounded {
+			break
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	case *ast.CallExpr:
+		// Some(x), Ok(x) and Err(x) make a new variant.
+		id, ok := lit.Callee.(*ast.Ident)
+		ea, ok2 := expected.(*ADTType)
+		if !ok || !ok2 || len(lit.Args) != 1 {
+			break
+		}
+		arg := -1
+		switch {
+		case id.Name == "Some" && ea.Name == "Option", id.Name == "Ok" && ea.Name == "Result":
+			arg = 0
+		case id.Name == "Err" && ea.Name == "Result":
+			arg = 1
+		}
+		if arg < 0 || arg >= len(ea.TypeArgs) {
+			break
+		}
+		if !c.assignable(ea.TypeArgs[arg], c.info.ExprTypes[lit.Args[0].Value], lit.Args[0].Value) {
+			return false
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	}
+	return isAssignable(expected, actual)
+}
+
 func unifyTypes(a, b Type) Type {
 	if a == nil || a.Kind() == KindUnknown {
 		return b
 	}
 	if b == nil || b.Kind() == KindUnknown {
 		return a
+	}
+	switch x := a.(type) {
+	case *IntType:
+		// The smallest range that holds the values of both.
+		y, ok := b.(*IntType)
+		if !ok {
+			return a
+		}
+		if !x.IsBounded || !y.IsBounded {
+			return NewUnboundedInt()
+		}
+		if x.Lo == y.Lo && x.Hi == y.Hi {
+			return a
+		}
+		return NewIntRange(min(x.Lo, y.Lo), max(x.Hi, y.Hi), "")
+	case *ListType:
+		if y, ok := b.(*ListType); ok {
+			cp := *x
+			cp.Elem = unifyTypes(x.Elem, y.Elem)
+			return &cp
+		}
+	case *MapType:
+		if y, ok := b.(*MapType); ok {
+			return &MapType{Key: unifyTypes(x.Key, y.Key), Val: unifyTypes(x.Val, y.Val)}
+		}
 	}
 	if aa, ok := a.(*ADTType); ok {
 		if ba, ok := b.(*ADTType); ok && aa.Name == ba.Name {

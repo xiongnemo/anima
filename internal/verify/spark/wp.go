@@ -678,7 +678,7 @@ func (v *verifier) checkFunctionExitContracts(env *symEnv, scope string, span as
 			rt := v.evalInt(retVal, env, scope, true)
 			v.checkIntRange(rt, retVal, env, it, scope+".return_range", scope, span)
 		}
-		if adt, ok := v.curRetType.(*sema.ADTType); ok {
+		if adt, ok := v.curRetType.(*sema.ADTType); ok && !v.makesVariant(retVal) {
 			v.checkADTConstructionRange(retVal, env, adt, scope, span)
 		}
 	}
@@ -837,6 +837,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 		if id, ok := s.Target.(*ast.Ident); ok {
 			env.intTerms[id.Name] = rhsTerm
+		} else if _, ok := s.Target.(*ast.IndexExpr); ok {
+			env.forgetElemHulls()
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
 			v.checkWrittenObject(fe.Object, fe.Field, scope, s.Span)
 			if path, ok := mutArgPath(fe); ok {
@@ -856,6 +858,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
+		v.proveElemAssign(s.List, s.Value, env, scope, s.Span)
+		env.forgetElemHulls()
 		if !hasFixedLen(v.info.ExprTypes[s.List]) {
 			env.forgetMapLens(s.List)
 		}
@@ -1010,6 +1014,14 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				elem = lt.Elem
 			}
 			v.bindFresh(loopEnv, s.Var, elem)
+			// What is known of the elements is known of each one.
+			if _, isInt := elem.(*sema.IntType); isInt {
+				if iv := v.pipeElemInterval(s.Iterable, loopEnv, scope); iv.HasLo && iv.HasHi {
+					t := loopEnv.intTerms[s.Var]
+					loopEnv.assume(smt.Ge(t, smt.Const(iv.Lo)))
+					loopEnv.assume(smt.Le(t, smt.Const(iv.Hi)))
+				}
+			}
 		}
 		v.execBlock(s.Body, loopEnv, scope)
 
@@ -1165,9 +1177,15 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			if ll, ok := rhs.(*ast.ListLit); ok {
 				lt := smt.Const(int64(len(ll.Elems)))
 				env.listLens[name] = lt
+				if iv := v.literalHull(ll, env, scope); iv.HasLo && iv.HasHi {
+					env.listElems[name] = iv
+				}
 			} else if id, ok := rhs.(*ast.Ident); ok {
 				// A list never changes its length, so a second name for it has the same one.
 				env.listLens[name] = env.lenOf(id.Name)
+				if iv, ok := env.listElems[id.Name]; ok {
+					env.listElems[name] = iv
+				}
 			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
@@ -1193,10 +1211,12 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *symEnv, scope string) {
 	// Collect chain left-to-right: base |> step1 |> step2 ...
 	var chain []ast.Expr
+	stageOf := map[ast.Expr]*ast.PipeExpr{}
 	cur := ast.Expr(pe)
 	for {
 		if p, ok := cur.(*ast.PipeExpr); ok {
 			chain = append([]ast.Expr{p.Right}, chain...)
+			stageOf[p.Right] = p
 			cur = p.Left
 		} else {
 			break
@@ -1215,6 +1235,8 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	var curElem smt.Interval
 	if id, ok := cur.(*ast.Ident); ok {
 		curElem = env.listElems[id.Name]
+	} else if ll, ok := cur.(*ast.ListLit); ok {
+		curElem = v.literalHull(ll, env, scope)
 	}
 	if curTy, ok := v.info.ExprTypes[cur]; ok {
 		if lt, ok := curTy.(*sema.ListType); ok {
@@ -1240,24 +1262,11 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 			env.assume(smt.Le(fv, curLen))
 			curLen = fv
 		case "map":
-			if len(ce.Args) == 1 {
-				if lam, ok := ce.Args[0].Value.(*ast.LambdaExpr); ok {
-					// Check if lambda accesses a bounded field like q.score
-					if fe, ok := lam.Body.(*ast.FieldExpr); ok {
-						if ft, ok := v.info.ExprTypes[fe]; ok {
-							if it, ok := ft.(*sema.IntType); ok && it.IsBounded {
-								curElem = smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-							}
-						}
-					} else if bt, ok := v.info.ExprTypes[lam.Body]; ok {
-						if it, ok := bt.(*sema.IntType); ok && it.IsBounded {
-							curElem = smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-						}
-					}
-				}
-			}
+			// The elements are what the lambda yields: nothing is known
+			// of them when that cannot be bounded.
+			curElem = v.pipeElemInterval(stageOf[step], env, scope)
 		case "fold":
-			if len(ce.Args) >= 1 && curElem.HasLo && curElem.HasHi {
+			if isSumFold(ce) && curElem.HasLo && curElem.HasHi {
 				initT := v.evalInt(ce.Args[0].Value, env, scope, true)
 				fv := smt.Var(env.freshVar("fold"))
 				env.intTerms[targetVar] = fv
@@ -1290,6 +1299,49 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	if curElem.HasLo && curElem.HasHi {
 		env.listElems[targetVar] = curElem
 	}
+}
+
+// isSumFold reports whether call is fold(init, (a, x) => a + x): the one
+// fold whose result is init plus the sum of the elements.
+func isSumFold(call *ast.CallExpr) bool {
+	if len(call.Args) != 2 {
+		return false
+	}
+	lam, ok := call.Args[1].Value.(*ast.LambdaExpr)
+	if !ok || len(lam.Params) != 2 || lam.Params[0] == lam.Params[1] {
+		return false
+	}
+	be, ok := lam.Body.(*ast.BinaryExpr)
+	if !ok || be.Op != "+" {
+		return false
+	}
+	l, ok := be.Left.(*ast.Ident)
+	r, ok2 := be.Right.(*ast.Ident)
+	if !ok || !ok2 {
+		return false
+	}
+	return (l.Name == lam.Params[0] && r.Name == lam.Params[1]) || (l.Name == lam.Params[1] && r.Name == lam.Params[0])
+}
+
+// literalHull bounds the int elements of a list literal: the smallest
+// interval that holds each of them, none when one is not bounded.
+func (v *verifier) literalHull(ll *ast.ListLit, env *symEnv, scope string) smt.Interval {
+	var hull smt.Interval
+	for i, el := range ll.Elems {
+		if _, ok := v.info.ExprTypes[el].(*sema.IntType); !ok {
+			return smt.Interval{}
+		}
+		iv := v.termInterval(v.evalInt(el, env, scope, false), env)
+		if !iv.HasLo || !iv.HasHi {
+			return smt.Interval{}
+		}
+		if i == 0 {
+			hull = iv
+			continue
+		}
+		hull.Lo, hull.Hi = min(hull.Lo, iv.Lo), max(hull.Hi, iv.Hi)
+	}
+	return hull
 }
 
 func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
@@ -1332,6 +1384,20 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
+		}
+		// A call that blocks on the network is given a timeout it will honour.
+		if te := v.info.TimeoutArgs[e]; te != nil {
+			v.checkIntRange(v.evalInt(te, env, scope, false), te, env, sema.NewIntRange(1, 300_000, ""), scope+".timeout_bounds", scope, te.GetSpan())
+		}
+		// A variant is made with its fields in their declared ranges.
+		if v.isVariantConstructor(e) {
+			ty := v.info.LiteralTargets[e]
+			if ty == nil {
+				ty = v.info.ExprTypes[e]
+			}
+			if adt, ok := ty.(*sema.ADTType); ok {
+				v.checkADTConstructionRange(e, env, adt, scope, e.Span)
+			}
 		}
 		// A callee the kernel has no contract for may do anything to its
 		// mut arguments.
@@ -1485,6 +1551,12 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
+		// A map stage given to a list[int[1..9]]: what the lambda yields.
+		if it := elemRange(v.info.LiteralTargets[e]); it != nil {
+			iv := v.pipeElemInterval(e, env, scope)
+			ok := iv.HasLo && iv.HasHi && it.Lo <= iv.Lo && iv.Hi <= it.Hi
+			v.prove(scope+".list_elem_bounds", scope, e.Span, env, smt.BoolConst{Val: ok})
+		}
 	case *ast.RunWorkflowExpr:
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
@@ -1538,12 +1610,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			v.evalSideEffects(el, env, scope)
 			v.proveEntityValue(el, env, scope)
 		}
+		v.proveLiteralElems(e, env, scope)
 	case *ast.MapLit:
 		for _, en := range e.Entries {
 			v.evalSideEffects(en.Key, env, scope)
 			v.evalSideEffects(en.Value, env, scope)
 			v.proveEntityValue(en.Value, env, scope)
 		}
+		v.proveLiteralElems(e, env, scope)
 	case *ast.FStrExpr:
 		for _, part := range e.Parts {
 			if part.IsExpr {
@@ -1786,6 +1860,9 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 			}
 		}
 	}
+	if writesElems(stmts) {
+		env.forgetElemHulls()
+	}
 	// What the statements pass as mut may change on every pass too.
 	v.havocMutArgs(stmts, env)
 }
@@ -1985,14 +2062,16 @@ func (v *verifier) pipeMaxLen(e ast.Expr, env *symEnv) (int64, bool) {
 
 // pipeElemInterval bounds the int elements of the list e evaluates to, when it can.
 func (v *verifier) pipeElemInterval(e ast.Expr, env *symEnv, scope string) smt.Interval {
-	if lt, ok := v.info.ExprTypes[e].(*sema.ListType); ok {
-		if it, ok := lt.Elem.(*sema.IntType); ok && it.IsBounded {
-			return smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
-		}
+	// The declared range, unless e is a new list that was given it: that
+	// one is what has to be proved.
+	if it := elemRange(v.info.ExprTypes[e]); it != nil && v.info.LiteralTargets[e] == nil {
+		return smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
 	}
 	switch x := e.(type) {
 	case *ast.Ident:
 		return env.listElems[x.Name]
+	case *ast.ListLit:
+		return v.literalHull(x, env, scope)
 	case *ast.PipeExpr:
 		call, ok := x.Right.(*ast.CallExpr)
 		if !ok || len(call.Args) != 1 {
@@ -2084,6 +2163,13 @@ func (v *verifier) checkIntRange(term smt.LinearTerm, expr ast.Expr, env *symEnv
 	v.prove(vcName, scope, span, env, smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi))))
 }
 
+// makesVariant reports whether e makes a variant, whose fields
+// evalSideEffects proves in range.
+func (v *verifier) makesVariant(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	return ok && v.isVariantConstructor(call)
+}
+
 func (v *verifier) checkADTConstructionRange(expr ast.Expr, env *symEnv, adt *sema.ADTType, scope string, span ast.Span) {
 	ce, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -2108,6 +2194,14 @@ func (v *verifier) checkADTConstructionRange(expr ast.Expr, env *symEnv, adt *se
 			}
 		} else if i < len(vi.Fields) {
 			fty = vi.Fields[i].Type
+		}
+		// Some(x) given to an Option[int[1..9]]: the field is the type argument.
+		if tv, ok := fty.(sema.TypeVar); ok {
+			for j, tp := range adt.TypeParams {
+				if tp == tv.Name && j < len(adt.TypeArgs) {
+					fty = adt.TypeArgs[j]
+				}
+			}
 		}
 		if it, ok := fty.(*sema.IntType); ok && it.IsBounded {
 			t := v.evalInt(arg.Value, env, scope, true)
@@ -2217,6 +2311,12 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 		env.assumeRange(term, it)
 	} else {
 		env.assume(smt.FitsInt64(term))
+	}
+	if ix, ok := expr.(*ast.IndexExpr); ok {
+		if iv, ok := v.elemHull(ix, env); ok {
+			env.assume(smt.Ge(term, smt.Const(iv.Lo)))
+			env.assume(smt.Le(term, smt.Const(iv.Hi)))
+		}
 	}
 	return term
 }

@@ -313,3 +313,320 @@ def f(mut rows: list[Row]) -> int:
 		t.Errorf("expected an anti-aliasing error, got %v", err)
 	}
 }
+
+// The element range of a list or map is part of its type, and a variable
+// keeps the type of its lists, maps and variants.
+func TestSemaElementRanges(t *testing.T) {
+	rejected := map[string]string{
+		"lambda parameter given to a bounded list": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    ys: list[int] = [0]
+    h = (v) => first(v)
+    print(h(ys))
+    return 0
+`,
+		"list of unknown elements": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    g = (v) => v - 1
+    ys = [1, 2] |> map(g)
+    print(first(ys))
+    return 0
+`,
+		"r11/a3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    xs: list[int] = [0, 6]
+    print(f(xs))
+    return 0
+`,
+		"r11/a7": `
+def f() -> list[int[1..9]]:
+    xs: list[int] = [0, 6]
+    return xs
+
+def main() -> int:
+    ys = f()
+    if len(ys) > 0:
+        print(10 / ys[0])
+    return 0
+`,
+		"r11/a8": `
+entity B:
+    vals: list[int[1..9]]
+
+def main() -> int:
+    xs: list[int] = [0, 6]
+    b = B(vals=xs)
+    if len(b.vals) > 0:
+        print(10 / b.vals[0])
+    return 0
+`,
+		"r11/a10": `
+def f(m: map[str, int[1..9]]) -> int:
+    return 10 / m["a"]
+
+def main() -> int:
+    m: map[str, int] = {"a": 0}
+    print(f(m))
+    return 0
+`,
+		"r11b/n5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = [0, 0]
+    if len(xs) > 5:
+        xs = mk()
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/g5": `
+entity Box:
+    vals: list[int[1..9]]
+    n: int
+
+def main() -> int:
+    b = Box(vals=[1, 2], n=1)
+    ys: list[int] = [0]
+    c = b with {vals: ys}
+    print(10 / c.vals[0])
+    return 0
+`,
+		"r11b/k2": `
+def bump(mut ys: list[int[1..9]]) -> int:
+    ys[0] = 9
+    return 0
+
+def main() -> int:
+    xs = [0, 1]
+    r = bump(mut xs)
+    return 0
+`,
+		"r11b/n18": `
+def f(o: Option[int[1..9]]) -> int:
+    match o:
+        Some(v) -> return 10 / v
+        None -> return 0
+
+def main() -> int:
+    print(f(Some(0)))
+    x = 0
+    o = Some(x)
+    print(f(o))
+    return 0
+`,
+	}
+	for name, src := range rejected {
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil {
+			t.Errorf("%s: expected a type error", name)
+		}
+	}
+	accepted := map[string]string{
+		"empty values": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    es: list[int[1..9]] = []
+    print(first([]))
+    print(first(es))
+    o: Option[int[1..9]] = None
+    r: Result[int[1..9], str] = Err("x")
+    m: map[str, int[1..9]] = {}
+    return 0
+`,
+		"r11b/p1": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 7
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/p3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    print(f([5, 6]))
+    xs: list[int[1..9]] = [3, 4]
+    print(f(xs))
+    return 0
+`,
+		"r11b/p5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = mk()
+    if len(xs) > 1:
+        print(10 / xs[1])
+    m: map[str, int[1..9]] = {"a": 1}
+    m["b"] = 2
+    print(10 / m["a"])
+    return 0
+`,
+		"r11b/p6": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[2..10]] = xs |> map(x => x + 1)
+    zs = xs |> map(x => x - 5)
+    for v in ys:
+        print(10 / v)
+    return 0
+`,
+		"narrower variant, same list, counter": `
+def f(o: Option[int]) -> int:
+    return 0
+
+def main() -> int:
+    o: Option[int[1..9]] = Some(1)
+    print(f(o))
+    xs: list[int[1..9]] = [1]
+    xs = [2]
+    i = 0
+    i += 1
+    return 0
+`,
+	}
+	for name, src := range accepted {
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
+}
+
+// The arguments of a call are checked against the parameters they are
+// bound to: a keyword argument by its name, a piped value first.
+func TestSemaCallArgumentsBindToTheirParameters(t *testing.T) {
+	prelude := `
+def divide(a: int[0..9], b: int[0..9]) -> int:
+    requires: a != 0
+    return b / a
+
+def pick(s: str, xs: list[int[1..9]], ys: list[int[10..20]]) -> int:
+    return 0
+
+def g() -> int:
+    zs: list[int] = [0]
+`
+	rejected := map[string]string{
+		"unknown keyword":               "divide(typo=0, 1)",
+		"too many piped arguments":      "0 |> divide(b=1, a=0)",
+		"too few piped arguments":       "2 |> divide",
+		"piped value of another type":   `zs |> pick(xs=[1], s="a")`,
+		"piped list of another range":   `"a" |> pick(zs, [10])`,
+		"keyword list of another range": `pick(ys=[10], xs=zs, s="a")`,
+		"keyword of another type":       `pick(ys=[10], xs=[1], s=1)`,
+	}
+	for name, call := range rejected {
+		prog, err := parser.Parse("t.anm", prelude+"    y = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil {
+			t.Errorf("%s: expected a type error", name)
+		}
+	}
+	accepted := map[string]string{
+		"reordered keywords":        `pick(ys=[10], xs=[1], s="a")`,
+		"piped, then keywords":      `"a" |> pick(ys=[10], xs=[1])`,
+		"piped, then by position":   `"a" |> pick([1], [10])`,
+		"keyword, then by position": `divide(a=2, 0)`,
+	}
+	for name, call := range accepted {
+		prog, err := parser.Parse("t.anm", prelude+"    y = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
+}
+
+// The backends fill the fields of a variant by position, so a keyword
+// argument has to name the field at its place.
+func TestSemaVariantFieldsInOrder(t *testing.T) {
+	prelude := `
+type Shape = Circle(r: int[1..9], k: int) | Dot
+
+def g() -> int:
+`
+	cases := map[string]bool{
+		"Circle(5, 0)":     true,
+		"Circle(r=5, k=0)": true,
+		"Circle(5, k=0)":   true,
+		"Circle(k=0, r=5)": false,
+		"Circle(5, r=0)":   false,
+		"Circle(5, 0, 1)":  false,
+		"Circle(5, zz=0)":  false,
+		`Circle("a", k=0)`: false,
+	}
+	for call, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    s = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", call, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%s: accepted = %v, want %v (%v)", call, err == nil, ok, err)
+		}
+	}
+}
+
+// The backends give a workflow its arguments by position, so a keyword
+// argument has to name the parameter at its place.
+func TestSemaWorkflowArgumentsInOrder(t *testing.T) {
+	prelude := `
+workflow Sub(a: int[0..9], b: int[0..9]) -> int:
+    verify: sound
+    start -> work
+    step work -> done:
+        return a - b
+
+def g() -> int:
+`
+	cases := map[string]bool{
+		"Sub(1, 0)":     true,
+		"Sub(a=1, b=0)": true,
+		"Sub(1, b=0)":   true,
+		"Sub(b=1, a=0)": false,
+		"Sub(1, a=0)":   false,
+		"Sub(1, zz=0)":  false,
+	}
+	for call, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    r = run_workflow "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", call, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%s: accepted = %v, want %v (%v)", call, err == nil, ok, err)
+		}
+	}
+}
