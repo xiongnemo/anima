@@ -1368,6 +1368,12 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if objTy.Kind() == KindStr && e.Field == "len" {
 			return &FuncType{Return: NewIntRange(0, DefaultMaxInt, "")}, nil
 		}
+		// A value of a type that is known has no other member: the VM
+		// stops on one and the native backend gives `()`.
+		switch objTy.Kind() {
+		case KindInt, KindBool, KindStr, KindList, KindMap, KindADT:
+			return nil, fmt.Errorf("%s: a value of type %s has no member %q", e.Span, objTy, e.Field)
+		}
 		return UnknownType{}, nil
 
 	case *ast.IndexExpr:
