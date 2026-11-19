@@ -3178,3 +3178,73 @@ def f(o: Option[int]) -> int:
 		t.Errorf("a match expression with a name of its own: expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// A list whose length the kernel forgot, in a loop that assigns it or by a
+// pattern that names it, is still a list: an index into it is checked
+// against a length of which nothing is known.
+func TestSPARKIndexIntoAListOfForgottenLength(t *testing.T) {
+	rejected := map[string]string{
+		"assigned in a loop": `
+def f(xs: list[int]) -> int:
+    ys = [1, 2]
+    for x in xs:
+        ys = [1]
+    return ys[1]
+`,
+		"named by a pattern of a match expression": `
+def f(o: Option[list[int]]) -> int:
+    ys = [1, 2]
+    r = match o:
+        Some(ys) -> 0
+        None -> 0
+    return ys[1]
+`,
+		"named by a pattern in a loop": `
+def f(os: list[Option[list[int]]]) -> int:
+    ys = [1, 2]
+    for o in os:
+        match o:
+            Some(ys) -> print(1)
+            None -> print(0)
+    return ys[1]
+`,
+		"a loop variable": `
+def f(xss: list[list[int]]) -> int:
+    ys = [1, 2]
+    for ys in xss:
+        print(1)
+    return ys[1]
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "index_bounds") {
+			t.Errorf("%s: expected a failed index_bounds, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"length tested after the loop": `
+def f(xs: list[int]) -> int:
+    ys = [1, 2]
+    for x in xs:
+        ys = [1]
+    if len(ys) > 1:
+        return ys[1]
+    return 0
+`,
+		"length tested after the match": `
+def f(o: Option[list[int]]) -> int:
+    ys = [1, 2]
+    r = match o:
+        Some(ys) -> 0
+        None -> 0
+    if len(ys) > 1:
+        return ys[1]
+    return 0
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}

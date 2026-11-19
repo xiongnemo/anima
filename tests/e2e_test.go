@@ -136,6 +136,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/spark_pattern_name_in_loop.anm", "div_nonzero"},
 		{"../tests/bugs/spark_match_expression_writes_variable.anm", "div_nonzero"},
+		{"../tests/bugs/spark_index_after_forgotten_length.anm", "index_bounds"},
 		{"../tests/bugs/sema_function_as_value.anm", "function double is not a value"},
 		{"../tests/bugs/sema_unknown_method.anm", `has no member "upper"`},
 		{"../tests/bugs/sema_call_non_function.anm", "cannot be called"},

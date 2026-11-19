@@ -1382,7 +1382,13 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Index, env, scope)
 		idx := v.evalInt(e.Index, env, scope, true)
 		if id, ok := e.List.(*ast.Ident); ok {
-			if lt, exists := env.listLens[id.Name]; exists {
+			lt, exists := env.listLens[id.Name]
+			// A list whose length was forgotten, by a loop that assigns it
+			// or a pattern that names it, has some length all the same.
+			if _, isList := v.info.ExprTypes[e.List].(*sema.ListType); isList && !exists {
+				lt, exists = env.lenOf(id.Name), true
+			}
+			if exists {
 				v.prove(scope+".index_bounds", scope, e.Span, env,
 					smt.And(smt.Ge(idx, smt.Const(0)), smt.Lt(idx, lt)))
 			}
