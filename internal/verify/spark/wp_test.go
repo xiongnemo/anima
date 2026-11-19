@@ -3085,3 +3085,166 @@ def f() -> int:
 		}
 	}
 }
+
+// A name in a pattern is written by the arm that matches: in a loop, and
+// after a match expression, the kernel forgets what the variable held.
+func TestSPARKPatternNameWritesAVariable(t *testing.T) {
+	rejected := map[string]string{
+		"match statement in a for": `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        match o:
+            Some(x) -> print(x)
+            None -> print("none")
+    return 10 / x
+`,
+		"match expression in a for": `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        r = match o:
+            Some(x) -> x
+            None -> 0
+        print(r)
+    return 10 / x
+`,
+		"match statement in a while": `
+def f(o: Option[int], n: int[0..5]) -> int:
+    x = 5
+    i: int[0..5] = 0
+    while i < n:
+        match o:
+            Some(x) -> print(x)
+            None -> print("none")
+        i += 1
+    return 10 / x
+`,
+		"match expression, no loop": `
+def f(o: Option[int]) -> int:
+    x = 5
+    r = match o:
+        Some(x) -> x
+        None -> 0
+    return 10 / x
+`,
+		"match expression written into an element": `
+def f(o: Option[int]) -> int:
+    x = 5
+    xs = [1, 2]
+    xs[0] = match o:
+        Some(x) -> x
+        None -> 0
+    return 10 / x
+`,
+		"a boolean": `
+def f(os: list[Option[bool]]) -> int:
+    b = True
+    for o in os:
+        match o:
+            Some(b) -> print(b)
+            None -> print("none")
+    if b:
+        return 1
+    return 10 / 0
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        match o:
+            Some(v) -> print(v)
+            None -> print("none")
+    return 10 / x
+`
+	if failed := failedVCs(verifySrc(t, proved)); len(failed) != 0 {
+		t.Errorf("a pattern name of its own: expected every VC proved, failed VCs: %v", failed)
+	}
+	own := `
+def f(o: Option[int]) -> int:
+    x = 5
+    r = match o:
+        Some(v) -> v
+        None -> 0
+    return 10 / x
+`
+	if failed := failedVCs(verifySrc(t, own)); len(failed) != 0 {
+		t.Errorf("a match expression with a name of its own: expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// A list whose length the kernel forgot, in a loop that assigns it or by a
+// pattern that names it, is still a list: an index into it is checked
+// against a length of which nothing is known.
+func TestSPARKIndexIntoAListOfForgottenLength(t *testing.T) {
+	rejected := map[string]string{
+		"assigned in a loop": `
+def f(xs: list[int]) -> int:
+    ys = [1, 2]
+    for x in xs:
+        ys = [1]
+    return ys[1]
+`,
+		"named by a pattern of a match expression": `
+def f(o: Option[list[int]]) -> int:
+    ys = [1, 2]
+    r = match o:
+        Some(ys) -> 0
+        None -> 0
+    return ys[1]
+`,
+		"named by a pattern in a loop": `
+def f(os: list[Option[list[int]]]) -> int:
+    ys = [1, 2]
+    for o in os:
+        match o:
+            Some(ys) -> print(1)
+            None -> print(0)
+    return ys[1]
+`,
+		"a loop variable": `
+def f(xss: list[list[int]]) -> int:
+    ys = [1, 2]
+    for ys in xss:
+        print(1)
+    return ys[1]
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "index_bounds") {
+			t.Errorf("%s: expected a failed index_bounds, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"length tested after the loop": `
+def f(xs: list[int]) -> int:
+    ys = [1, 2]
+    for x in xs:
+        ys = [1]
+    if len(ys) > 1:
+        return ys[1]
+    return 0
+`,
+		"length tested after the match": `
+def f(o: Option[list[int]]) -> int:
+    ys = [1, 2]
+    r = match o:
+        Some(ys) -> 0
+        None -> 0
+    if len(ys) > 1:
+        return ys[1]
+    return 0
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
