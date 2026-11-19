@@ -2249,3 +2249,58 @@ def f() -> int:
 		}
 	}
 }
+
+// Review round 8 of the aliasing work.
+func TestSPARKMatchAliasNestedInvariantAndResultShape(t *testing.T) {
+	matchAlias := `
+def f(mut m: map[str, int], mut other: map[str, int], c: bool) -> int:
+    k = match c:
+        True -> m
+        False -> other
+    if len(k) == 0:
+        m["a"] = 1
+        return 10 / (1 - len(k))
+    return 0
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, matchAlias)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("alias through a match expression: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	nested := `
+entity Inner:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+entity Outer:
+    inner: Inner
+    k: int[0..9]
+
+def brk(mut o: Outer) -> int:
+    o.inner.x = 6
+    return 0
+
+def keep(mut o: Outer) -> int:
+    o.inner.x = 0
+    o.k = 2
+    return 0
+`
+	failed := failedVCs(verifySrc(t, nested))
+	if len(failed) != 1 || failed[0] != "brk.mut_o.inner_invariant" {
+		t.Errorf("nested entity of a mut parameter: expected only brk.mut_o.inner_invariant to fail, failed VCs: %v", failed)
+	}
+	prelude := invariantPrelude + `
+def codes(a: A) -> list[int]:
+    return [a.x, a.y]
+
+def idf(a: A) -> A:
+    return a
+`
+	numbers := prelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    k = codes(b)\n    b.x = 6\n    b.y = 4\n    return use(b)\n"
+	if failed := failedVCs(verifySrc(t, numbers)); len(failed) != 0 {
+		t.Errorf("a call returning numbers keeps no entity: expected every VC proved, failed VCs: %v", failed)
+	}
+	piped := prelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    c = b |> idf\n    b.x = 6\n    return use(c)\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, piped)), "\n"); !strings.Contains(failed, "entity_b_invariant_1") {
+		t.Errorf("an entity handed back by a piped call: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
+	}
+}
