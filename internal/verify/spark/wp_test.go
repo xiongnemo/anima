@@ -366,6 +366,15 @@ def idn(x: int) -> int:
 def caller(x: int) -> int:
     return idn(x - 1)
 `, VCFailed},
+		{"one below MinInt64", `
+def below() -> int:
+    return -9_223_372_036_854_775_807 - 2
+`, VCFailed},
+		{"negating MinInt64", `
+def flip() -> int:
+    lo: int = -9_223_372_036_854_775_807 - 1
+    return -lo
+`, VCFailed},
 		{"product of unconstrained ints", `
 def mul(x: int, y: int) -> int:
     return x * y
@@ -420,6 +429,17 @@ def edges(x: int) -> int:
     lo = x - 1
     hi = x + 1
     return 0
+`, ""},
+		{"MinInt64 is representable", `
+def lowest() -> int:
+    return -9_223_372_036_854_775_807 - 1
+
+def doubled(x: int[0..1]) -> int:
+    return -4_611_686_018_427_387_904 * 2 + x
+
+def raised() -> int:
+    lo: int = -9_223_372_036_854_775_807 - 1
+    return lo + 1
 `, ""},
 		{"division and remainder by a constant", `
 def halve(x: int) -> int:

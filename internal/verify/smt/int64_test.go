@@ -8,9 +8,16 @@ import (
 )
 
 func TestCheckedArithmeticMatchesBigInt(t *testing.T) {
-	// The representable range is symmetric: MinInt64 is excluded so every value can be negated.
+	// Coefficients use a symmetric range, so every one of them can be negated; constants use
+	// all of int64, because MinInt64 is a value a program can compute.
 	fits := func(z *big.Int) bool {
 		return z.IsInt64() && z.Int64() != math.MinInt64
+	}
+	exact := func(name string, a, b int64, got int64, ok bool, want *big.Int) {
+		t.Helper()
+		if ok != want.IsInt64() || (ok && got != want.Int64()) {
+			t.Fatalf("%s(%d, %d) = %d, %v; exact %s", name, a, b, got, ok, want)
+		}
 	}
 	edges := []int64{0, 1, -1, 2, -2, 3, math.MaxInt64, math.MinInt64, math.MaxInt64 - 1, math.MinInt64 + 1,
 		1 << 31, -(1 << 31), 1 << 32, -(1 << 32), 1 << 62, -(1 << 62), 3037000499, 3037000500, -3037000500}
@@ -34,6 +41,79 @@ func TestCheckedArithmeticMatchesBigInt(t *testing.T) {
 		if got, ok := mulChecked(a, b); ok != fits(prod) || (ok && got != prod.Int64()) {
 			t.Fatalf("mulChecked(%d, %d) = %d, %v; exact %s", a, b, got, ok, prod)
 		}
+		got, ok := addExact(a, b)
+		exact("addExact", a, b, got, ok, sum)
+		got, ok = subExact(a, b)
+		exact("subExact", a, b, got, ok, new(big.Int).Sub(big.NewInt(a), big.NewInt(b)))
+		got, ok = mulExact(a, b)
+		exact("mulExact", a, b, got, ok, prod)
+	}
+}
+
+// MinInt64 is an int64 like any other: a term may hold it, and only negating it overflows.
+func TestMinInt64IsRepresentable(t *testing.T) {
+	lowest := Const(-math.MaxInt64).Sub(Const(1))
+	terms := []struct {
+		name string
+		term LinearTerm
+		want int64
+		over bool
+	}{
+		{"-Max - 1", lowest, math.MinInt64, false},
+		{"Min + 0", Const(math.MinInt64).Add(Const(0)), math.MinInt64, false},
+		{"Min * 1", Const(math.MinInt64).Scale(1), math.MinInt64, false},
+		{"-2^62 * 2", Const(-(1 << 62)).Scale(2), math.MinInt64, false},
+		{"-1 - Min", Const(-1).Sub(Const(math.MinInt64)), math.MaxInt64, false},
+		{"Min - Min", Const(math.MinInt64).Sub(Const(math.MinInt64)), 0, false},
+		{"-Min", Const(math.MinInt64).Scale(-1), 0, true},
+		{"0 - Min", Const(0).Sub(Const(math.MinInt64)), 0, true},
+		{"Min - 1", lowest.Sub(Const(1)), 0, true},
+		{"Min + -1", lowest.Add(Const(-1)), 0, true},
+		{"Min * 2", lowest.Scale(2), 0, true},
+	}
+	for _, tc := range terms {
+		if tc.term.Overflow != tc.over || (!tc.over && tc.term.Const != tc.want) {
+			t.Errorf("%s: const %d overflow %v, want %d overflow %v", tc.name, tc.term.Const, tc.term.Overflow, tc.want, tc.over)
+		}
+	}
+
+	x := Var("x")
+	formulas := []struct {
+		name string
+		f    BoolExpr
+		want ResultStatus
+	}{
+		{"Min fits", Not(FitsInt64(lowest)), StatusUnsat},
+		{"-Min does not fit", FitsInt64(lowest.Scale(-1)), StatusUnsat},
+		{"Min - 1 does not fit", FitsInt64(lowest.Sub(Const(1))), StatusUnsat},
+		{"Min <= Min", Not(Le(lowest, lowest)), StatusUnsat},
+		{"Max <= Min is false", Le(Const(math.MaxInt64), lowest), StatusUnsat},
+		{"Max < Min is false", Lt(Const(math.MaxInt64), lowest), StatusUnsat},
+		{"Min < Max", Not(Lt(lowest, Const(math.MaxInt64))), StatusUnsat},
+		{"x <= Min is reachable", And(FitsInt64(x), Le(x, lowest)), StatusSat},
+		{"x <= Min pins x", And(FitsInt64(x), Le(x, lowest), Neq(x, lowest)), StatusUnsat},
+		{"x < Min is not", And(FitsInt64(x), Lt(x, lowest)), StatusUnsat},
+		{"x >= Min is all of int64", And(FitsInt64(x), Not(Ge(x, lowest))), StatusUnsat},
+		{"x > Max is not", And(FitsInt64(x), Gt(x, Const(math.MaxInt64))), StatusUnsat},
+		{"x + Max <= Min is not", And(FitsInt64(x), Le(x.Add(Const(math.MaxInt64)), lowest)), StatusUnsat},
+		{"x - Max <= Min implies x <= -1", And(Le(x.Sub(Const(math.MaxInt64)), lowest), Gt(x, Const(-1))), StatusUnsat},
+		{"x <= -1 implies x - Max <= Min", And(Le(x, Const(-1)), Not(Le(x.Sub(Const(math.MaxInt64)), lowest))), StatusUnsat},
+		{"Min - x <= Max is all of int64", And(FitsInt64(x), Not(Le(lowest.Sub(x), Const(math.MaxInt64)))), StatusUnsat},
+		{"x + Min <= Max is all of int64", And(FitsInt64(x), Not(Le(x.Add(lowest), Const(math.MaxInt64)))), StatusUnsat},
+		{"x + Min fits for x >= 0", And(Ge(x, Const(0)), FitsInt64(x), Not(FitsInt64(x.Add(lowest)))), StatusUnsat},
+		{"x + Min overflows for x < 0", And(Lt(x, Const(0)), FitsInt64(x), FitsInt64(x.Add(lowest))), StatusUnsat},
+		{"x - Min overflows for x >= 0", And(Ge(x, Const(0)), FitsInt64(x), FitsInt64(x.Sub(lowest))), StatusUnsat},
+	}
+	for _, tc := range formulas {
+		t.Run(tc.name, func(t *testing.T) {
+			res := CheckSat(And(Int64Pins(), tc.f))
+			if res.Status != tc.want {
+				t.Fatalf("status %v, want %v (%s) model=%v", res.Status, tc.want, res.Explain, res.IntModel)
+			}
+			if tc.want == StatusSat && res.IntModel["x"] != math.MinInt64 {
+				t.Fatalf("model x = %d, want MinInt64", res.IntModel["x"])
+			}
+		})
 	}
 }
 

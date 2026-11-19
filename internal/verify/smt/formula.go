@@ -10,8 +10,9 @@ import (
 )
 
 // LinearTerm represents sum(Coeffs[v] * v) + Const.
-// Overflow marks a term whose coefficients or constant left the symmetric 64-bit range
-// [-MaxInt64, MaxInt64] while it was built; its numbers are then meaningless.
+// Overflow marks a term whose numbers could not be represented while it was built and are
+// then meaningless: a coefficient outside [-MaxInt64, MaxInt64], kept symmetric so it can
+// always be negated, or a constant outside [MinInt64, MaxInt64].
 type LinearTerm struct {
 	Coeffs   map[string]int64
 	Const    int64
@@ -38,6 +39,40 @@ func mulChecked(a, b int64) (int64, bool) {
 		return 0, false
 	}
 	return p, p != math.MinInt64
+}
+
+// addExact, subExact and mulExact cover the full int64 range, MinInt64 included.
+func addExact(a, b int64) (int64, bool) {
+	s := a + b
+	if (a >= 0) == (b >= 0) && (s >= 0) != (a >= 0) {
+		return 0, false
+	}
+	return s, true
+}
+
+func subExact(a, b int64) (int64, bool) {
+	d := a - b
+	if (a >= 0) != (b >= 0) && (d >= 0) != (a >= 0) {
+		return 0, false
+	}
+	return d, true
+}
+
+func mulExact(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a == math.MinInt64 || b == math.MinInt64 {
+		if a == 1 || b == 1 {
+			return math.MinInt64, true
+		}
+		return 0, false
+	}
+	p := a * b
+	if p/b != a {
+		return 0, false
+	}
+	return p, true
 }
 
 var unknownAtomID atomic.Int64
@@ -69,7 +104,7 @@ func (t LinearTerm) Clone() LinearTerm {
 func (t LinearTerm) Add(o LinearTerm) LinearTerm {
 	res := t.Clone()
 	var ok bool
-	if res.Const, ok = addChecked(res.Const, o.Const); !ok {
+	if res.Const, ok = addExact(res.Const, o.Const); !ok {
 		res.Overflow = true
 	}
 	res.Overflow = res.Overflow || o.Overflow
@@ -88,7 +123,13 @@ func (t LinearTerm) Add(o LinearTerm) LinearTerm {
 }
 
 func (t LinearTerm) Sub(o LinearTerm) LinearTerm {
-	return t.Add(o.Scale(-1))
+	// The constants are subtracted directly: -o.Const is not an int64 when o.Const is MinInt64.
+	res := LinearTerm{Coeffs: t.Coeffs, Overflow: t.Overflow}.Add(LinearTerm{Coeffs: o.Coeffs, Overflow: o.Overflow}.Scale(-1))
+	var ok bool
+	if res.Const, ok = subExact(t.Const, o.Const); !ok {
+		res.Overflow = true
+	}
+	return res
 }
 
 func (t LinearTerm) Scale(k int64) LinearTerm {
@@ -97,7 +138,7 @@ func (t LinearTerm) Scale(k int64) LinearTerm {
 	}
 	res := LinearTerm{Coeffs: make(map[string]int64, len(t.Coeffs)), Overflow: t.Overflow}
 	var ok bool
-	if res.Const, ok = mulChecked(t.Const, k); !ok {
+	if res.Const, ok = mulExact(t.Const, k); !ok {
 		res.Overflow = true
 	}
 	for v, coef := range t.Coeffs {
@@ -330,20 +371,38 @@ func (o OrExpr) String() string {
 }
 
 // Helper constructors
-func Le(a, b LinearTerm) BoolExpr {
-	diff := a.Sub(b)
-	if diff.Overflow {
+func Le(a, b LinearTerm) BoolExpr { return less(a, b, false) }
+func Lt(a, b LinearTerm) BoolExpr { return less(a, b, true) }
+
+// less states a <= b, or a < b when strict, as vars(a) - vars(b) <= bound. The exact bound
+// b.Const - a.Const (- 1) can leave int64 by up to 2^64; it is then moved back in range by
+// 2^63, written 2*int64Half as in FitsInt64, so that comparisons against MinInt64 and
+// MaxInt64 stay exact.
+func less(a, b LinearTerm, strict bool) BoolExpr {
+	vars := LinearTerm{Coeffs: a.Coeffs, Overflow: a.Overflow}.Sub(LinearTerm{Coeffs: b.Coeffs, Overflow: b.Overflow})
+	if vars.Overflow {
 		return unknownAtom()
 	}
-	if len(diff.Coeffs) == 0 {
-		return BoolConst{Val: 0 <= -diff.Const}
+	if len(vars.Coeffs) == 0 {
+		return BoolConst{Val: a.Const < b.Const || (!strict && a.Const == b.Const)}
 	}
-	return AtomExpr{Atom: LinearAtom{Coeffs: diff.Coeffs, Bound: -diff.Const}.Normalized()}
-}
-
-func Lt(a, b LinearTerm) BoolExpr {
-	// a < b <==> a - b <= -1
-	return Le(a.Add(Const(1)), b)
+	bound := new(big.Int).Sub(big.NewInt(b.Const), big.NewInt(a.Const))
+	if strict {
+		bound.Sub(bound, big.NewInt(1))
+	}
+	if !bound.IsInt64() {
+		// 2*int64Half is -2^63: vars <= bound <==> vars + sign*2*int64Half <= bound - sign*2^63.
+		sign := int64(bound.Sign())
+		if _, used := vars.Coeffs[int64Half]; used {
+			return unknownAtom()
+		}
+		vars.Coeffs[int64Half] = 2 * sign
+		bound.Add(bound, new(big.Int).Lsh(big.NewInt(-sign), 63))
+		if !bound.IsInt64() {
+			return unknownAtom()
+		}
+	}
+	return AtomExpr{Atom: LinearAtom{Coeffs: vars.Coeffs, Bound: bound.Int64()}.Normalized()}
 }
 
 func Ge(a, b LinearTerm) BoolExpr { return Le(b, a) }
