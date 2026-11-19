@@ -2624,3 +2624,45 @@ def main() -> int:
 		}
 	}
 }
+
+// A call that blocks on the network is given a timeout in 1..300_000,
+// whatever the type of the expression.
+func TestSPARKTimeoutBounds(t *testing.T) {
+	wait := func(decl, arg string) string {
+		return `
+import std.socket as sock
+
+def wait(t: int) -> int:
+` + decl + `
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            match ln.accept(timeout_ms=` + arg + `):
+                Ok(c) -> c.close()
+                Err(e) -> print(e)
+            ln.close()
+        Err(e) -> print(e)
+    return 0
+`
+	}
+	rejected := map[string]string{
+		"variable assigned zero": wait("    timeout = 0", "timeout"),
+		"unbounded parameter":    wait("    timeout = 1", "t"),
+		"computed zero":          wait("    timeout = 1 - 1", "timeout"),
+		"too long":               wait("    timeout = 300_000", "timeout + 1"),
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "timeout_bounds") {
+			t.Errorf("%s: expected a failed timeout_bounds, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"variable":         wait("    timeout = 20", "timeout * 2"),
+		"guarded argument": wait("    if t < 1 or t > 5000:\n        return 0", "t"),
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}

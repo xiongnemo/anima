@@ -1385,6 +1385,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
 		}
+		// A call that blocks on the network is given a timeout it will honour.
+		if te := v.info.TimeoutArgs[e]; te != nil {
+			v.checkIntRange(v.evalInt(te, env, scope, false), te, env, sema.NewIntRange(1, 300_000, ""), scope+".timeout_bounds", scope, te.GetSpan())
+		}
 		// A variant is made with its fields in their declared ranges.
 		if v.isVariantConstructor(e) {
 			ty := v.info.LiteralTargets[e]

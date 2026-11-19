@@ -349,7 +349,10 @@ type ProgramInfo struct {
 	// LiteralTargets: the declared type a list or map literal was given to.
 	// The kernel proves the literal's elements in its element range.
 	LiteralTargets map[ast.Expr]Type
-	Imports        map[string]string // alias -> canonical std module path
-	StdHandles     map[string]*TypestateSpec
-	Diagnostics    []string
+	// TimeoutArgs: the timeout_ms argument of a call that blocks on the
+	// network, which the kernel proves in 1..300_000.
+	TimeoutArgs map[*ast.CallExpr]ast.Expr
+	Imports     map[string]string // alias -> canonical std module path
+	StdHandles  map[string]*TypestateSpec
+	Diagnostics []string
 }

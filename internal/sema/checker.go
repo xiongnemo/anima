@@ -27,6 +27,7 @@ func Check(prog *ast.Program) (*ProgramInfo, error) {
 			Funcs:          map[string]*FuncInfo{},
 			ExprTypes:      map[ast.Expr]Type{},
 			LiteralTargets: map[ast.Expr]Type{},
+			TimeoutArgs:    map[*ast.CallExpr]ast.Expr{},
 			Imports:        map[string]string{},
 			StdHandles:     defaultStdHandles(),
 		},
@@ -1662,14 +1663,14 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		// Enforce std.requests explicit bounded timeout_ms contract!
 		if mt, ok := objTy.(*ModuleType); ok && mt.Path == "std.requests" {
 			if fe.Field == "get" || fe.Field == "post" {
-				if err := c.checkRequestsTimeout(fe.Field, e.Args, sc, e.Span); err != nil {
+				if err := c.checkRequestsTimeout(e, fe.Field, sc); err != nil {
 					return nil, err
 				}
 			}
 		}
 		if ht, ok := objTy.(*HandleType); ok && (ht.Name == "req.Session" || ht.Name == "sock.TcpListener") {
 			if fe.Field == "get" || fe.Field == "post" || fe.Field == "get_async" || fe.Field == "accept" {
-				if err := c.checkRequestsTimeout(fe.Field, e.Args, sc, e.Span); err != nil {
+				if err := c.checkRequestsTimeout(e, fe.Field, sc); err != nil {
 					return nil, err
 				}
 			}
@@ -1739,7 +1740,11 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
-func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *scope, span ast.Span) error {
+// checkRequestsTimeout requires a blocking call to name its timeout. A
+// timeout whose type has a range is checked here; the kernel proves the
+// value in 1..300_000 whatever its type (ProgramInfo.TimeoutArgs).
+func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *scope) error {
+	args, span := call.Args, call.Span
 	var timeoutExpr ast.Expr
 	for _, a := range args {
 		if a.Name == "timeout_ms" {
@@ -1764,6 +1769,7 @@ func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *sc
 	if err != nil {
 		return err
 	}
+	c.info.TimeoutArgs[call] = timeoutExpr
 	if it, ok := ty.(*IntType); ok && it.IsBounded {
 		if it.Lo < 1 || it.Hi > 300_000 {
 			return fmt.Errorf("%s: timeout_ms range [%d..%d] exceeds legal contract int[1..300_000]", timeoutExpr.GetSpan(), it.Lo, it.Hi)
@@ -1772,6 +1778,68 @@ func (c *checker) checkRequestsTimeout(method string, args []ast.CallArg, sc *sc
 		return fmt.Errorf("%s: timeout_ms must be int[1..300_000], got %s", timeoutExpr.GetSpan(), ty)
 	}
 	return nil
+}
+
+// boundParam returns the index of the parameter that argument i of a call
+// is bound to, as both backends do: the one a keyword argument names, else
+// the one at its position.
+func boundParam(params []FuncParamInfo, a ast.CallArg, i int) (int, bool) {
+	if a.Name == "" {
+		return i, i < len(params)
+	}
+	for k, p := range params {
+		if p.Name == a.Name {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// checkFuncArgs checks the arguments of a call of the function name
+// against its parameters.
+func (c *checker) checkFuncArgs(name string, fi *FuncInfo, args []ast.CallArg, sc *scope, span ast.Span) error {
+	if len(args) != len(fi.Type.Params) {
+		return fmt.Errorf("%s: function %s expects %d args, got %d", span, name, len(fi.Type.Params), len(args))
+	}
+	for i, a := range args {
+		at, err := c.checkExpr(a.Value, sc)
+		if err != nil {
+			return err
+		}
+		pi, ok := boundParam(fi.Type.Params, a, i)
+		if !ok {
+			return fmt.Errorf("%s: function %s has no parameter %q", a.Span, name, a.Name)
+		}
+		p := fi.Type.Params[pi]
+		if p.Mut {
+			if !a.Mut {
+				return fmt.Errorf("%s: argument %d to %s requires 'mut'", a.Span, i+1, name)
+			}
+			if root, ok := rootVarPath(a.Value); ok {
+				if err := c.ensureMutableTarget(root, sc, a.Span); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("%s: 'mut' argument must be a variable or field", a.Span)
+			}
+		} else if a.Mut {
+			return fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, pi+1, name)
+		}
+		if p.Own {
+			if !a.Own {
+				return fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, name)
+			}
+			if _, ok := a.Value.(*ast.Ident); !ok {
+				return fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
+			}
+		} else if a.Own {
+			return fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, pi+1, name)
+		}
+		if !c.assignable(p.Type, at, a.Value) {
+			return fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, name, p.Type, at)
+		}
+	}
+	return c.checkCallAliasing(args, true)
 }
 
 func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
