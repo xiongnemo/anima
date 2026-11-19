@@ -108,6 +108,13 @@ func (v *verifier) joinBranches(env *symEnv, outs []*symEnv) {
 			env.intervals[k] = iv
 		}
 	}
+	// Shared after the join: what some branch left shared.
+	env.shared = map[string]bool{}
+	for _, o := range outs {
+		for k := range o.shared {
+			env.shared[k] = true
+		}
+	}
 	env.intTerms, env.listLens, env.boolTerms = ints, lens, bools
 	env.listElems, env.sumInfos = elems, sums
 }
@@ -170,4 +177,14 @@ func (v *verifier) matchIsTotal(subj ast.Expr, arms []matchArmDesc) bool {
 		return true
 	}
 	return false
+}
+
+// sortedKeys lists the keys of m in a fixed order.
+func sortedKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

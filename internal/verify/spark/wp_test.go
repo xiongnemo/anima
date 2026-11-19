@@ -1418,3 +1418,274 @@ def g(xs: list[int]) -> int:
 		t.Errorf("a length is never negative, failed VCs: %v", failed)
 	}
 }
+
+const invariantPrelude = `
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+entity Box:
+    inner: A
+    k: int[0..9]
+
+def use(a: A) -> int:
+    return 100 / (11 - a.x - a.y)
+
+def fresh() -> A:
+    return A(x=1, y=1)
+
+def open_box(bx: Box) -> int:
+    return use(bx.inner)
+`
+
+// An entity may break its invariant between two field updates, but not at
+// the point where it is handed to a call, returned, or put into another value.
+func TestSPARKEntityInvariantWhereAnEntityIsHandedOn(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + b + "\n"
+	}
+	broken := "    b = A(x=5, y=5)\n    b.x = 6\n"
+	rejected := map[string]string{
+		"call argument":         body(broken + "    return use(b)"),
+		"list element":          body(broken + "    ys = [b]\n    return 0"),
+		"variant payload":       body(broken + "    p = Some(b)\n    return 0"),
+		"field of an entity":    body(broken + "    bx = Box(inner=b, k=1)\n    return 0"),
+		"copy with a field":     body("    b = A(x=5, y=5)\n    return use(b with {x: 6})"),
+		"field of an element":   body("    rs = [A(x=5, y=5)]\n    rs[0].x = 6\n    return 0"),
+		"returned":              invariantPrelude + "\ndef g() -> A:\n" + broken + "    return b\n",
+		"entity inside a field": invariantPrelude + "\ndef g() -> int:\n    bx = Box(inner=A(x=5, y=5), k=1)\n    bx.inner.x = 6\n    return open_box(bx)\n",
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "_invariant_1") || !strings.Contains(failed, "entity_") {
+			t.Errorf("%s: expected a failed entity invariant, failed VCs:\n%s", name, failed)
+		}
+	}
+	accepted := map[string]string{
+		"parameter":                "    return use(a)",
+		"two-step update":          "    b = A(x=5, y=5)\n    b.x = 0\n    b.y = 10\n    return use(b)",
+		"restored before the call": broken + "    b.y = 4\n    return use(b)",
+		"second name":              "    b = A(x=5, y=5)\n    c = b\n    return use(c)",
+		"copy with a field":        "    b = A(x=5, y=5)\n    c = b with {x: 2}\n    return use(c)",
+		"loop element":             "    t: int = 0\n    for r in rows:\n        t = use(r)\n    return t",
+		"indexed element":          "    if len(rows) > 0:\n        return use(rows[0])\n    return 0",
+		"pattern payload":          "    match o:\n        Some(v) -> return use(v)\n        None -> return 0",
+		"result of a call":         "    return use(fresh())",
+	}
+	for name, b := range accepted {
+		if failed := failedVCs(verifySrc(t, body(b))); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// Replacing an entity-valued field, in a statement or in a loop, replaces
+// what was known about the entity inside it.
+func TestSPARKReplacedEntityFieldForgetsItsOldContents(t *testing.T) {
+	prelude := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+`
+	stale := map[string]string{
+		"copy with a new field":     "    b.inner.x = 1\n    c = b with {inner: P(x=0)}\n    a = c.inner\n    return 10 / a.x",
+		"field assigned":            "    b.inner.x = 1\n    b.inner = P(x=0)\n    a = b.inner\n    return 10 / a.x",
+		"nested field in a for":     "    b.inner.x = 1\n    for i in [0]:\n        b.inner.x = 0\n    a = b.inner\n    return 10 / a.x",
+		"nested field in a while":   "    b.inner.x = 1\n    i: int = 0\n    while i < 1:\n        invariant: i >= 0\n        decreases: 1 - i\n        b.inner.x = 0\n        i += 1\n    a = b.inner\n    return 10 / a.x",
+		"entity assigned in a loop": "    p = P(x=1)\n    for i in [0]:\n        p = P(x=0)\n    return 10 / p.x",
+	}
+	for name, body := range stale {
+		src := prelude + "\ndef f(mut b: Holder) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	// A field of the outer entity is not mistaken for one of the new inner entity.
+	outer := `
+entity P:
+    x: int[0..10]
+
+entity Wide:
+    inner: P
+    x: int[0..10]
+
+def make_p() -> P:
+    return P(x=0)
+
+def f(mut b: Wide) -> int:
+    b.x = 5
+    c = b with {inner: make_p()}
+    a = c.inner
+    return 10 / a.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, outer)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("outer field with the inner field's name: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	// ...and the outer entity keeps its own fields.
+	kept := strings.Replace(outer, "    a = c.inner\n    return 10 / a.x\n", "    return 10 / c.x\n", 1)
+	if failed := failedVCs(verifySrc(t, kept)); len(failed) != 0 {
+		t.Errorf("outer field after replacing the inner entity: expected every VC proved, failed VCs: %v", failed)
+	}
+	ok := prelude + "\ndef f(mut b: Holder) -> int:\n    b.inner = P(x=2)\n    a = b.inner\n    return 10 / a.x\n"
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("the new contents are known, failed VCs: %v", failed)
+	}
+}
+
+// The entity a match expression yields is checked arm by arm.
+func TestSPARKEntityInvariantOfMatchExpression(t *testing.T) {
+	valid := invariantPrelude + `
+def choose(flag: bool) -> A:
+    return match flag:
+        True -> A(x=1, y=1)
+        False -> A(x=2, y=2)
+`
+	if failed := failedVCs(verifySrc(t, valid)); len(failed) != 0 {
+		t.Errorf("arms that construct valid entities: expected every VC proved, failed VCs: %v", failed)
+	}
+	broken := invariantPrelude + `
+def choose(flag: bool) -> A:
+    b = A(x=5, y=5)
+    b.x = 6
+    return match flag:
+        True -> A(x=1, y=1)
+        False -> b
+`
+	failed := strings.Join(failedVCs(verifySrc(t, broken)), "\n")
+	if !strings.Contains(failed, "entity_b_invariant_1") {
+		t.Errorf("an arm that yields a broken entity: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
+	}
+}
+
+// A match expression must cover its subject wherever it is written, not
+// only as the whole right-hand side of an assignment or a return.
+func TestSPARKMatchExpressionCoverageInFieldAndElementAssignment(t *testing.T) {
+	prelude := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+`
+	partial := map[string]string{
+		"field":   "    b.inner = match k:\n        0 -> P(x=1)\n    return 0",
+		"element": "    rs = [P(x=1)]\n    rs[0] = match k:\n        0 -> P(x=1)\n    return 0",
+	}
+	for name, body := range partial {
+		src := prelude + "\ndef f(mut b: Holder, k: int[0..9]) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "match_exhaustive") {
+			t.Errorf("%s: expected a failed match_exhaustive, failed VCs:\n%s", name, failed)
+		}
+	}
+	total := prelude + "\ndef f(mut b: Holder, k: int[0..9]) -> int:\n    b.inner = match k:\n        0 -> P(x=1)\n        _ -> P(x=2)\n    return 0\n"
+	if failed := failedVCs(verifySrc(t, total)); len(failed) != 0 {
+		t.Errorf("a total match: expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// An entity that can be reached in two ways has no private moment between
+// two field updates: each write has to leave its invariants true.
+func TestSPARKSharedEntityKeepsItsInvariantOnEveryWrite(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + b + "\n"
+	}
+	rejected := map[string]string{
+		"loop variable":                 body("    for r in rows:\n        r.x = 6\n    if len(rows) > 0:\n        return use(rows[0])\n    return 0"),
+		"matched payload":               body("    match o:\n        Some(v) ->\n            v.x = 6\n            return 0\n        None -> return 0"),
+		"element by index":              body("    if len(rows) > 0:\n        r = rows[0]\n        r.x = 6\n    return 0"),
+		"second name":                   body("    b = A(x=5, y=5)\n    c = b\n    b.x = 6\n    return use(c)"),
+		"stored in a list":              body("    b = A(x=5, y=5)\n    ys = [b]\n    b.x = 6\n    b.y = 4\n    return 0"),
+		"shared on a loop's next pass":  body("    c = A(x=5, y=5)\n    for i in 0..3:\n        c.x = 6\n        c.y = 4\n        if len(rows) > 0:\n            c = rows[0]\n    return 0"),
+		"entity inside a loop variable": invariantPrelude + "\ndef g(bxs: list[Box]) -> int:\n    for bx in bxs:\n        bx.inner.x = 6\n    return 0\n",
+		"field of another entity":       invariantPrelude + "\ndef g(mut bx: Box) -> int:\n    a = bx.inner\n    a.x = 6\n    return 0\n",
+		"yielded by a lambda":           body("    b = A(x=5, y=5)\n    b.x = 6\n    ys = [1, 2] |> map(n => b)\n    return 0"),
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "_invariant_1") || !strings.Contains(failed, "entity_") {
+			t.Errorf("%s: expected a failed entity invariant, failed VCs:\n%s", name, failed)
+		}
+	}
+	accepted := map[string]string{
+		"write that keeps the invariant": "    for r in rows:\n        r.x = 0\n    return 0",
+		"adjusted, then stored":          "    b = A(x=5, y=5)\n    b.x = 0\n    b.y = 10\n    ys = [b]\n    return 0",
+		"name given a new entity":        "    c = A(x=1, y=1)\n    for r in rows:\n        c = r\n    c = A(x=5, y=5)\n    c.x = 6\n    c.y = 4\n    return use(c)",
+	}
+	for name, b := range accepted {
+		if failed := failedVCs(verifySrc(t, body(b))); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// A compound assignment through a field path is recorded under that path.
+func TestSPARKCompoundAssignmentThroughFieldPath(t *testing.T) {
+	src := `
+entity P:
+    x: int[0..10]
+
+entity Holder:
+    inner: P
+
+def f(mut b: Holder) -> int:
+    b.inner.x = 1
+    b.inner.x -= 1
+    a = b.inner
+    return 10 / a.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+}
+
+// What does not give a second way to reach an entity leaves its two-step
+// updates alone.
+func TestSPARKUnsharedEntityKeepsTwoStepUpdates(t *testing.T) {
+	twoStep := "    b.x = 6\n    b.y = 4\n    return use(b)"
+	accepted := map[string]string{
+		"a number read out of it":           "    b = A(x=5, y=5)\n    saved = b.x\n" + twoStep,
+		"replaced in every branch":          "    b = A(x=5, y=5)\n    c = b\n    if len(rows) > 0:\n        b = A(x=5, y=5)\n    else:\n        b = A(x=5, y=5)\n" + twoStep,
+		"lambda parameter of the same name": "    b = A(x=5, y=5)\n    ys = rows |> map(b => [b])\n" + twoStep,
+	}
+	for name, body := range accepted {
+		src := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + body + "\n"
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+	// Replaced in one branch only: the other still shares it.
+	oneBranch := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    b = A(x=5, y=5)\n    c = b\n    if len(rows) > 0:\n        b = A(x=5, y=5)\n" + twoStep + "\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, oneBranch)), "\n"); !strings.Contains(failed, "entity_b_invariant_1") {
+		t.Errorf("replaced in one branch: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
+	}
+}
+
+// An untyped map (`m = {}`) gives its elements no type. Taking one into a
+// typed variable shares it, and a field write on an untyped one is rejected.
+func TestSPARKEntityInAnUntypedMap(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m = {}\n    m[\"k\"] = A(x=5, y=5)\n" + b + "\n    return use(m[\"k\"])\n"
+	}
+	rejected := map[string]string{
+		"typed variable":   "entity_r_invariant_1\x00    r: A = m[\"k\"]\n    r.x = 6",
+		"untyped variable": "field_x_object_type\x00    r = m[\"k\"]\n    r.x = 6",
+		"in place":         "field_x_object_type\x00    m[\"k\"].x = 6",
+	}
+	for name, c := range rejected {
+		vc, b, _ := strings.Cut(c, "\x00")
+		failed := strings.Join(failedVCs(verifySrc(t, body(b))), "\n")
+		if !strings.Contains(failed, vc) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, vc, failed)
+		}
+	}
+	// With a typed map the element's other fields are known to fit the invariant.
+	typed := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m: map[str, A] = {}\n    m[\"k\"] = A(x=5, y=5)\n    r = m[\"k\"]\n    r.x = 0\n    return use(m[\"k\"])\n"
+	if failed := failedVCs(verifySrc(t, typed)); len(failed) != 0 {
+		t.Errorf("typed map, a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
+	}
+}

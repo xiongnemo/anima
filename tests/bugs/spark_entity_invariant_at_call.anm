@@ -1,0 +1,17 @@
+# A function assumes the invariants of the entities it is given, so the
+# caller has to hold them at the call. Here `a.x = 6` leaves x + y == 11,
+# and `use` divides by 11 - x - y.
+
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+def use(a: A) -> int:
+    return 100 / (11 - a.x - a.y)
+
+def main() -> int:
+    a = A(x=5, y=5)
+    a.x = 6
+    print(use(a))
+    return 0
