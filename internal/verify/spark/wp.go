@@ -88,6 +88,12 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
+	// mapLens marks the entries of listLens that are the length of a map,
+	// which an insertion changes.
+	mapLens map[string]bool
+	// entTypes gives the entity type of each variable, and field path,
+	// that is bound to an entity.
+	entTypes map[string]*sema.EntityType
 	// shared holds the variables whose entity can also be reached another
 	// way: through a second name, or inside a list, map, variant or entity.
 	shared map[string]bool
@@ -106,6 +112,8 @@ func newSymEnv() *symEnv {
 		sumInfos:   map[string]listSumInfo{},
 		entryTerms: map[string]smt.LinearTerm{},
 		shared:     map[string]bool{},
+		entTypes:   map[string]*sema.EntityType{},
+		mapLens:    map[string]bool{},
 		fresh:      new(int),
 	}
 }
@@ -125,6 +133,14 @@ func (e *symEnv) clone() *symEnv {
 	}
 	for k := range e.shared {
 		c.shared[k] = true
+	}
+	c.mapLens = make(map[string]bool, len(e.mapLens))
+	for k := range e.mapLens {
+		c.mapLens[k] = true
+	}
+	c.entTypes = make(map[string]*sema.EntityType, len(e.entTypes))
+	for k, t := range e.entTypes {
+		c.entTypes[k] = t
 	}
 	for k, v := range e.intTerms {
 		c.intTerms[k] = v.Clone()
@@ -180,6 +196,16 @@ func (e *symEnv) unbind(name string) {
 			delete(e.sumInfos, k)
 		}
 	}
+	for k := range e.entTypes {
+		if under(k) {
+			delete(e.entTypes, k)
+		}
+	}
+	for k := range e.mapLens {
+		if under(k) {
+			delete(e.mapLens, k)
+		}
+	}
 }
 
 // rename moves what is bound under one program name to another, keeping the symbols.
@@ -218,6 +244,18 @@ func (e *symEnv) rename(from, to string) {
 		if nk, ok := move(k); ok {
 			delete(e.sumInfos, k)
 			e.sumInfos[nk] = si
+		}
+	}
+	for k, t := range e.entTypes {
+		if nk, ok := move(k); ok {
+			delete(e.entTypes, k)
+			e.entTypes[nk] = t
+		}
+	}
+	for k := range e.mapLens {
+		if nk, ok := move(k); ok {
+			delete(e.mapLens, k)
+			e.mapLens[nk] = true
 		}
 	}
 }
@@ -274,6 +312,59 @@ func (e *symEnv) pathAtoms() []smt.LinearAtom {
 	return out
 }
 
+// fieldView is a copy of e in which every name n that expr mentions is what
+// e has under prefix+n, and nothing else: a variable of e with the name of
+// a field is not seen. names lists them.
+func (e *symEnv) fieldView(expr ast.Expr, prefix string) (view *symEnv, names []string) {
+	view = e.clone()
+	seen := map[string]bool{}
+	visitExprs(reflect.ValueOf(expr), func(x ast.Expr) bool {
+		id, ok := x.(*ast.Ident)
+		if !ok || seen[id.Name] {
+			return true
+		}
+		seen[id.Name] = true
+		names = append(names, id.Name)
+		n, from := id.Name, prefix+id.Name
+		view.unbind(n)
+		under := func(k string) (string, bool) {
+			if k == from || strings.HasPrefix(k, from+".") {
+				return n + k[len(from):], true
+			}
+			return "", false
+		}
+		for k, t := range e.intTerms {
+			if nk, ok := under(k); ok {
+				view.intTerms[nk] = t.Clone()
+			}
+		}
+		for k, b := range e.boolTerms {
+			if nk, ok := under(k); ok {
+				view.boolTerms[nk] = b
+			}
+		}
+		for k, t := range e.listLens {
+			if nk, ok := under(k); ok {
+				view.listLens[nk] = t.Clone()
+			}
+		}
+		for k, iv := range e.listElems {
+			if nk, ok := under(k); ok {
+				view.listElems[nk] = iv
+			}
+		}
+		// A field with no value yet is its own symbol, the same one each time.
+		if _, ok := view.intTerms[n]; !ok {
+			view.intTerms[n] = smt.Var(from)
+		}
+		if _, ok := view.boolTerms[n]; !ok {
+			view.boolTerms[n] = smt.BoolVar{Name: from}
+		}
+		return true
+	})
+	return view, names
+}
+
 func (e *symEnv) pathCond() smt.BoolExpr {
 	return smt.And(e.pc...)
 }
@@ -282,9 +373,14 @@ type verifier struct {
 	info        *sema.ProgramInfo
 	report      *Report
 	curFuncName string
-	curDecExpr  ast.Expr
-	curDecTerm  smt.LinearTerm
-	curMutEnts  []struct {
+	// curCalls tells, for a call in the current function, whether it calls
+	// a closure held in a variable; curLocals lists every name the function
+	// binds (closureCalls).
+	curCalls   map[*ast.CallExpr]bool
+	curLocals  map[string]bool
+	curDecExpr ast.Expr
+	curDecTerm smt.LinearTerm
+	curMutEnts []struct {
 		varName string
 		ent     *sema.EntityType
 	}
@@ -405,6 +501,7 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 		if v.bindingEnts[t] {
 			return
 		}
+		env.entTypes[name] = t
 		if v.bindingEnts == nil {
 			v.bindingEnts = map[*sema.EntityType]bool{}
 		}
@@ -546,7 +643,9 @@ func (v *verifier) verifyFunc(fn *ast.FuncDecl) {
 	v.curEnsures = fn.Ensures
 	v.curRetType = fi.Type.Return
 	v.curMutEnts = nil
+	v.curCalls, v.curLocals = closureCalls(fi.Type.Params, fn.Body)
 	v.checkParamsNotRebound(fi.Type.Params, fn.Body, scope, fn.Span)
+	v.checkReadonlyWrites(fi.Type.Params, fn.Body, scope)
 
 	for _, p := range fi.Type.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -584,12 +683,7 @@ func (v *verifier) checkFunctionExitContracts(env *symEnv, scope string, span as
 		}
 	}
 	// 2. Mutable entity invariants preserved
-	for _, me := range v.curMutEnts {
-		for _, inv := range me.ent.Invariants {
-			b := v.evalBoolWithPrefix(inv, env, me.varName+".")
-			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, me.varName), scope, span, env, b)
-		}
-	}
+	v.proveMutInvariants(env, scope, span)
 	// 3. Ensures postconditions
 	for idx, ens := range v.curEnsures {
 		b := v.evalBool(ens, env, scope)
@@ -609,7 +703,9 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 	v.curEnsures = nil
 	v.curRetType = wi.Return
 	v.curMutEnts = nil
+	v.curCalls, v.curLocals = closureCalls(wi.Params, wf.Nodes)
 	v.checkParamsNotRebound(wi.Params, wf.Nodes, scope, wf.Span)
+	v.checkReadonlyWrites(wi.Params, wf.Nodes, scope)
 
 	for _, p := range wi.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -693,6 +789,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)
+	v.checkMutAliases(groups, env, scope)
 	v.noteShared(stmt, groups, env)
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
@@ -745,7 +842,10 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if path, ok := mutArgPath(fe); ok {
 				env.intTerms[path] = rhsTerm
 				v.proveSharedEntity(fe.Object, env, scope, s.Span)
+			} else {
+				v.proveElementWrite(fe.Object, fe.Field, nil, rhsTerm, env, scope, s.Span)
 			}
+			v.forgetAliases(fe.Object, env)
 		}
 
 	case *ast.IndexAssignStmt:
@@ -756,6 +856,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
+		if !hasFixedLen(v.info.ExprTypes[s.List]) {
+			env.forgetMapLens(s.List)
+		}
 
 	case *ast.CallStmt:
 		if s.Call != nil {
@@ -775,16 +878,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			path = obj + "." + s.Field
 		}
 		rhsTerm := v.evalInt(s.Value, env, scope, true)
-		// The object has no name (rows[i].x = v): it stays inside its
-		// container, so its invariants must hold with this one field known.
-		if et, ok := v.info.ExprTypes[s.Object].(*sema.EntityType); ok && path == "" && hasInvariants(et, nil) {
-			probe := env.clone()
-			saved := v.noInvariants
-			v.noInvariants = true
-			v.bindFresh(probe, entityProbe, et)
-			v.noInvariants = saved
-			probe.intTerms[entityProbe+"."+s.Field] = rhsTerm
-			v.proveInvariants(et, entityProbe, "element", s.Span, probe, scope, map[*sema.EntityType]bool{})
+		if path == "" {
+			v.proveElementWrite(s.Object, s.Field, s.Value, rhsTerm, env, scope, s.Span)
 		}
 		if objTy, ok := v.info.ExprTypes[s.Object]; ok {
 			if et, ok := objTy.(*sema.EntityType); ok {
@@ -801,6 +896,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			v.setField(path, s.Value, rhsTerm, env, scope, s.Span)
 			v.proveSharedEntity(s.Object, env, scope, s.Span)
 		}
+		v.forgetAliases(s.Object, env)
 
 	case *ast.IfStmt:
 		curEnv := env.clone()
@@ -1429,8 +1525,9 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Object, env, scope)
 	case *ast.TryExpr:
 		v.evalSideEffects(e.Inner, env, scope)
-		// Inside a lambda `?` returns from the lambda, not from the function.
-		if v.lambdaDepth == 0 {
+		// Inside a lambda `?` returns from the lambda, not from the function,
+		// and `Some(x)?` or `Ok(x)?` never returns.
+		if v.lambdaDepth == 0 && !v.neverFails(e.Inner) {
 			v.checkTryExit(env, scope, e.Span)
 		}
 	case *ast.RangeExpr:
@@ -1455,8 +1552,18 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 	case *ast.WithExpr:
 		v.evalSideEffects(e.Base, env, scope)
+		et, _ := v.info.ExprTypes[e.Base].(*sema.EntityType)
 		for _, f := range e.Fields {
 			v.evalSideEffects(f.Value, env, scope)
+			// The copy's fields have the declared types, as a constructor's do.
+			v.proveEntityValue(f.Value, env, scope)
+			if et == nil {
+				continue
+			}
+			if it, ok := et.FieldMap[f.Name].(*sema.IntType); ok && it.IsBounded {
+				t := v.evalInt(f.Value, env, scope, true)
+				v.checkIntRange(t, f.Value, env, it, scope+".with_"+f.Name+"_bounds", scope, e.Span)
+			}
 		}
 	case *ast.IntLit, *ast.BoolLit, *ast.StrLit, *ast.NoneLit, *ast.Ident, *ast.OldExpr:
 	default:
@@ -1631,6 +1738,8 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 	for _, name := range v.sharedIn(stmts) {
 		env.shared[name] = true
 	}
+	v.forgetWrittenAliases(stmts, env)
+	v.forgetInsertedMapLens(stmts, env)
 	names, compound := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
@@ -2095,6 +2204,9 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			if argID, ok := e.Args[0].Value.(*ast.Ident); ok {
+				if !hasFixedLen(v.info.ExprTypes[argID]) {
+					env.mapLens[argID.Name] = true
+				}
 				return env.lenOf(argID.Name)
 			}
 		}
@@ -2147,7 +2259,33 @@ func (v *verifier) evalBool(expr ast.Expr, env *symEnv, scope string) smt.BoolEx
 	return v.evalBoolWithPrefix(expr, env, "")
 }
 
+// evalBoolWithPrefix evaluates expr with each name n in it standing for the
+// variable prefix+n: an entity's invariant, written over its fields, for
+// the entity bound under a path.
 func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string) smt.BoolExpr {
+	if prefix != "" {
+		// Evaluate in a view where the names are bound to the fields, so
+		// that every form of expression reads them, and nothing else.
+		view, names := env.fieldView(expr, prefix)
+		b := v.evalBoolWithPrefix(expr, view, "")
+		// What was learned about the symbols the evaluation made, and the
+		// lengths it named: the same field has the same length next time.
+		env.pc = append(env.pc, view.pc[len(env.pc):]...)
+		for _, n := range names {
+			for k, t := range view.listLens {
+				if k != n && !strings.HasPrefix(k, n+".") {
+					continue
+				}
+				if _, known := env.listLens[prefix+k]; !known {
+					env.listLens[prefix+k] = t
+				}
+				if view.mapLens[k] {
+					env.mapLens[prefix+k] = true
+				}
+			}
+		}
+		return b
+	}
 	switch e := expr.(type) {
 	case *ast.BoolLit:
 		return smt.BoolConst{Val: e.Value}
@@ -2170,8 +2308,8 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		case "implies":
 			return smt.Implies(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
 		case "==", "!=", "<", "<=", ">", ">=":
-			l := v.evalIntPrefixed(e.Left, env, prefix)
-			r := v.evalIntPrefixed(e.Right, env, prefix)
+			l := v.evalInt(e.Left, env, "", false)
+			r := v.evalInt(e.Right, env, "", false)
 			switch e.Op {
 			case "==":
 				return smt.Eq(l, r)
@@ -2189,47 +2327,6 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		}
 	}
 	return smt.BoolVar{Name: env.freshVar("bool")}
-}
-
-func (v *verifier) evalIntPrefixed(expr ast.Expr, env *symEnv, prefix string) smt.LinearTerm {
-	if prefix == "" {
-		return v.evalInt(expr, env, "", false)
-	}
-	if id, ok := expr.(*ast.Ident); ok {
-		path := prefix + id.Name
-		if t, ok := env.intTerms[path]; ok {
-			return t
-		}
-		return smt.Var(path)
-	}
-	if be, ok := expr.(*ast.BinaryExpr); ok {
-		l := v.evalIntPrefixed(be.Left, env, prefix)
-		r := v.evalIntPrefixed(be.Right, env, prefix)
-		switch be.Op {
-		case "+":
-			return l.Add(r)
-		case "-":
-			return l.Sub(r)
-		case "*":
-			if len(r.Coeffs) == 0 {
-				return l.Scale(r.Const)
-			}
-			if len(l.Coeffs) == 0 {
-				return r.Scale(l.Const)
-			}
-			ivL := v.termInterval(l, env)
-			ivR := v.termInterval(r, env)
-			mv := smt.Var(env.freshVar("mul"))
-			// With no bound mv stays free, so nothing about the product, not even that it
-			// fits in 64 bits, can be proved.
-			if prod := smt.MulInterval(ivL, ivR); prod.HasLo && prod.HasHi {
-				env.assume(smt.Ge(mv, smt.Const(prod.Lo)))
-				env.assume(smt.Le(mv, smt.Const(prod.Hi)))
-			}
-			return mv
-		}
-	}
-	return v.evalInt(expr, env, "", false)
 }
 
 // ---------------------------------------------------------------------------

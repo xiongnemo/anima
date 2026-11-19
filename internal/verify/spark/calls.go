@@ -129,16 +129,22 @@ func (v *verifier) checkParamsNotRebound(params []sema.FuncParamInfo, body any, 
 	}
 }
 
+// neverFails reports whether e is written as the success variant of an
+// Option or a Result, on which `?` cannot return.
+func (v *verifier) neverFails(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Ident)
+	return ok && (id.Name == "Some" || id.Name == "Ok") && !v.callsClosure(call)
+}
+
 // checkTryExit proves what a caller may rely on when a `?` returns from the
 // current function: the invariants of its mut entities and the ensures
 // clauses that do not speak about the result.
 func (v *verifier) checkTryExit(env *symEnv, scope string, span ast.Span) {
-	for _, me := range v.curMutEnts {
-		for _, inv := range me.ent.Invariants {
-			b := v.evalBoolWithPrefix(inv, env, me.varName+".")
-			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, me.varName), scope, span, env, b)
-		}
-	}
+	v.proveMutInvariants(env, scope, span)
 	for idx, ens := range v.curEnsures {
 		if mentionsOutside(reflect.ValueOf(ens), "result", nil) {
 			continue
@@ -307,6 +313,9 @@ func mutRoot(e ast.Expr) *ast.Ident {
 // of its mut entities on the way out. Elsewhere the call may not have run,
 // and the entity may be in the middle of an update by the caller.
 func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
+	// The callee may have inserted into a map it reaches. What it
+	// guarantees about the argument is bound after that.
+	env.forgetMapLens(a.Value)
 	saved := v.noInvariants
 	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {
@@ -315,6 +324,8 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}
 	v.noInvariants = saved
+	// The callee may have written the entity, which another name may share.
+	v.forgetAliases(a.Value, env)
 }
 
 // havocMutArgs forgets every variable passed as mut anywhere under node,

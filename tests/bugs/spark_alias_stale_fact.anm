@@ -1,0 +1,13 @@
+# Entities are references: c and b are one object, so what was known about
+# c.x is gone once b.x is written.
+
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+
+def main() -> int:
+    b = A(x=5, y=5)
+    c = b
+    b.x = 0
+    print(10 / c.x)
+    return 0

@@ -1,0 +1,20 @@
+# idf hands its argument back, so c and b are one entity. `b.x = 6` breaks
+# the invariant that `use` assumes for c.
+
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+def use(a: A) -> int:
+    return 100 / (11 - a.x - a.y)
+
+def idf(a: A) -> A:
+    return a
+
+def main() -> int:
+    b = A(x=5, y=5)
+    c = idf(b)
+    b.x = 6
+    print(use(c))
+    return 0
