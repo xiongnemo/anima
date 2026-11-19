@@ -689,6 +689,36 @@ def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Op
 	}
 }
 
+// Both backends call a function of the program that is named like a
+// pipeline stage, so `xs |> filter(2)` is checked as `filter(xs, 2)`.
+func TestSemaUserFunctionNamedLikeAStage(t *testing.T) {
+	prelude := `
+def filter(xs: list[int], n: int[0..9]) -> int:
+    return n
+
+def fold(xs: list[int], s: str) -> str:
+    return s
+
+def f(xs: list[int]) -> int:
+`
+	cases := map[string]bool{
+		"n = xs |> filter(2)\n    return n":                 true,
+		"s = xs |> fold(\"a\")\n    return len(s)":          true,
+		"n = xs |> filter(\"a\")\n    return n":             false, // not an int
+		"n = xs |> filter((v) => v > 1)\n    return 0":      false, // not an int
+		"ys = xs |> map((v) => v) |> take(1)\n    return 0": true,  // stages no function shadows
+	}
+	for body, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", body, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%q: accepted = %v, want %v (%v)", body, err == nil, ok, err)
+		}
+	}
+}
+
 // The backends give a workflow its arguments by position, so a keyword
 // argument has to name the parameter at its place.
 func TestSemaWorkflowArgumentsInOrder(t *testing.T) {

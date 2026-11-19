@@ -1884,9 +1884,16 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		elemTy = lt.Elem
 	}
 
+	// A function of the program named like a stage is what both backends
+	// call: `xs |> filter(2)` is then `filter(xs, 2)`.
+	stage := fnName
+	if _, user := c.info.Funcs[fnName]; user && direct {
+		stage = ""
+	}
+
 	// The function a stage takes is a lambda or a variable holding one.
 	fnArg := -1
-	switch fnName {
+	switch stage {
 	case "filter", "map", "flat_map", "any", "all", "find", "and_then":
 		fnArg = 0
 	case "fold":
@@ -1905,7 +1912,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		}
 	}
 
-	switch fnName {
+	switch stage {
 	case "filter":
 		if len(callArgs) == 1 {
 			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
