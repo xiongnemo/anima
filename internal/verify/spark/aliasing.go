@@ -80,10 +80,11 @@ func (v *verifier) forgetAliases(obj ast.Expr, env *symEnv) {
 }
 
 // isFlatEntity reports whether t is an entity whose fields are all numbers,
-// booleans and strings: nothing reachable from it can be shared on its own.
+// booleans and strings, and that has no relation to another entity: nothing
+// reachable from it can be shared on its own.
 func (v *verifier) isFlatEntity(t sema.Type) bool {
 	et, ok := t.(*sema.EntityType)
-	if !ok {
+	if !ok || len(et.Relations) > 0 {
 		return false
 	}
 	for _, f := range et.Fields {
