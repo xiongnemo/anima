@@ -2849,6 +2849,73 @@ def f() -> int:
     pool.shutdown()
     return x
 `, "match_exhaustive_adt"},
+		{"a bare None inside Some is a value too", `
+def f() -> int:
+    o = Some(None)
+    x = 0
+    match o:
+        Some(Some(_)) -> x = 1
+        None -> x = 2
+    return x
+`, "match_exhaustive_adt"},
+		{"a bare None is a value of Option", `
+def f() -> int:
+    o = None
+    x = 0
+    match o:
+        Some(v) -> x = 1
+    return x
+`, "match_exhaustive_adt"},
+		{"bool result of a future, both values", `
+import std.concurrent as conc
+
+def work(n: int) -> bool:
+    return n > 0
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        True -> x = 1
+        False -> x = 2
+    pool.shutdown()
+    return x
+`, ""},
+		{"bool result of a future, one value", `
+import std.concurrent as conc
+
+def work(n: int) -> bool:
+    return n > 0
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        True -> x = 1
+    pool.shutdown()
+    return x
+`, "match_exhaustive_bool"},
+		{"bool inside the result of a future, one value", `
+import std.concurrent as conc
+
+def work(n: int) -> Option[bool]:
+    return Some(n > 0)
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Some(True) -> x = 1
+        None -> x = 2
+    pool.shutdown()
+    return x
+`, "match_exhaustive_adt"},
 		{"recursive type, covered", `
 type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
 

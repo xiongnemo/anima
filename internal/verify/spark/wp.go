@@ -2459,28 +2459,6 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 	if subjTy == nil {
 		return
 	}
-	if _, unknown := subjTy.(sema.UnknownType); unknown {
-		// e.g. the result of a future: take the ADT from the variant patterns.
-		for _, arm := range arms {
-			if vp, ok := arm.pat.(*ast.VariantPat); ok {
-				if adt := v.info.Variants[vp.Name]; adt != nil {
-					subjTy = adt
-					break
-				}
-			}
-		}
-	}
-	if _, unknown := subjTy.(sema.UnknownType); unknown {
-		// e.g. the result of a future: take the ADT from the variant patterns.
-		for _, arm := range arms {
-			if vp, ok := arm.pat.(*ast.VariantPat); ok {
-				if adt := v.info.Variants[vp.Name]; adt != nil {
-					subjTy = adt
-					break
-				}
-			}
-		}
-	}
 	switch t := subjTy.(type) {
 	case *sema.IntType:
 		st := v.evalInt(subj, env, scope, false)
@@ -2509,57 +2487,41 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 		mEnv.assume(dom)
 		v.prove(scope+".match_exhaustive", scope, span, mEnv, smt.Or(covered...))
 
-	case *sema.ADTType:
+	default:
+		// A variant, a bool, a string, or a type sema does not know such
+		// as the result of a future, which the patterns then name.
 		var rows [][]ast.Pattern
+		vc, what := "match_exhaustive_default", subjTy.String()
 		for _, arm := range arms {
+			switch p := arm.pat.(type) {
+			case *ast.VariantPat:
+				if adt := v.info.Variants[p.Name]; adt != nil && vc == "match_exhaustive_default" {
+					vc, what = "match_exhaustive_adt", adt.Name
+				}
+			case *ast.BoolPat:
+				if vc == "match_exhaustive_default" {
+					vc, what = "match_exhaustive_bool", "bool"
+				}
+			}
 			if arm.guard == nil { // a guarded arm may not run
 				rows = append(rows, []ast.Pattern{arm.pat})
 			}
 		}
-		if missing, ok := v.unmatched(rows, []sema.Type{t}); ok {
-			v.record(scope+".match_exhaustive_adt", scope, span, t.Name, VCFailed,
-				fmt.Sprintf("non-exhaustive match on %s: no arm for %s", t.Name, missing[0]), nil)
+		switch t := subjTy.(type) {
+		case *sema.ADTType:
+			vc, what = "match_exhaustive_adt", t.Name
+		case sema.BoolType:
+			vc, what = "match_exhaustive_bool", "bool"
+		}
+		if missing, ok := v.unmatched(rows, []sema.Type{subjTy}); ok {
+			hint := "no arm for " + missing[0]
+			if missing[0] == "_" {
+				hint = "add a `_` arm"
+			}
+			v.record(scope+"."+vc, scope, span, what, VCFailed, fmt.Sprintf("non-exhaustive match on %s: %s", what, hint), nil)
 		} else {
-			v.record(scope+".match_exhaustive_adt", scope, span, t.Name, VCProved,
-				fmt.Sprintf("every value of %s is matched", t.Name), nil)
+			v.record(scope+"."+vc, scope, span, what, VCProved, fmt.Sprintf("every value of %s is matched", what), nil)
 		}
-	case sema.BoolType:
-		covT, covF := false, false
-		for _, arm := range arms {
-			if arm.guard != nil {
-				continue
-			}
-			switch p := arm.pat.(type) {
-			case *ast.WildcardPat, *ast.VarPat:
-				covT, covF = true, true
-			case *ast.BoolPat:
-				if p.Value {
-					covT = true
-				} else {
-					covF = true
-				}
-			}
-		}
-		if covT && covF {
-			v.record(scope+".match_exhaustive_bool", scope, span, "bool", VCProved, "both True and False covered", nil)
-		} else {
-			v.record(scope+".match_exhaustive_bool", scope, span, "bool", VCFailed, "non-exhaustive bool match", nil)
-		}
-	default:
-		// Strings and other values cannot be enumerated: some arm must
-		// accept everything, or the match could silently run no arm.
-		for _, arm := range arms {
-			if arm.guard != nil {
-				continue
-			}
-			switch arm.pat.(type) {
-			case *ast.WildcardPat, *ast.VarPat:
-				v.record(scope+".match_exhaustive_default", scope, span, subjTy.String(), VCProved, "catch-all arm covers every value", nil)
-				return
-			}
-		}
-		v.record(scope+".match_exhaustive_default", scope, span, subjTy.String(), VCFailed,
-			fmt.Sprintf("non-exhaustive match on %s: add a `_` arm", subjTy), nil)
 	}
 }
 
@@ -2596,11 +2558,23 @@ func (v *verifier) unmatched(rows [][]ast.Pattern, types []sema.Type) ([]string,
 				adt, isADT = v.info.Variants[vp.Name], true
 				break
 			}
+			if _, ok := r[0].(*ast.BoolPat); ok {
+				isBool = true
+				break
+			}
+		}
+	}
+	// The type of a bare `None` lists no variants: its declaration does.
+	var variants []sema.VariantInfo
+	if isADT {
+		variants = adt.Variants
+		if decl := v.info.ADTs[adt.Name]; decl != nil && len(variants) == 0 {
+			variants = decl.Variants
 		}
 	}
 	switch {
-	case split && isADT:
-		for _, vr := range adt.Variants {
+	case split && isADT && len(variants) > 0:
+		for _, vr := range variants {
 			fields := v.variantFieldTypes(adt, vr.Name)
 			var sub [][]ast.Pattern
 			for _, r := range rows {
