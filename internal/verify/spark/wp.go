@@ -1195,10 +1195,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				// Arguments are evaluated in the caller's env before it is cloned, so the call env
 				// inherits their assumptions and never reuses one of their fresh names.
 				var binds []func(*symEnv)
-				argParam, twice := argParams(fi.Type.Params, e.Args)
-				if twice != "" {
+				argParam, problem := argParams(fi.Type.Params, e.Args)
+				if problem != "" {
 					v.record(fmt.Sprintf("%s.call_%s_args", scope, id.Name), scope, e.Span, "each parameter is given once", VCFailed,
-						fmt.Sprintf("parameter %q of %s is given more than once", twice, id.Name), nil)
+						fmt.Sprintf("in the call of %s, %s", id.Name, problem), nil)
 				}
 				for _, p := range fi.Type.Params {
 					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })

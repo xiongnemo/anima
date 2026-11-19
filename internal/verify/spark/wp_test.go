@@ -1197,7 +1197,12 @@ def divide(a: int[0..9], b: int[0..9]) -> int:
 		{"reordered, safe", "divide(b=0, a=2)", ""},
 		{"reordered, zero divisor", "divide(b=1, a=0)", "call_divide_requires_1"},
 		{"piped and reordered", "2 |> divide(b=0)", ""},
+		{"keyword first, then by position", "divide(a=2, 0)", ""},
+		{"by position, then keyword", "divide(2, b=0)", ""},
+		{"zero divisor by position after a keyword", "divide(b=1, 0)", "call_divide_args"},
 		{"parameter given twice", "divide(4, a=6)", "call_divide_args"},
+		{"unknown keyword", "divide(typo=0, 1)", "call_divide_args"},
+		{"piped value with a keyword for the rest", "2 |> divide(b=1)", ""},
 		{"piped value and keyword for the same parameter", "0 |> divide(b=1, a=0)", "call_divide_args"},
 	}
 	for _, tc := range cases {

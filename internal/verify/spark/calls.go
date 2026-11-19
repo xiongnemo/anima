@@ -206,34 +206,51 @@ func (v *verifier) pipedCall(pe *ast.PipeExpr) *ast.CallExpr {
 }
 
 // argParams maps each argument of a call to the index of the parameter it
-// is bound to, or -1: a keyword argument by its name, the others in order.
-// twice names a parameter that more than one argument is bound to.
-func argParams(params []sema.FuncParamInfo, args []ast.CallArg) (idx []int, twice string) {
-	taken := map[int]bool{}
-	next := 0
-	for _, a := range args {
+// is bound to, as both backends do: a keyword argument to the parameter it
+// names, any other to the parameter at its own position. problem says why
+// the arguments do not give every parameter exactly one value; the backends
+// disagree on such a call, so it is not verified.
+func argParams(params []sema.FuncParamInfo, args []ast.CallArg) (idx []int, problem string) {
+	note := func(format string, a ...any) {
+		if problem == "" {
+			problem = fmt.Sprintf(format, a...)
+		}
+	}
+	given := make([]bool, len(params))
+	keywords := false
+	for i, a := range args {
 		pi := -1
 		if a.Name == "" {
-			if next < len(params) {
-				pi = next
+			if i < len(params) {
+				pi = i
 			}
-			next++
 		} else {
-			for i, p := range params {
+			keywords = true
+			for k, p := range params {
 				if p.Name == a.Name {
-					pi = i
+					pi = k
 				}
 			}
-		}
-		if pi >= 0 && taken[pi] && twice == "" {
-			twice = params[pi].Name
+			if pi < 0 {
+				note("there is no parameter %q", a.Name)
+			}
 		}
 		if pi >= 0 {
-			taken[pi] = true
+			if given[pi] {
+				note("parameter %q is given more than once", params[pi].Name)
+			}
+			given[pi] = true
 		}
 		idx = append(idx, pi)
 	}
-	return idx, twice
+	if keywords {
+		for k, p := range params {
+			if !given[k] {
+				note("parameter %q is not given", p.Name)
+			}
+		}
+	}
+	return idx, problem
 }
 
 // callArgs returns the arguments of a call or run_workflow expression.
