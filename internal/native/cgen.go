@@ -928,14 +928,14 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 	}
 }
 
-// emitExpr returns a C expression for expr. Calls, and reads of fields and
-// elements a later call could change, are evaluated into a temporary right
+// emitExpr returns a C expression for expr. Calls, workflow runs, and reads of
+// fields and elements a later call could change, are evaluated into a temporary right
 // here, so an expression runs once and in source order as it does on the VM:
 // C leaves the evaluation order of operands and arguments unspecified.
 func (g *cgen) emitExpr(expr ast.Expr) string {
 	c := g.emitExprInline(expr)
 	switch expr.(type) {
-	case *ast.CallExpr, *ast.FieldExpr, *ast.IndexExpr:
+	case *ast.CallExpr, *ast.RunWorkflowExpr, *ast.FieldExpr, *ast.IndexExpr:
 		tmp := g.freshTmp("val")
 		g.line("AnimaVal %s = %s;", tmp, c)
 		return tmp
