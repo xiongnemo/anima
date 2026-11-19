@@ -214,6 +214,25 @@ func (e *symEnv) rename(from, to string) {
 	}
 }
 
+// freshLen is a length nothing is known about.
+func (e *symEnv) freshLen(of string) smt.LinearTerm {
+	t := smt.Var(e.freshVar("len(" + of + ")"))
+	e.assume(smt.Ge(t, smt.Const(0)))
+	return t
+}
+
+// lenOf is the length of the list, string or byte view held by name. An
+// unknown length gets a symbol of its own, kept until name is assigned
+// again, so that it is never mistaken for the length of an earlier value.
+func (e *symEnv) lenOf(name string) smt.LinearTerm {
+	if t, ok := e.listLens[name]; ok {
+		return t
+	}
+	t := e.freshLen(name)
+	e.listLens[name] = t
+	return t
+}
+
 func (e *symEnv) assume(b smt.BoolExpr) {
 	if b != nil {
 		e.pc = append(e.pc, b)
@@ -1014,13 +1033,13 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 			break
 		}
 	}
-	baseTermLen := smt.Var("len(" + targetVar + ")")
+	var baseTermLen smt.LinearTerm
 	if id, ok := cur.(*ast.Ident); ok {
-		if lt, exists := env.listLens[id.Name]; exists {
-			baseTermLen = lt
-		}
+		baseTermLen = env.lenOf(id.Name)
 	} else if ll, ok := cur.(*ast.ListLit); ok {
 		baseTermLen = smt.Const(int64(len(ll.Elems)))
+	} else {
+		baseTermLen = env.freshLen("pipe")
 	}
 
 	curLen := baseTermLen
@@ -1271,13 +1290,11 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					}
 					if width > 0 {
 						off := v.evalInt(e.Args[0].Value, env, scope, true)
-						bvLen := smt.Var("len(bytes)")
+						var bvLen smt.LinearTerm
 						if id, ok := fe.Object.(*ast.Ident); ok {
-							if l, exists := env.listLens[id.Name]; exists {
-								bvLen = l
-							} else {
-								bvLen = smt.Var("len(" + id.Name + ")")
-							}
+							bvLen = env.lenOf(id.Name)
+						} else {
+							bvLen = env.freshLen("bytes")
 						}
 						v.prove(scope+".byteview_bounds", scope, e.Span, env,
 							smt.And(smt.Ge(off, smt.Const(0)), smt.Le(off.Add(smt.Const(width)), bvLen)))
@@ -1966,10 +1983,7 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			if argID, ok := e.Args[0].Value.(*ast.Ident); ok {
-				if lt, exists := env.listLens[argID.Name]; exists {
-					return lt
-				}
-				return smt.Var("len(" + argID.Name + ")")
+				return env.lenOf(argID.Name)
 			}
 		}
 	}
