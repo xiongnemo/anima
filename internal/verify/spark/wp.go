@@ -88,7 +88,9 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
-	freshID    int
+	// fresh numbers the symbols this env and every clone of it invent, so
+	// that two branches never use one name for two values.
+	fresh *int
 }
 
 func newSymEnv() *symEnv {
@@ -100,6 +102,7 @@ func newSymEnv() *symEnv {
 		listElems:  map[string]smt.Interval{},
 		sumInfos:   map[string]listSumInfo{},
 		entryTerms: map[string]smt.LinearTerm{},
+		fresh:      new(int),
 	}
 }
 
@@ -113,7 +116,7 @@ func (e *symEnv) clone() *symEnv {
 		sumInfos:   make(map[string]listSumInfo, len(e.sumInfos)),
 		entryTerms: e.entryTerms,
 		pc:         append([]smt.BoolExpr{}, e.pc...),
-		freshID:    e.freshID,
+		fresh:      e.fresh,
 	}
 	for k, v := range e.intTerms {
 		c.intTerms[k] = v.Clone()
@@ -137,20 +140,36 @@ func (e *symEnv) clone() *symEnv {
 }
 
 func (e *symEnv) freshVar(prefix string) string {
-	e.freshID++
-	return fmt.Sprintf("__%s_%d", prefix, e.freshID)
+	*e.fresh++
+	return fmt.Sprintf("__%s_%d", prefix, *e.fresh)
 }
 
 // unbind drops every binding of name, so a callee parameter cannot resolve to a caller variable of the same name.
 func (e *symEnv) unbind(name string) {
-	delete(e.intTerms, name)
-	delete(e.boolTerms, name)
-	delete(e.listLens, name)
-	delete(e.listElems, name)
-	delete(e.sumInfos, name)
+	under := func(k string) bool { return k == name || strings.HasPrefix(k, name+".") }
 	for k := range e.intTerms {
-		if strings.HasPrefix(k, name+".") {
+		if under(k) {
 			delete(e.intTerms, k)
+		}
+	}
+	for k := range e.boolTerms {
+		if under(k) {
+			delete(e.boolTerms, k)
+		}
+	}
+	for k := range e.listLens {
+		if under(k) {
+			delete(e.listLens, k)
+		}
+	}
+	for k := range e.listElems {
+		if under(k) {
+			delete(e.listElems, k)
+		}
+	}
+	for k := range e.sumInfos {
+		if under(k) {
+			delete(e.sumInfos, k)
 		}
 	}
 }
@@ -175,13 +194,17 @@ func (e *symEnv) rename(from, to string) {
 			e.boolTerms[nk] = b
 		}
 	}
-	if t, ok := e.listLens[from]; ok {
-		delete(e.listLens, from)
-		e.listLens[to] = t
+	for k, t := range e.listLens {
+		if nk, ok := move(k); ok {
+			delete(e.listLens, k)
+			e.listLens[nk] = t
+		}
 	}
-	if iv, ok := e.listElems[from]; ok {
-		delete(e.listElems, from)
-		e.listElems[to] = iv
+	for k, iv := range e.listElems {
+		if nk, ok := move(k); ok {
+			delete(e.listElems, k)
+			e.listElems[nk] = iv
+		}
 	}
 }
 
@@ -713,7 +736,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if !term {
 				allTerm = false
 				outs = append(outs, branchOut{
-					cond:  smt.And(curEnv.pathCond(), cond),
+					// The whole path through the branch, so what the body
+					// learned (a callee's guarantees, a loop's exit) survives.
+					cond:  thenEnv.pathCond(),
 					terms: thenEnv.intTerms,
 					bools: thenEnv.boolTerms,
 				})
@@ -1178,6 +1203,13 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				for idx, req := range fi.Decl.Requires {
 					v.prove(fmt.Sprintf("%s.call_%s_requires_%d", scope, id.Name, idx+1), scope, e.Span, callEnv, v.evalBool(req, callEnv, scope))
 				}
+				// The callee may change what it receives as mut: after the call
+				// the caller only knows the declared type of such an argument.
+				for _, a := range e.Args {
+					if path, ok := mutArgPath(a.Value); a.Mut && ok {
+						v.bindFresh(env, path, v.info.ExprTypes[a.Value])
+					}
+				}
 				// Check recursive termination if calling self!
 				if id.Name == v.curFuncName && v.curDecExpr != nil {
 					v.prove(scope+".rec_decreases_nonneg", scope, e.Span, env, smt.Ge(v.curDecTerm, smt.Const(0)))
@@ -1219,6 +1251,18 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
 	}
+}
+
+// mutArgPath is the variable path a mut argument names: s, or box.inner.
+func mutArgPath(e ast.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name, true
+	case *ast.FieldExpr:
+		base, ok := mutArgPath(x.Object)
+		return base + "." + x.Field, ok
+	}
+	return "", false
 }
 
 // passesMutArg reports whether the syntax tree under n holds a call argument
