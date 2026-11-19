@@ -779,30 +779,22 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		for i, inv := range s.Invariants {
 			v.prove(fmt.Sprintf("%s.loop_inv_entry_%d", scope, i+1), scope, inv.GetSpan(), env, v.evalBool(inv, env, scope))
 		}
-		// 2. Inductive step under fresh symbolic loop state
-		if len(s.Invariants) > 0 || s.Decreases != nil {
-			stepEnv := env.clone()
-			// Havoc variables assigned inside loop body
-			assigned := collectAssignedVars(s.Body)
-			for _, av := range assigned {
-				if _, isInt := stepEnv.intTerms[av]; isInt {
-					stepEnv.intTerms[av] = smt.Var(av)
-					stepEnv.assume(smt.FitsInt64(smt.Var(av)))
-				}
-			}
-			for _, inv := range s.Invariants {
-				stepEnv.assume(v.evalBool(inv, stepEnv, scope))
-			}
-			v.checkArith(s.Cond, stepEnv, scope)
-			cond := v.evalBool(s.Cond, stepEnv, scope)
-			stepEnv.assume(cond)
+		// 2. Inductive step from an arbitrary iteration: only the invariants are known there.
+		stepEnv := env.clone()
+		v.havocAssigned(s.Body, stepEnv)
+		for _, inv := range s.Invariants {
+			stepEnv.assume(v.evalBool(inv, stepEnv, scope))
+		}
+		v.checkArith(s.Cond, stepEnv, scope)
+		exitEnv := stepEnv.clone()
+		stepEnv.assume(v.evalBool(s.Cond, stepEnv, scope))
 
-			var decBefore smt.LinearTerm
-			if s.Decreases != nil {
-				decBefore = v.evalInt(s.Decreases, stepEnv, scope, false)
-				v.prove(scope+".loop_decreases_nonneg", scope, s.Decreases.GetSpan(), stepEnv, smt.Ge(decBefore, smt.Const(0)))
-			}
-			v.execBlock(s.Body, stepEnv, scope)
+		var decBefore smt.LinearTerm
+		if s.Decreases != nil {
+			decBefore = v.evalInt(s.Decreases, stepEnv, scope, false)
+			v.prove(scope+".loop_decreases_nonneg", scope, s.Decreases.GetSpan(), stepEnv, smt.Ge(decBefore, smt.Const(0)))
+		}
+		if !v.execBlock(s.Body, stepEnv, scope) {
 			for i, inv := range s.Invariants {
 				v.prove(fmt.Sprintf("%s.loop_inv_step_%d", scope, i+1), scope, inv.GetSpan(), stepEnv, v.evalBool(inv, stepEnv, scope))
 			}
@@ -810,29 +802,36 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				decAfter := v.evalInt(s.Decreases, stepEnv, scope, false)
 				v.prove(scope+".loop_decreases_strict", scope, s.Decreases.GetSpan(), stepEnv, smt.Lt(decAfter, decBefore))
 			}
-			// After loop: invariant && !cond
-			env.pc = nil
-			for _, inv := range s.Invariants {
-				env.assume(v.evalBool(inv, env, scope))
-			}
-			env.assume(smt.Not(v.evalBool(s.Cond, env, scope)))
 		}
+		// 3. After the loop: invariants and the negated condition, on the same arbitrary state.
+		exitEnv.assume(smt.Not(v.evalBool(s.Cond, exitEnv, scope)))
+		*env = *exitEnv
 
 	case *ast.ForStmt:
 		v.checkArith(s.Iterable, env, scope)
+		var lo, hi *smt.LinearTerm
 		if r, ok := s.Iterable.(*ast.RangeExpr); ok {
-			lo := v.evalInt(r.Lo, env, scope, true)
-			hi := v.evalInt(r.Hi, env, scope, true)
-			loopEnv := env.clone()
-			iv := smt.Var(s.Var)
-			loopEnv.intTerms[s.Var] = iv
-			loopEnv.assume(smt.Ge(iv, lo))
-			loopEnv.assume(smt.Lt(iv, hi))
-			v.execBlock(s.Body, loopEnv, scope)
-		} else {
-			loopEnv := env.clone()
-			v.execBlock(s.Body, loopEnv, scope)
+			l, h := v.evalInt(r.Lo, env, scope, true), v.evalInt(r.Hi, env, scope, true)
+			lo, hi = &l, &h
 		}
+		// The body is checked from an arbitrary iteration, and nothing the loop assigns, its
+		// variable included, is known once it is over.
+		v.havocAssigned([]ast.Stmt{s}, env)
+		loopEnv := env.clone()
+		if lo != nil {
+			loopEnv.unbind(s.Var)
+			iv := smt.Var(loopEnv.freshVar(s.Var))
+			loopEnv.intTerms[s.Var] = iv
+			loopEnv.assume(smt.Ge(iv, *lo))
+			loopEnv.assume(smt.Lt(iv, *hi))
+		} else {
+			var elem sema.Type
+			if lt, ok := v.info.ExprTypes[s.Iterable].(*sema.ListType); ok {
+				elem = lt.Elem
+			}
+			v.bindFresh(loopEnv, s.Var, elem)
+		}
+		v.execBlock(s.Body, loopEnv, scope)
 
 	case *ast.ReturnStmt:
 		if s.Value != nil {
@@ -1306,20 +1305,63 @@ func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
 func (v *verifier) lambdaEnv(lam *ast.LambdaExpr, types []sema.Type, env *symEnv) *symEnv {
 	bodyEnv := env.clone()
 	for i, p := range lam.Params {
-		bodyEnv.unbind(p)
-		sym := bodyEnv.freshVar(p)
+		var ty sema.Type
 		if i < len(types) {
-			v.bindVarType(bodyEnv, sym, types[i])
-			bodyEnv.rename(sym, p)
+			ty = types[i]
 		}
-		if _, ok := bodyEnv.intTerms[p]; !ok {
-			bodyEnv.intTerms[p] = smt.Var(sym)
-		}
-		if _, ok := bodyEnv.boolTerms[p]; !ok {
-			bodyEnv.boolTerms[p] = smt.BoolVar{Name: sym}
-		}
+		v.bindFresh(bodyEnv, p, ty)
 	}
 	return bodyEnv
+}
+
+// bindFresh rebinds name to an arbitrary value of type ty, or of unknown type when ty is nil.
+func (v *verifier) bindFresh(env *symEnv, name string, ty sema.Type) {
+	env.unbind(name)
+	sym := env.freshVar(name)
+	if ty != nil {
+		v.bindVarType(env, sym, ty)
+		env.rename(sym, name)
+	}
+	if _, ok := env.intTerms[name]; !ok {
+		env.intTerms[name] = smt.Var(sym)
+	}
+	if _, ok := env.boolTerms[name]; !ok {
+		env.boolTerms[name] = smt.BoolVar{Name: sym}
+	}
+}
+
+// havocAssigned forgets the value of everything stmts may assign. A loop body runs an
+// unknown number of times, so at the start of an iteration and after the loop such a
+// variable is only known to hold some 64-bit integer. A range type narrows that when every
+// assignment in stmts is a compound one, which is proved to stay inside the range.
+func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
+	names, compound := collectAssignedVars(stmts)
+	for _, name := range names {
+		if _, ok := env.intTerms[name]; ok {
+			t := smt.Var(env.freshVar(name))
+			env.intTerms[name] = t
+			var rng *sema.IntType
+			for i, target := range compound[name] {
+				it, _ := v.info.ExprTypes[target].(*sema.IntType)
+				if it == nil || !it.IsBounded || (i > 0 && (rng == nil || it.Lo != rng.Lo || it.Hi != rng.Hi)) {
+					rng = nil
+					break
+				}
+				rng = it
+			}
+			if rng != nil {
+				env.assumeRange(t, rng)
+			} else {
+				env.assume(smt.FitsInt64(t))
+			}
+		}
+		if _, ok := env.boolTerms[name]; ok {
+			env.boolTerms[name] = smt.BoolVar{Name: env.freshVar(name)}
+		}
+		delete(env.listLens, name)
+		delete(env.listElems, name)
+		delete(env.sumInfos, name)
+	}
 }
 
 // stageName is the combinator a call names, written bare (`sum`) or through the std.fp
@@ -2054,49 +2096,74 @@ func (v *verifier) bindVariantPat(p *ast.VariantPat, subjTy sema.Type, env *symE
 		}
 		switch sp := sub.(type) {
 		case *ast.VarPat:
-			env.unbind(sp.Name)
-			sym := env.freshVar(sp.Name)
-			if fty != nil {
-				v.bindVarType(env, sym, fty)
-				env.rename(sym, sp.Name)
-			}
-			if _, ok := env.intTerms[sp.Name]; !ok {
-				env.intTerms[sp.Name] = smt.Var(sym)
-			}
-			if _, ok := env.boolTerms[sp.Name]; !ok {
-				env.boolTerms[sp.Name] = smt.BoolVar{Name: sym}
-			}
+			v.bindFresh(env, sp.Name, fty)
 		case *ast.VariantPat:
 			v.bindVariantPat(sp, fty, env)
 		}
 	}
 }
 
-func collectAssignedVars(stmts []ast.Stmt) []string {
+// collectAssignedVars lists what stmts may assign. compound holds, for the names that are
+// only ever the target of a compound assignment, those targets.
+func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]ast.Expr) {
 	seen := map[string]bool{}
-	var out []string
+	plain := map[string]bool{}
+	compound = map[string][]ast.Expr{}
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+		plain[name] = true
+	}
+	// path names what an assignment target denotes in a symEnv: `x` or `obj.field`.
+	path := func(e ast.Expr) string {
+		switch t := e.(type) {
+		case *ast.Ident:
+			return t.Name
+		case *ast.FieldExpr:
+			if obj, ok := t.Object.(*ast.Ident); ok {
+				return obj.Name + "." + t.Field
+			}
+		}
+		return ""
+	}
 	var walk func([]ast.Stmt)
 	walk = func(ss []ast.Stmt) {
 		for _, s := range ss {
 			switch x := s.(type) {
 			case *ast.LetAssignStmt:
-				if !seen[x.Name] {
-					seen[x.Name] = true
-					out = append(out, x.Name)
-				}
+				add(x.Name)
 			case *ast.CompoundAssignStmt:
-				if id, ok := x.Target.(*ast.Ident); ok && !seen[id.Name] {
-					seen[id.Name] = true
-					out = append(out, id.Name)
-				}
+				name := path(x.Target)
+				was := plain[name]
+				add(name)
+				plain[name] = was
+				compound[name] = append(compound[name], x.Target)
+			case *ast.FieldAssignStmt:
+				add(path(&ast.FieldExpr{Object: x.Object, Field: x.Field}))
 			case *ast.IfStmt:
 				for _, br := range x.Branches {
 					walk(br.Body)
 				}
 				walk(x.Else)
+			case *ast.MatchStmt:
+				for _, arm := range x.Arms {
+					walk(arm.Body)
+				}
+			case *ast.WhileStmt:
+				walk(x.Body)
+			case *ast.ForStmt:
+				add(x.Var)
+				walk(x.Body)
 			}
 		}
 	}
 	walk(stmts)
-	return out
+	for name := range plain {
+		if plain[name] {
+			delete(compound, name)
+		}
+	}
+	return out, compound
 }

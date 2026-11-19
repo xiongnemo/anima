@@ -436,6 +436,37 @@ type Half = int[0..4_000_000_000_000_000_000]
 def total(xs: list[Half, cap=2]) -> int:
     return xs |> fp.map(x => x + x) |> fp.sum()
 `, VCFailed},
+		{"for loop accumulator", `
+type Huge = int[0..9_000_000_000_000_000_000]
+
+def total(xs: list[Huge, cap=8]) -> int:
+    c: int = 0
+    for x in xs:
+        c += x
+    return c
+`, VCFailed},
+		{"while loop without an invariant", `
+def spin(n: int[0..9]) -> int:
+    i: int = n
+    while i < 10:
+        i = i * 4_000_000_000
+    return i
+`, VCFailed},
+		{"while loop nested in a for loop", `
+def nested(n: int[0..3]) -> int:
+    t: int = 1
+    for k in 0..n:
+        while t < 100:
+            t = t * 4_000_000_000
+    return 0
+`, VCFailed},
+		{"value assigned in a loop, used after it", `
+def after(n: int[0..10]) -> int:
+    i: int = 0
+    for k in 0..n:
+        i = 4_000_000_000
+    return i * 4_000_000_000
+`, VCFailed},
 		{"product of unconstrained ints", `
 def mul(x: int, y: int) -> int:
     return x * y
@@ -513,6 +544,23 @@ def total(xs: list[Score, cap=8]) -> int:
 def doubled(xs: list[Score, cap=8]) -> int:
     return xs |> fp.map(x => x * 2) |> fp.sum()
 `, ""},
+		{"range-typed accumulator guarded in a for loop", `
+type Score = int[0..100]
+
+def total(xs: list[Score, cap=8]) -> int:
+    c: int[0..1000] = 0
+    for x in xs:
+        if c <= 900:
+            c += x
+    return c * 2
+`, ""},
+		{"for loop over a range uses the bounds of its variable", `
+def tri(n: int[0..1000]) -> int:
+    last: int = 0
+    for i in 0..n:
+        last = i * 1000
+    return 0
+`, ""},
 		{"division and remainder by a constant", `
 def halve(x: int) -> int:
     r = x % 2
@@ -545,6 +593,74 @@ def count(n: int[0..1000]) -> int:
 				}
 			}
 			t.Fatalf("expected an int64_overflow VC with status %v, got: %v", tc.want, rep.Errors())
+		})
+	}
+}
+
+// A loop body runs any number of times, so what it assigns is not known after the loop
+// beyond the invariants and the negated condition.
+func TestSPARKLoopStateIsNotThePreLoopState(t *testing.T) {
+	cases := []struct {
+		name     string
+		src      string
+		wantFail string
+	}{
+		{"while loop changes a counter", `
+def count(n: int[0..10]) -> int:
+    ensures: result == 0
+    i: int = 0
+    while i < n:
+        invariant: i >= 0
+        decreases: n - i
+        i = i + 1
+    return i
+`, "ensures_1"},
+		{"for loop changes a flag value", `
+def last(n: int[0..10]) -> int:
+    ensures: result == 0
+    r: int = 0
+    for k in 0..n:
+        r = 1
+    return r
+`, "ensures_1"},
+		{"invariant and exit condition give the result", `
+def count(n: int[0..10]) -> int:
+    ensures: result == n
+    i: int = 0
+    while i < n:
+        invariant: i >= 0 and i <= n
+        decreases: n - i
+        i = i + 1
+    return i
+`, ""},
+		{"variables the loop leaves alone keep their value", `
+def keep(n: int[0..10]) -> int:
+    ensures: result == 7
+    a: int = 7
+    i: int = 0
+    while i < n:
+        invariant: i >= 0
+        decreases: n - i
+        i = i + 1
+    return a
+`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := verifySrc(t, tc.src)
+			failed := failedVCs(rep)
+			if tc.wantFail == "" {
+				if !rep.OK() {
+					t.Fatalf("expected all VCs proved, got: %v", rep.Errors())
+				}
+				return
+			}
+			for _, name := range failed {
+				if strings.HasSuffix(name, tc.wantFail) {
+					return
+				}
+			}
+			t.Fatalf("expected a failed VC ending in %q, failed VCs: %v", tc.wantFail, failed)
 		})
 	}
 }
