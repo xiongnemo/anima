@@ -27,6 +27,7 @@ func Check(prog *ast.Program) (*ProgramInfo, error) {
 			Funcs:          map[string]*FuncInfo{},
 			ExprTypes:      map[ast.Expr]Type{},
 			LiteralTargets: map[ast.Expr]Type{},
+			LetRanges:      map[*ast.LetAssignStmt]*IntType{},
 			TimeoutArgs:    map[*ast.CallExpr]ast.Expr{},
 			Imports:        map[string]string{},
 			StdHandles:     defaultStdHandles(),
@@ -825,6 +826,14 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if prev, found := sc.lookup(s.Name); found && keepsType(prev.ty) && !(isAssignable(prev.ty, annoTy) && isAssignable(annoTy, prev.ty)) {
 				return fmt.Errorf("%s: %s is a %s and cannot be declared again as a %s", s.Span, s.Name, prev.ty, annoTy)
 			}
+			// And its range, which the kernel takes the variable to be in
+			// wherever it is read.
+			if prev, found := sc.lookup(s.Name); found && !sameRange(prev.ty, annoTy) {
+				return fmt.Errorf("%s: %s is a %s and cannot be declared again as a %s: a variable keeps its range", s.Span, s.Name, prev.ty, annoTy)
+			}
+			if rng := rangeOf(annoTy); rng != nil {
+				c.info.LetRanges[s] = rng
+			}
 			valTy = annoTy
 		} else if emptyMap {
 			if prev, found := sc.lookup(s.Name); found && prev.ty != nil && prev.ty.Kind() == KindMap {
@@ -841,8 +850,15 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			valTy = target
 		} else if _, isInt := valTy.(*IntType); isInt {
 			// The value of an int variable is the kernel's to work out;
-			// its type holds across every later assignment.
+			// its type holds across every later assignment, and the kernel
+			// proves each value in the range, when the variable has one.
 			valTy = NewUnboundedInt()
+			if prev, found := sc.lookup(s.Name); found {
+				if rng := rangeOf(prev.ty); rng != nil {
+					valTy = prev.ty
+					c.info.LetRanges[s] = rng
+				}
+			}
 		}
 		if err := keepsSort(sc, s.Name, valTy, s.Span); err != nil {
 			return err
@@ -1011,7 +1027,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if lt.Kind() != KindInt || ht.Kind() != KindInt {
 				return fmt.Errorf("%s: range bounds must be int", r.Span)
 			}
-			if err := keepsSort(sc, s.Var, NewUnboundedInt(), s.Span); err != nil {
+			if err := keepsElements(sc, s.Var, NewUnboundedInt(), s.Span); err != nil {
 				return err
 			}
 			sub.defineLocal(s.Var, varBinding{ty: NewUnboundedInt(), span: s.Span})
@@ -1613,7 +1629,39 @@ func keepsElements(sc *scope, name string, ty Type, span ast.Span) error {
 	if prev, found := sc.lookup(name); found && keepsType(prev.ty) && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of its elements", span, name, prev.ty, ty)
 	}
+	// Nothing proves what a loop or a pattern binds in a range it does not
+	// have, so the value must come with the very range of the variable.
+	if prev, found := sc.lookup(name); found && rangeOf(prev.ty) != nil && !sameRange(prev.ty, ty) {
+		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps its range", span, name, prev.ty, ty)
+	}
 	return nil
+}
+
+// rangeOf is t when it is an int with a range, nil otherwise.
+func rangeOf(t Type) *IntType {
+	if it, ok := t.(*IntType); ok && it.IsBounded {
+		return it
+	}
+	return nil
+}
+
+// sameRange reports whether a variable of type a may be written as one of
+// type b: two ints must have the one range, or neither a range. The kernel
+// takes a variable with a range to be in it wherever it is read, which
+// holds as long as every value it is given is proved in that range.
+func sameRange(a, b Type) bool {
+	ai, aInt := a.(*IntType)
+	if !aInt {
+		return true
+	}
+	bi, bInt := b.(*IntType)
+	if !bInt {
+		return !ai.IsBounded
+	}
+	if ai.IsBounded != bi.IsBounded {
+		return false
+	}
+	return !ai.IsBounded || (ai.Lo == bi.Lo && ai.Hi == bi.Hi)
 }
 
 // checkComparison checks the operands of a comparison or a logical operator.

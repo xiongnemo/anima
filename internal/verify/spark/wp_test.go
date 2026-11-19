@@ -3248,3 +3248,134 @@ def f(o: Option[list[int]]) -> int:
 		}
 	}
 }
+
+// A variable with a range is taken to be in it at the head of a loop, so
+// every value it is given is proved in the range: where it is declared,
+// and in each later assignment, to a parameter and a loop variable too.
+func TestSPARKVariableKeepsItsRange(t *testing.T) {
+	rejected := map[string]string{
+		"declared with a value out of range": `
+def f(n: int) -> int:
+    y: int[1..9] = 0
+    i = 0
+    while i < n:
+        y += 0
+        i += 1
+    return 10 / y
+`,
+		"declared with any int": `
+def f(n: int) -> int:
+    y: int[1..9] = n
+    return y
+`,
+		"assigned out of range": `
+def f() -> int:
+    y: int[1..9] = 5
+    y = 0
+    return y
+`,
+		"a parameter": `
+def f(n: int[1..9]) -> int:
+    n = 0
+    return n
+`,
+		"a quotient of the variable": `
+def f() -> int:
+    y: int[1..9] = 1
+    y = y / 2
+    return y
+`,
+		"a loop variable, after a loop that assumes its range": `
+def f(xs: list[int[1..9]], k: int, m: int) -> int:
+    t = 0
+    for x in xs:
+        a = 0
+        while a < k:
+            b = 0
+            while b < m:
+                x += 0
+                b += 1
+            t = 10 / x
+            x = 0
+            a += 1
+    return t
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, ".let_") {
+			t.Errorf("%s: expected a failed let_ VC, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"a counter": `
+def f() -> int:
+    i: int[0..10] = 0
+    while i < 10:
+        i = i + 1
+    return 100 / (i + 1)
+`,
+		"a maximum": `
+def f(xs: list[int[0..9]]) -> int:
+    m: int[0..9] = 0
+    for x in xs:
+        if x > m:
+            m = x
+    return 100 / (m + 1)
+`,
+		"values in range": `
+def one() -> int[1..9]:
+    return 4
+
+def f(p: int[2..9], xs: list[int[1..9]]) -> int:
+    y: int[1..9] = p
+    y = y / 2
+    y = one()
+    if len(xs) > 0:
+        y = xs[0]
+    for x in xs:
+        y = x
+    return 10 / y
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+	// A quotient is in range by what is known of it, or by the rule for
+	// operands that are not negative; the largest int is no upper bound
+	// to wrap around.
+	quotients := `
+def f(n: int[0..100]) -> int:
+    a: int[-9..-1] = -4 / 2
+    b: int[0..9223372036854775807] = 4 / 1
+    c: int[0..9223372036854775807] = n / 1
+    d: int[1..9] = 8 / 2
+    return a + b + c + d
+`
+	if failed := failedVCs(verifySrc(t, quotients)); len(failed) != 0 {
+		t.Errorf("quotients in range: expected every VC proved, failed VCs: %v", failed)
+	}
+	for name, src := range map[string]string{
+		"a quotient below the range":                     "\ndef f(n: int[0..9]) -> int:\n    y: int[1..9] = 5\n    y = n / 2\n    return y\n",
+		"a quotient below a range up to the largest int": "\ndef f(n: int[0..100]) -> int:\n    z: int[5..9223372036854775807] = n / 1\n    return z\n",
+	} {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, ".let_") {
+			t.Errorf("%s: expected a failed let_ VC, failed VCs:\n%s", name, failed)
+		}
+	}
+	// A plain assignment in a loop of a variable without a range tells
+	// nothing about it at the head.
+	plain := `
+def f(n: int) -> int:
+    y = 5
+    i = 0
+    while i < n:
+        y = 0
+        i += 1
+    return 10 / y
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, plain)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("a variable without a range: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+}

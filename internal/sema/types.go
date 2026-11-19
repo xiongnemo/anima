@@ -349,6 +349,9 @@ type ProgramInfo struct {
 	// LiteralTargets: the declared type a list or map literal was given to.
 	// The kernel proves the literal's elements in its element range.
 	LiteralTargets map[ast.Expr]Type
+	// LetRanges: the range of the variable an assignment writes, when it
+	// has one. The kernel proves the value assigned in it.
+	LetRanges map[*ast.LetAssignStmt]*IntType
 	// TimeoutArgs: the timeout_ms argument of a call that blocks on the
 	// network, which the kernel proves in 1..300_000.
 	TimeoutArgs map[*ast.CallExpr]ast.Expr

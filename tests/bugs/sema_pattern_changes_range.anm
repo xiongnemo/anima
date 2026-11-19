@@ -1,0 +1,16 @@
+# The arm that matches writes y with any int, while y kept the type
+# int[1..9], which the loop then assumed of it.
+def f(o: Option[int], n: int) -> int:
+    y: int[1..9] = 5
+    match o:
+        Some(y) -> print(y)
+        None -> print(0)
+    i = 0
+    while i < n:
+        y += 0
+        i += 1
+    return 10 / y
+
+def main() -> int:
+    print(f(Some(0), 0))
+    return 0

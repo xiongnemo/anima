@@ -2,6 +2,7 @@ package spark
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 
@@ -794,13 +795,26 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
 		v.checkArith(s.Value, env, scope)
+		// A variable with a range is taken to be in it wherever it is
+		// read, so every value it is given is proved in it. A quotient
+		// is proved from its operands, as they are before the assignment.
+		rng := v.info.LetRanges[s]
+		var before *symEnv
+		if be, ok := s.Value.(*ast.BinaryExpr); ok && be.Op == "/" && rng != nil {
+			before = env.clone()
+		}
 		v.assignSymbolic(s.Name, s.Value, env, scope, s.Span)
-		if s.TypeAnno != nil {
-			if ty, ok := v.info.ExprTypes[s.Value]; ok {
-				if it, ok := ty.(*sema.IntType); ok && it.IsBounded {
-					t := v.evalInt(s.Value, env, scope, true)
-					v.checkIntRange(t, s.Value, env, it, scope+".let_"+s.Name, scope, s.Span)
-				}
+		if rng != nil {
+			vc := scope + ".let_" + s.Name
+			t, ok := env.intTerms[s.Name]
+			inRange := smt.And(smt.Ge(t, smt.Const(rng.Lo)), smt.Le(t, smt.Const(rng.Hi)))
+			switch {
+			case !ok:
+				v.prove(vc, scope, s.Span, env, smt.BoolConst{Val: false})
+			case before != nil && !v.holds(env, inRange):
+				v.checkIntRange(t, s.Value, before, rng, vc, scope, s.Span)
+			default:
+				v.prove(vc, scope, s.Span, env, inRange)
 			}
 		}
 
@@ -1828,21 +1842,29 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 	}
 	v.forgetWrittenAliases(stmts, env)
 	v.forgetInsertedMapLens(stmts, env)
-	names, compound := collectAssignedVars(stmts)
+	names, compound, lets := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
 			t := smt.Var(env.freshVar(name))
 			env.intTerms[name] = t
+			// The range each write of the variable was proved in, when
+			// they all were and it is the one range.
 			var rng *sema.IntType
-			for i, target := range compound[name] {
-				it, _ := v.info.ExprTypes[target].(*sema.IntType)
-				if it == nil || !it.IsBounded || (i > 0 && (rng == nil || it.Lo != rng.Lo || it.Hi != rng.Hi)) {
-					rng = nil
-					break
+			same := true
+			proved := func(it *sema.IntType) {
+				if it == nil || !it.IsBounded || (rng != nil && (it.Lo != rng.Lo || it.Hi != rng.Hi)) {
+					same = false
 				}
 				rng = it
 			}
-			if rng != nil {
+			for _, target := range compound[name] {
+				it, _ := v.info.ExprTypes[target].(*sema.IntType)
+				proved(it)
+			}
+			for _, let := range lets[name] {
+				proved(v.info.LetRanges[let])
+			}
+			if same && rng != nil {
 				env.assumeRange(t, rng)
 			} else {
 				env.assume(smt.FitsInt64(t))
@@ -2186,21 +2208,27 @@ func (v *verifier) proveArith(e ast.Expr, env *symEnv, scope string, goal smt.Bo
 
 // checkIntRange verifies lo <= expr <= hi, using exact Presburger characterization for div!
 func (v *verifier) checkIntRange(term smt.LinearTerm, expr ast.Expr, env *symEnv, target *sema.IntType, vcName, scope string, span ast.Span) {
-	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == "/" {
+	inRange := smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi)))
+	// The rule below is for operands that are not negative; what is known
+	// of the quotient itself may do, as for `-4 / 2`.
+	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == "/" && !v.holds(env, inRange) {
 		num := v.evalInt(be.Left, env, scope, false)
 		den := v.evalInt(be.Right, env, scope, false)
 		// Exact theorem for den >= 1 and num >= 0:
 		// target.Lo <= floor(num / den) <= target.Hi  <==>  target.Lo * den <= num && num <= (target.Hi + 1) * den - 1
-		cond := smt.And(
+		parts := []smt.BoolExpr{
 			smt.Ge(den, smt.Const(1)),
 			smt.Ge(num, smt.Const(0)),
 			smt.Le(den.Scale(target.Lo), num),
-			smt.Lt(num, den.Scale(target.Hi+1)),
-		)
-		v.prove(vcName, scope, span, env, cond)
+		}
+		// No quotient is above the largest int, and Hi + 1 would wrap.
+		if target.Hi != math.MaxInt64 {
+			parts = append(parts, smt.Lt(num, den.Scale(target.Hi+1)))
+		}
+		v.prove(vcName, scope, span, env, smt.And(parts...))
 		return
 	}
-	v.prove(vcName, scope, span, env, smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi))))
+	v.prove(vcName, scope, span, env, inRange)
 }
 
 // makesVariant reports whether e makes a variant, whose fields
@@ -2808,12 +2836,14 @@ func (v *verifier) bindVariantPat(p *ast.VariantPat, subjTy sema.Type, env *symE
 	}
 }
 
-// collectAssignedVars lists what stmts may assign. compound holds, for the names that are
-// only ever the target of a compound assignment, those targets.
-func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]ast.Expr) {
+// collectAssignedVars lists what stmts may assign. compound and lets hold, for the names
+// that are only ever written by a compound assignment or an assignment to the variable
+// itself, those targets and those assignments.
+func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]ast.Expr, lets map[string][]*ast.LetAssignStmt) {
 	seen := map[string]bool{}
 	plain := map[string]bool{}
 	compound = map[string][]ast.Expr{}
+	lets = map[string][]*ast.LetAssignStmt{}
 	add := func(name string) {
 		if name != "" && !seen[name] {
 			seen[name] = true
@@ -2831,7 +2861,10 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 		for _, s := range ss {
 			switch x := s.(type) {
 			case *ast.LetAssignStmt:
+				was := plain[x.Name]
 				add(x.Name)
+				plain[x.Name] = was
+				lets[x.Name] = append(lets[x.Name], x)
 			case *ast.CompoundAssignStmt:
 				name := path(x.Target)
 				was := plain[name]
@@ -2868,7 +2901,8 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 	for name := range plain {
 		if plain[name] {
 			delete(compound, name)
+			delete(lets, name)
 		}
 	}
-	return out, compound
+	return out, compound, lets
 }

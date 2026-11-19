@@ -903,3 +903,74 @@ def f(c: bool, n: int, s: str, xs: list[int], ss: list[str], o: Option[int], os:
 		}
 	}
 }
+
+// A variable with a range keeps it: a second declaration, a loop variable
+// and a name in a pattern must have the very range, and every assignment
+// is recorded for the kernel to prove the value in it.
+func TestSemaVariableKeepsItsRange(t *testing.T) {
+	prelude := `
+type Small = int[1..9]
+
+def f(n: int, p: int[1..9], xs: list[int], rs: list[int[1..9]], o: Option[int], ro: Option[int[1..9]]) -> int:
+`
+	const keeps = "a variable keeps its range"
+	cases := []struct {
+		body string
+		want string
+	}{
+		{"y: int[1..9] = 5\n    y = n\n    y += 1\n    return y", ""},
+		{"y: int[1..9] = 5\n    y: int[1..9] = n\n    return y", ""},
+		{"y: Small = 5\n    y: int[1..9] = n\n    return y", ""},
+		{"y = 5\n    y: int = n\n    return y", ""},
+		{"y: int[1..9] = 5\n    for y in rs:\n        print(y)\n    return y", ""},
+		{"y: int[1..9] = 5\n    match ro:\n        Some(y) -> print(y)\n        None -> print(0)\n    return y", ""},
+		// A variable without a range may be shadowed by one with a range.
+		{"y = 5\n    for y in rs:\n        print(y)\n    return y", ""},
+		{"y = 5\n    y: int[1..9] = n\n    return y", keeps},
+		{"y: int[1..9] = 5\n    y: int = n\n    return y", keeps},
+		{"y: int[1..9] = 5\n    y: int[0..9] = n\n    return y", keeps},
+		{"p: int[0..9] = n\n    return p", keeps},
+		{"y: int[1..9] = 5\n    for y in xs:\n        print(y)\n    return y", keeps},
+		{"y: int[1..9] = 5\n    for y in 0..n:\n        print(y)\n    return y", keeps},
+		{"for p in xs:\n        print(p)\n    return p", keeps},
+		{"y: int[1..9] = 5\n    match o:\n        Some(y) -> print(y)\n        None -> print(0)\n    return y", keeps},
+		{"y: int[1..9] = 5\n    match n:\n        y -> print(y)\n    return y", keeps},
+		{"y: int[1..9] = 5\n    r = match o:\n        Some(y) -> y\n        None -> 0\n    return r", keeps},
+		{"for x in rs:\n        match o:\n            Some(x) -> print(x)\n            None -> print(0)\n    return 0", keeps},
+	}
+	for _, tc := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+tc.body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+
+	// Every assignment to a ranged variable is recorded, annotated or not,
+	// to a parameter and a loop variable as well; none to a plain int.
+	src := prelude + "    y: int[1..9] = 5\n    y = n\n    p = n\n    z = n\n    z = 3\n    for x in rs:\n        x = n\n    return y\n"
+	prog, err := parser.Parse("t.anm", src)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	info, err := Check(prog)
+	if err != nil {
+		t.Fatalf("rejected: %v", err)
+	}
+	got := map[string]int{}
+	for let, rng := range info.LetRanges {
+		if rng.Lo != 1 || rng.Hi != 9 {
+			t.Errorf("%s: recorded range %s", let.Name, rng)
+		}
+		got[let.Name]++
+	}
+	if got["y"] != 2 || got["p"] != 1 || got["x"] != 1 || got["z"] != 0 || len(got) != 3 {
+		t.Errorf("recorded assignments per variable: %v", got)
+	}
+}

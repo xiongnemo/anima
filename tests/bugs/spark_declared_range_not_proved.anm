@@ -1,0 +1,14 @@
+# Nothing proved that y is in the range it is declared with, and the kernel
+# takes a variable with a range to be in it at the head of a loop that only
+# compound-assigns it: after the loop y was 1..9, though it is 0.
+def f(n: int) -> int:
+    y: int[1..9] = 0
+    i = 0
+    while i < n:
+        y += 0
+        i += 1
+    return 10 / y
+
+def main() -> int:
+    print(f(0))
+    return 0
