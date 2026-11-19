@@ -129,100 +129,118 @@ func isScalar(t sema.Type) bool {
 	return false
 }
 
+// How much of a variable may be what a parameter that is not mut was given.
+const (
+	roNone = iota
+	// roBelow: a `with` copy. Its own fields are new, the entities it holds
+	// are the original's.
+	roBelow
+	// roAll: the value itself, or part of it.
+	roAll
+)
+
 // readonlyNames lists the variables of a function that may hold (part of)
 // what a parameter that is not mut was given: the parameter itself, and
 // what is taken out of it by an assignment, a loop or a match.
-func (v *verifier) readonlyNames(params []sema.FuncParamInfo, body any) map[string]bool {
-	ro := map[string]bool{}
+func (v *verifier) readonlyNames(params []sema.FuncParamInfo, body any) map[string]int {
+	ro := map[string]int{}
 	for _, p := range params {
 		if !p.Mut && !p.Own && !isScalar(p.Type) {
-			ro[p.Name] = true
+			ro[p.Name] = roAll
 		}
 	}
-	var derived func(e ast.Expr) bool
-	derived = func(e ast.Expr) bool {
+	var derived func(e ast.Expr) int
+	anyDerived := func(es ...ast.Expr) int {
+		for _, e := range es {
+			if derived(e) != roNone {
+				return roAll
+			}
+		}
+		return roNone
+	}
+	derived = func(e ast.Expr) int {
 		if e == nil || isScalar(v.info.ExprTypes[e]) {
-			return false
+			return roNone
 		}
 		if root := mutRoot(e); root != nil {
-			return ro[root.Name]
+			level := ro[root.Name]
+			if _, bare := e.(*ast.Ident); level == roBelow && !bare {
+				// Something inside the copy.
+				return roAll
+			}
+			return level
 		}
 		switch x := e.(type) {
 		case *ast.TryExpr:
 			return derived(x.Inner)
 		case *ast.WithExpr:
 			// The copy shares the entities inside the original, if any.
-			return !v.isFlatEntity(v.info.ExprTypes[x.Base]) && derived(x.Base)
+			if v.isFlatEntity(v.info.ExprTypes[x.Base]) || derived(x.Base) == roNone {
+				return roNone
+			}
+			return roBelow
 		case *ast.PipeExpr:
-			return derived(x.Left) || derived(x.Right)
+			return anyDerived(x.Left, x.Right)
 		case *ast.MatchExpr:
+			level := roNone
 			for _, arm := range x.Arms {
-				if derived(arm.Value) {
-					return true
-				}
+				level = max(level, derived(arm.Value))
 			}
+			return level
 		case *ast.ListLit:
-			for _, el := range x.Elems {
-				if derived(el) {
-					return true
-				}
-			}
+			return anyDerived(x.Elems...)
 		case *ast.MapLit:
 			for _, en := range x.Entries {
-				if derived(en.Value) {
-					return true
+				if derived(en.Value) != roNone {
+					return roAll
 				}
 			}
 		default:
 			// A call may hand back what it was given.
 			args, _ := callArgs(e)
 			for _, a := range args {
-				if derived(a.Value) {
-					return true
+				if derived(a.Value) != roNone {
+					return roAll
 				}
 			}
 		}
-		return false
-	}
-	bindPatterns := func(pat ast.Pattern) bool {
-		changed := false
-		visitNodes(reflect.ValueOf(pat), func(n any) {
-			if vp, ok := n.(*ast.VarPat); ok && !ro[vp.Name] {
-				ro[vp.Name] = true
-				changed = true
-			}
-		})
-		return changed
+		return roNone
 	}
 	for changed := true; changed; {
 		changed = false
-		add := func(name string) {
-			if !ro[name] {
-				ro[name] = true
+		add := func(name string, level int) {
+			if ro[name] < level {
+				ro[name] = level
 				changed = true
+			}
+		}
+		bindPatterns := func(subject ast.Expr, pats ...ast.Pattern) {
+			if derived(subject) == roNone {
+				return
+			}
+			for _, pat := range pats {
+				visitNodes(reflect.ValueOf(pat), func(n any) {
+					if vp, ok := n.(*ast.VarPat); ok {
+						add(vp.Name, roAll)
+					}
+				})
 			}
 		}
 		visitNodes(reflect.ValueOf(body), func(n any) {
 			switch x := n.(type) {
 			case *ast.LetAssignStmt:
-				if derived(x.Value) {
-					add(x.Name)
-				}
+				add(x.Name, derived(x.Value))
 			case *ast.ForStmt:
-				if derived(x.Iterable) {
-					add(x.Var)
+				if derived(x.Iterable) != roNone {
+					add(x.Var, roAll)
 				}
 			case *ast.MatchStmt:
-				if derived(x.Subject) {
-					for _, arm := range x.Arms {
-						changed = bindPatterns(arm.Pattern) || changed
-					}
+				for _, arm := range x.Arms {
+					bindPatterns(x.Subject, arm.Pattern)
 				}
 			case *ast.MatchExpr:
-				if derived(x.Subject) {
-					for _, arm := range x.Arms {
-						changed = bindPatterns(arm.Pattern) || changed
-					}
+				for _, arm := range x.Arms {
+					bindPatterns(x.Subject, arm.Pattern)
 				}
 			}
 		})
@@ -235,9 +253,15 @@ func (v *verifier) readonlyNames(params []sema.FuncParamInfo, body any) map[stri
 // knows about such an argument across the call.
 func (v *verifier) checkReadonlyWrites(params []sema.FuncParamInfo, body any, scope string) {
 	ro := v.readonlyNames(params, body)
-	reject := func(target ast.Expr, span ast.Span) {
-		root := mutRoot(target)
-		if root == nil || !ro[root.Name] {
+	// reject is given the object that is written; whole says that anything
+	// reachable from it may be (it is passed as mut).
+	reject := func(obj ast.Expr, whole bool, span ast.Span) {
+		root := mutRoot(obj)
+		if root == nil || ro[root.Name] == roNone {
+			return
+		}
+		if _, bare := obj.(*ast.Ident); ro[root.Name] == roBelow && bare && !whole {
+			// A field of the copy itself.
 			return
 		}
 		v.record(fmt.Sprintf("%s.readonly_%s", scope, root.Name), scope, span, "a value received without mut is not written", VCFailed,
@@ -246,12 +270,15 @@ func (v *verifier) checkReadonlyWrites(params []sema.FuncParamInfo, body any, sc
 	visitNodes(reflect.ValueOf(body), func(n any) {
 		switch x := n.(type) {
 		case *ast.FieldAssignStmt:
-			reject(x.Object, x.Span)
+			reject(x.Object, false, x.Span)
 		case *ast.IndexAssignStmt:
-			reject(x.List, x.Span)
+			reject(x.List, false, x.Span)
 		case *ast.CompoundAssignStmt:
-			if _, plain := x.Target.(*ast.Ident); !plain {
-				reject(x.Target, x.Span)
+			switch t := x.Target.(type) {
+			case *ast.FieldExpr:
+				reject(t.Object, false, x.Span)
+			case *ast.IndexExpr:
+				reject(t.List, false, x.Span)
 			}
 		}
 	})
@@ -259,7 +286,7 @@ func (v *verifier) checkReadonlyWrites(params []sema.FuncParamInfo, body any, sc
 		args, _ := callArgs(e)
 		for _, a := range args {
 			if a.Mut {
-				reject(a.Value, e.GetSpan())
+				reject(a.Value, true, e.GetSpan())
 			}
 		}
 		return true
