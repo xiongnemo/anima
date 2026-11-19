@@ -264,6 +264,14 @@ def f(pool: conc.ThreadPool) -> Result[int, str]:
     _ = a.await()
     return Ok(0)
 `,
+		"string match with a catch-all arm": `
+def f(cmd: str) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    match cmd:
+        "quit" -> conn.close()
+        _ -> conn.close()
+    return Ok(1)
+`,
 		"own is still an ordinary name": `
 def f(own: int) -> int:
     return own
@@ -625,6 +633,47 @@ def f(pool: conc.ThreadPool) -> Result[int, str]:
     _ = a.await()
     return Ok(0)
 `, "may end it before"},
+		{"match guard moves the handle", `
+def f(n: int) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    match n:
+        0 -> print("zero")
+        k if close_it(own conn) == k -> print("closed")
+        _ -> print("other")
+    conn.close()
+    return Ok(1)
+`, "conditionally evaluated"},
+		{"string match may run no arm", `
+def f(cmd: str) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    match cmd:
+        "quit" -> conn.close()
+        "stop" -> conn.close()
+    return Ok(1)
+`, "every path must leave it in the same state"},
+		{"string match expression may run no arm", `
+def f(cmd: str) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    n = match cmd:
+        "quit" -> close_it(own conn)
+        "stop" -> close_it(own conn)
+    return Ok(1)
+`, "every path must leave it in the same state"},
+		{"guarded arms may all be skipped", `
+def f(n: int) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    match n:
+        k if k > 0 -> conn.close()
+        k if k < 0 -> conn.close()
+    return Ok(1)
+`, "every path must leave it in the same state"},
+		{"result holding a handle matched without covering Err", `
+def f(n: int) -> int:
+    match sock.connect_tcp("127.0.0.1", 1):
+        Ok(c) if n > 0 -> c.close()
+        Err(e) -> print(e)
+    return 0
+`, "may run no arm"},
 		{"stored in a list", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?

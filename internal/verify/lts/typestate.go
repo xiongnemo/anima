@@ -695,7 +695,9 @@ func (t *typestateChecker) walkMatch(s *ast.MatchStmt, env *tsEnv) bool {
 				t.err(arm.Span, "resource handle leak: this pattern can match a value holding a %s without binding it", bound.typeName)
 			}
 		}
-		t.evalExpr(arm.Guard, a, false)
+		// A guard that fails falls through to the next arm, so it must not
+		// change any handle.
+		t.evalConditional(arm.Guard, a)
 		if !t.walkBlock(arm.Body, a) {
 			t.endScope(arm.Span, env, a)
 			t.endPorts(arm.Span, env, a)
@@ -705,10 +707,65 @@ func (t *typestateChecker) walkMatch(s *ast.MatchStmt, env *tsEnv) bool {
 	if len(s.Arms) == 0 {
 		return false
 	}
+	if !t.matchIsTotal(s.Subject, len(s.Arms), func(i int) (ast.Pattern, ast.Expr) { return s.Arms[i].Pattern, s.Arms[i].Guard }) {
+		// No arm may match: execution continues after the match.
+		if bound != nil {
+			t.err(s.Span, "resource handle leak: this match may run no arm and drop the %s; add a `_` arm or cover every case", bound.typeName)
+		}
+		live = append(live, env.clone())
+	}
 	if len(live) == 0 {
 		return true
 	}
 	t.join(s.Span, env, live, false)
+	return false
+}
+
+// matchIsTotal reports whether some arm always runs, judged from the patterns
+// alone: an unguarded catch-all, both booleans, or every variant of the ADT.
+// Anything else (integers, strings, guards) is treated as possibly matching
+// nothing, even where the contract prover shows the arms are exhaustive.
+func (t *typestateChecker) matchIsTotal(subject ast.Expr, n int, arm func(i int) (ast.Pattern, ast.Expr)) bool {
+	bools := map[bool]bool{}
+	variants := map[string]bool{}
+	for i := 0; i < n; i++ {
+		pat, guard := arm(i)
+		if guard != nil {
+			continue
+		}
+		switch p := pat.(type) {
+		case *ast.WildcardPat, *ast.VarPat:
+			return true
+		case *ast.BoolPat:
+			bools[p.Value] = true
+		case *ast.VariantPat:
+			irrefutable := true
+			for _, f := range p.Fields {
+				switch f.(type) {
+				case *ast.WildcardPat, *ast.VarPat:
+				default:
+					irrefutable = false
+				}
+			}
+			if irrefutable {
+				variants[p.Name] = true
+			}
+		}
+	}
+	switch ty := t.info.ExprTypes[subject].(type) {
+	case sema.BoolType:
+		return bools[true] && bools[false]
+	case *sema.ADTType:
+		if len(ty.VariantMap) == 0 {
+			return false
+		}
+		for name := range ty.VariantMap {
+			if !variants[name] {
+				return false
+			}
+		}
+		return true
+	}
 	return false
 }
 
@@ -1069,6 +1126,9 @@ func (t *typestateChecker) evalExpr(expr ast.Expr, env *tsEnv, source bool) {
 			t.evalConditional(arm.Guard, a)
 			t.evalExpr(arm.Value, a, false)
 			live = append(live, a)
+		}
+		if !t.matchIsTotal(e.Subject, len(e.Arms), func(i int) (ast.Pattern, ast.Expr) { return e.Arms[i].Pattern, e.Arms[i].Guard }) {
+			live = append(live, env.clone())
 		}
 		if len(live) > 0 {
 			t.join(e.Span, env, live, false)
