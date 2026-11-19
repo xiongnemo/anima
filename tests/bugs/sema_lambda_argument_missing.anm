@@ -1,0 +1,8 @@
+# A lambda called with fewer arguments than it has parameters gets None for
+# the rest. None is not equal to 0, and divides as 0.
+def main() -> int:
+    g = (a, b) => b
+    n = g(1)
+    if n != 0:
+        print(10 / n)
+    return 0

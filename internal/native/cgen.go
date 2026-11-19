@@ -1373,7 +1373,12 @@ func (g *cgen) emitPrelude(name string, e *ast.CallExpr) string {
 		case "max":
 			return fmt.Sprintf("(((%s).u.i > (%s).u.i) ? (%s) : (%s))", args[0], args[1], args[0], args[1])
 		case "assert":
-			g.line("if (!v_truthy(%s)) { fprintf(stderr, \"assertion failed\\n\"); exit(1); }", args[0])
+			// As on the VM: the message, when one is given, is what is reported.
+			if len(args) >= 2 {
+				g.line("if (!v_truthy(%s)) { fflush(stdout); fprintf(stderr, \"runtime error: %%s\\n\", (%s).u.s); exit(1); }", args[0], args[1])
+			} else {
+				g.line("if (!v_truthy(%s)) { fflush(stdout); fprintf(stderr, \"runtime error: assertion failed\\n\"); exit(1); }", args[0])
+			}
 			return "v_void()"
 		case "Some":
 			return fmt.Sprintf("v_some(%s)", args[0])

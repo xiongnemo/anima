@@ -1,0 +1,9 @@
+# A pipeline stage calls its function with one element: a second parameter
+# is None, which is not equal to 0 and divides as 0.
+def main() -> int:
+    xs: list[int[1..9]] = [1, 2, 3]
+    ys = xs |> map((a, b) => b)
+    for y in ys:
+        if y != 0:
+            print(10 / y)
+    return 0

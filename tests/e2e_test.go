@@ -131,6 +131,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},
 		{"../tests/bugs/spark_bool_equality_stale.anm", "div_nonzero"},
 		{"../tests/bugs/sema_compare_unlike.anm", "they are never equal"},
+		{"../tests/bugs/sema_lambda_argument_missing.anm", "this function takes 2 arguments, got 1"},
+		{"../tests/bugs/sema_stage_function_arity.anm", "the function of map takes 1 parameter, got one with 2"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
@@ -457,6 +459,40 @@ def main() -> int:
     b = m["b"]
     print(f"a={a} b={b} xs={xs[0]},{xs[1]}")
     return 0
+`
+
+// Built-in functions and pipeline stages, named with or without std.fp and
+// called in a pipeline or directly, do the same on both backends; a failed
+// assert reports its message.
+func TestE2EBuiltinsAndStagesParity(t *testing.T) {
+	runOnBothBackends(t, "builtins_and_stages", builtinsAndStagesSrc, builtinsAndStagesWant)
+}
+
+const builtinsAndStagesSrc = `import std.fp as fp
+
+def main() -> int:
+    xs: list[int[1..9]] = [1, 2, 3]
+    o: Option[int] = Some(1)
+    print(xs |> fp.map(x => x) |> fp.take(2), xs |> fp.sum(), xs |> drop(1))
+    print(o |> fp.unwrap_or(0), o |> and_then(v => Some(v)))
+    g = (v) => v > 1
+    print(xs |> filter(g) |> fold(0, (a, x) => x), xs |> any(g), xs |> all(g), xs |> find(g))
+    print(fp.map(xs, x => x), fp.take(xs, 2), fp.sum(xs), fp.unwrap_or(o, 0), fp.fold(xs, 0, (a, x) => x))
+    print(fp.filter(xs, g), fp.any(xs, g), fp.find(xs, x => x > 5), fp.drop(xs, 2))
+    h = (a, b) => b
+    k = () => 7
+    print(h(1, 2), k(), abs(0 - 3), min(1, 2), max(1, 2), str(5), len("ab"))
+    assert(len(xs) == 3, "three")
+    assert(True)
+    return 0
+`
+
+const builtinsAndStagesWant = `[1, 2] 6 [2, 3]
+1 Some(1)
+3 True False Some(2)
+[1, 2, 3] [1, 2] 6 1 3
+[2, 3] True None [3]
+2 7 3 1 2 5 2
 `
 
 // A literal or range nested in a variant pattern must be compared, on both
