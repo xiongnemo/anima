@@ -191,12 +191,12 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 	}
 	// stored: the value of e stays reachable from somewhere else.
 	stored := func(e ast.Expr) bool {
-		r := mutRoot(e)
-		if r == nil || !mayHoldEntity(v.info.ExprTypes[e]) {
+		if !mayHoldEntity(v.info.ExprTypes[e]) {
 			return false
 		}
-		names = append(names, r.Name)
-		return true
+		roots := v.valueRoots(e)
+		names = append(names, roots...)
+		return len(roots) > 0
 	}
 	bindsVar := func(pats ...ast.Pattern) bool {
 		found := false
@@ -244,13 +244,9 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 			src = t.Inner
 		}
-		if with, ok := src.(*ast.WithExpr); ok && !v.isFlatEntity(v.info.ExprTypes[with.Base]) {
-			// The copy shares the entities inside the original.
-			src = with.Base
-		}
-		if r := mutRoot(src); r != nil {
+		if roots := v.valueRoots(src); len(roots) > 0 {
 			// A second name, or a name for something inside another value.
-			names = append(names, x.Name, r.Name)
+			names = append(append(names, x.Name), roots...)
 		} else if v.isFreshValue(src) && len(v.sharedIn(x.Value)) == 0 {
 			fresh = x.Name
 		} else {
@@ -304,6 +300,30 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 		}
 	}
 	return names, fresh
+}
+
+// valueRoots lists the variables whose value, or something inside it, e may
+// evaluate to: a path, an arm of a match, the base of a `with` copy that
+// shares what the original holds.
+func (v *verifier) valueRoots(e ast.Expr) []string {
+	if r := mutRoot(e); r != nil {
+		return []string{r.Name}
+	}
+	switch x := e.(type) {
+	case *ast.TryExpr:
+		return v.valueRoots(x.Inner)
+	case *ast.WithExpr:
+		if !v.isFlatEntity(v.info.ExprTypes[x.Base]) {
+			return v.valueRoots(x.Base)
+		}
+	case *ast.MatchExpr:
+		var out []string
+		for _, arm := range x.Arms {
+			out = append(out, v.valueRoots(arm.Value)...)
+		}
+		return out
+	}
+	return nil
 }
 
 // mayHoldEntity reports whether a value of type t is, or contains, something
