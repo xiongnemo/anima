@@ -855,7 +855,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
 		if !hasFixedLen(v.info.ExprTypes[s.List]) {
-			env.forgetMapLens()
+			env.forgetMapLens(s.List)
 		}
 
 	case *ast.CallStmt:
@@ -1736,9 +1736,7 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 		env.shared[name] = true
 	}
 	v.forgetWrittenAliases(stmts, env)
-	if v.mayInsert(stmts) {
-		env.forgetMapLens()
-	}
+	v.forgetInsertedMapLens(stmts, env)
 	names, compound := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {

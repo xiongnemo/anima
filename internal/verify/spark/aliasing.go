@@ -353,34 +353,43 @@ func hasFixedLen(t sema.Type) bool {
 	return false
 }
 
-// forgetMapLens makes every map length an unknown one: a map may have been
-// inserted into, and maps are references, so which one is not known.
-func (e *symEnv) forgetMapLens() {
+// forgetMapLens is called when a key may have been inserted into the map
+// that written evaluates to, or into one it holds. Maps are references: the
+// lengths that are no longer known are those under the variable written
+// through when nothing else reaches its value, every map length otherwise.
+func (e *symEnv) forgetMapLens(written ast.Expr) {
+	root := mutRoot(written)
 	for _, k := range sortedKeys(e.mapLens) {
+		if root != nil && !e.shared[root.Name] && k != root.Name && !strings.HasPrefix(k, root.Name+".") {
+			continue
+		}
 		e.listLens[k] = e.freshLen(k)
 	}
 }
 
-// mayInsert reports whether the code under node can insert into a map:
-// an element assignment on something that is not a list, or a mut argument.
-func (v *verifier) mayInsert(node any) bool {
-	found := false
+// forgetInsertedMapLens applies forgetMapLens for every insertion the code
+// under node can make: an element assignment on something that is not a
+// list, or a mut argument.
+func (v *verifier) forgetInsertedMapLens(node any, env *symEnv) {
 	visitNodes(reflect.ValueOf(node), func(n any) {
 		switch x := n.(type) {
 		case *ast.IndexAssignStmt:
-			found = found || !hasFixedLen(v.info.ExprTypes[x.List])
+			if !hasFixedLen(v.info.ExprTypes[x.List]) {
+				env.forgetMapLens(x.List)
+			}
 		case *ast.CompoundAssignStmt:
-			if ix, ok := x.Target.(*ast.IndexExpr); ok {
-				found = found || !hasFixedLen(v.info.ExprTypes[ix.List])
+			if ix, ok := x.Target.(*ast.IndexExpr); ok && !hasFixedLen(v.info.ExprTypes[ix.List]) {
+				env.forgetMapLens(ix.List)
 			}
 		}
 	})
 	visitExprs(reflect.ValueOf(node), func(e ast.Expr) bool {
 		args, _ := callArgs(e)
 		for _, a := range args {
-			found = found || a.Mut
+			if a.Mut {
+				env.forgetMapLens(a.Value)
+			}
 		}
 		return true
 	})
-	return found
 }

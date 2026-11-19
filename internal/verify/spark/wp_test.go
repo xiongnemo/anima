@@ -2159,4 +2159,93 @@ def read(m: map[str, int]) -> int:
 	if len(failed) != 1 || failed[0] != "insert.mut_t_invariant" {
 		t.Errorf("expected only insert.mut_t_invariant to fail, failed VCs: %v", failed)
 	}
+	kept := map[string]string{
+		"insertion into a separate new map": `
+def f(m: map[str, int]) -> int:
+    if len(m) > 0:
+        acc: map[str, int] = {}
+        acc["a"] = 1
+        return 10 / len(m)
+    return 0
+`,
+		"invariant guaranteed by a mut call": `
+entity T:
+    tbl: map[str, int]
+    n: int[0..10]
+    invariant: len(tbl) > 0
+
+def touch(mut t: T) -> int:
+    t.n = 1
+    return 0
+
+def f(mut t: T) -> int:
+    return touch(mut t)
+`,
+		"insertion in one branch": `
+def f(mut m: map[str, int], c: bool) -> int:
+    ensures: result >= 0
+    if c:
+        m["a"] = 1
+    return len(m)
+`,
+		"two lists passed twice": `
+def fill(mut dst: list[int], src: list[int]) -> int:
+    return len(src)
+
+def f() -> int:
+    a = [1, 2]
+    b = [3, 4]
+    k = fill(mut a, b)
+    return fill(mut a, b)
+`,
+	}
+	for name, src := range kept {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+	rejected := map[string]string{
+		"index_bounds": `
+def f(c: bool) -> int:
+    x = {"a": 1}
+    k = len(x)
+    if c:
+        x = [1, 2]
+    else:
+        x = [3, 4]
+    m: map[str, int] = {}
+    m["a"] = 1
+    return x[5]
+`,
+		"div_nonzero": `
+entity T:
+    tbl: map[str, int]
+    n: int[0..10]
+
+def f() -> int:
+    e: map[str, int] = {}
+    t = T(tbl=e, n=1)
+    if len(e) == 0:
+        t.tbl["a"] = 1
+        return 10 / (1 - len(e))
+    return 0
+`,
+		"call_g_mut_alias": `
+def g(mut m: map[str, int], k: map[str, int]) -> int:
+    if len(k) == 0:
+        m["a"] = 1
+        return 10 / (1 - len(k))
+    return 0
+
+def f() -> int:
+    m: map[str, int] = {}
+    k = m
+    return g(mut m, k)
+`,
+	}
+	for vc, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, vc) {
+			t.Errorf("expected a failed %s, failed VCs:\n%s", vc, failed)
+		}
+	}
 }

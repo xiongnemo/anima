@@ -306,8 +306,9 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 	return names, fresh
 }
 
-// mayHoldEntity reports whether a value of type t can be, or contain, an
-// entity. A type that is not known is taken to.
+// mayHoldEntity reports whether a value of type t is, or contains, something
+// held by reference: an entity, a list or a map. A type that is not known
+// is taken to.
 func mayHoldEntity(t sema.Type) bool {
 	return mayHoldEntityIn(t, 0)
 }
@@ -319,10 +320,10 @@ func mayHoldEntityIn(t sema.Type, depth int) bool {
 	switch x := t.(type) {
 	case *sema.IntType, sema.BoolType, sema.StrType, *sema.HandleType, *sema.FuncType:
 		return false
-	case *sema.ListType:
-		return mayHoldEntityIn(x.Elem, depth+1)
-	case *sema.MapType:
-		return mayHoldEntityIn(x.Val, depth+1)
+	case *sema.ListType, *sema.MapType:
+		// References themselves: an element written, or a key inserted,
+		// through one name is seen through every other.
+		return true
 	case *sema.ADTType:
 		for _, a := range x.TypeArgs {
 			if mayHoldEntityIn(a, depth+1) {
@@ -350,7 +351,7 @@ func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) b
 		return true
 	}
 	for _, p := range params {
-		if p.Mut && mayHoldEntity(p.Type) && !v.isFlatEntity(p.Type) {
+		if p.Mut && v.hasRoom(p.Type) {
 			return true
 		}
 		switch p.Type.(type) {
@@ -359,6 +360,20 @@ func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) b
 		}
 	}
 	return false
+}
+
+// hasRoom reports whether a value of type t has a place to put a reference
+// to another value: a list or map of numbers, or a flat entity, has none.
+func (v *verifier) hasRoom(t sema.Type) bool {
+	switch x := t.(type) {
+	case *sema.ListType:
+		return mayHoldEntity(x.Elem)
+	case *sema.MapType:
+		return mayHoldEntity(x.Val)
+	case *sema.EntityType:
+		return !v.isFlatEntity(x)
+	}
+	return mayHoldEntity(t)
 }
 
 // isFreshValue reports whether e evaluates to a value nothing else can
