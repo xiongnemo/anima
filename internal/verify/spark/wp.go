@@ -140,6 +140,20 @@ func (e *symEnv) freshVar(prefix string) string {
 	return fmt.Sprintf("__%s_%d", prefix, e.freshID)
 }
 
+// unbind drops every binding of name, so a callee parameter cannot resolve to a caller variable of the same name.
+func (e *symEnv) unbind(name string) {
+	delete(e.intTerms, name)
+	delete(e.boolTerms, name)
+	delete(e.listLens, name)
+	delete(e.listElems, name)
+	delete(e.sumInfos, name)
+	for k := range e.intTerms {
+		if strings.HasPrefix(k, name+".") {
+			delete(e.intTerms, k)
+		}
+	}
+}
+
 func (e *symEnv) assume(b smt.BoolExpr) {
 	if b != nil {
 		e.pc = append(e.pc, b)
@@ -954,25 +968,61 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 			// Check user callee requires & parameter range bounds
 			if fi, isFn := v.info.Funcs[id.Name]; isFn {
-				callEnv := env.clone()
+				// Arguments are evaluated in the caller's env before it is cloned, so the call env
+				// inherits their assumptions and never reuses one of their fresh names.
+				var binds []func(*symEnv)
 				for i, a := range e.Args {
-					if i < len(fi.Type.Params) {
-						p := fi.Type.Params[i]
-						if it, ok := p.Type.(*sema.IntType); ok && it.IsBounded {
-							valT := v.evalInt(a.Value, env, scope, true)
-							v.checkIntRange(valT, a.Value, env, it, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
-							callEnv.intTerms[p.Name] = valT
+					if i >= len(fi.Type.Params) {
+						break
+					}
+					p := fi.Type.Params[i]
+					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
+					switch pt := p.Type.(type) {
+					case *sema.IntType:
+						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
+						if pt.IsBounded {
+							v.checkIntRange(valT, a.Value, env, pt, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
 						}
-						if et, ok := p.Type.(*sema.EntityType); ok {
-							if argID, ok := a.Value.(*ast.Ident); ok {
-								for _, f := range et.Fields {
-									if t, ok := env.intTerms[argID.Name+"."+f.Name]; ok {
-										callEnv.intTerms[p.Name+"."+f.Name] = t
-									}
-								}
+						binds = append(binds, func(c *symEnv) { c.intTerms[p.Name] = valT })
+					case sema.BoolType:
+						valB := v.evalBool(a.Value, env, scope)
+						binds = append(binds, func(c *symEnv) { c.boolTerms[p.Name] = valB })
+					case *sema.ListType:
+						argID, _ := a.Value.(*ast.Ident)
+						lt, known := smt.LinearTerm{}, false
+						if argID != nil {
+							lt, known = env.listLens[argID.Name]
+						}
+						if !known {
+							lt = smt.Var(env.freshVar("arglen"))
+						}
+						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+						if argID != nil {
+							if iv, ok := env.listElems[argID.Name]; ok {
+								binds = append(binds, func(c *symEnv) { c.listElems[p.Name] = iv })
 							}
 						}
+					case *sema.EntityType:
+						argID, _ := a.Value.(*ast.Ident)
+						for _, f := range pt.Fields {
+							if _, isInt := f.Type.(*sema.IntType); !isInt {
+								continue
+							}
+							t, known := smt.LinearTerm{}, false
+							if argID != nil {
+								t, known = env.intTerms[argID.Name+"."+f.Name]
+							}
+							if !known {
+								t = smt.Var(env.freshVar("argfield"))
+							}
+							path := p.Name + "." + f.Name
+							binds = append(binds, func(c *symEnv) { c.intTerms[path] = t })
+						}
 					}
+				}
+				callEnv := env.clone()
+				for _, bind := range binds {
+					bind(callEnv)
 				}
 				for idx, req := range fi.Decl.Requires {
 					v.prove(fmt.Sprintf("%s.call_%s_requires_%d", scope, id.Name, idx+1), scope, e.Span, callEnv, v.evalBool(req, callEnv, scope))
