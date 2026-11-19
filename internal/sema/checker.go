@@ -1403,7 +1403,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if len(e.Args) != len(wi.Params) {
 			return nil, fmt.Errorf("%s: workflow %s expects %d args, got %d", e.Span, e.Name, len(wi.Params), len(e.Args))
 		}
-		if err := c.checkCallAliasing(e.Args, sc); err != nil {
+		if err := c.checkCallAliasing(e.Args, false); err != nil {
 			return nil, err
 		}
 		for i, arg := range e.Args {
@@ -1420,6 +1420,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if !isAssignable(wi.Params[i].Type, at) {
 				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
+		}
+		if err := c.checkCallAliasing(e.Args, true); err != nil {
+			return nil, err
 		}
 		return wi.Return, nil
 
@@ -1448,7 +1451,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 
 func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	// SPARK Anti-Aliasing rule on all call sites
-	if err := c.checkCallAliasing(e.Args, sc); err != nil {
+	if err := c.checkCallAliasing(e.Args, false); err != nil {
 		return nil, err
 	}
 
@@ -1588,6 +1591,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				if !isAssignable(fi.Type.Params[i].Type, at) {
 					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
 				}
+			}
+			if err := c.checkCallAliasing(e.Args, true); err != nil {
+				return nil, err
 			}
 			if c.curFuncInfo != nil {
 				for _, pe := range fi.Frame.PortEffects {
@@ -1894,7 +1900,11 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
-func (c *checker) checkCallAliasing(args []ast.CallArg, sc *scope) error {
+// checkCallAliasing rejects a call whose mut argument overlaps another
+// argument. With elements set, which needs the arguments to be type-checked
+// already, an entity, list or map read out of a container counts as that
+// container.
+func (c *checker) checkCallAliasing(args []ast.CallArg, elements bool) error {
 	var mutRoots []struct {
 		root string
 		span ast.Span
@@ -1906,7 +1916,7 @@ func (c *checker) checkCallAliasing(args []ast.CallArg, sc *scope) error {
 	}
 	for _, a := range args {
 		root, ok := rootVarPath(a.Value)
-		if !ok && c.isSharedElement(a.Value, sc) {
+		if !ok && elements && c.isSharedElement(a.Value) {
 			// An entity, list or map read out of a container is the same
 			// object the container holds.
 			root, ok = containerPath(a.Value)
@@ -1978,14 +1988,14 @@ func containerPath(e ast.Expr) (string, bool) {
 
 // isSharedElement reports whether e reads, through an index, a value that is
 // passed by reference.
-func (c *checker) isSharedElement(e ast.Expr, sc *scope) bool {
+func (c *checker) isSharedElement(e ast.Expr) bool {
 	switch e.(type) {
 	case *ast.IndexExpr, *ast.FieldExpr:
 	default:
 		return false
 	}
-	ty, err := c.checkExpr(e, sc)
-	if err != nil || ty == nil {
+	ty := c.info.ExprTypes[e]
+	if ty == nil {
 		return false
 	}
 	switch ty.Kind() {
