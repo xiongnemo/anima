@@ -295,9 +295,9 @@ func (e *symEnv) pathAtoms() []smt.LinearAtom {
 
 // fieldView is a copy of e in which every name n that expr mentions is what
 // e has under prefix+n, and nothing else: a variable of e with the name of
-// a field is not seen.
-func (e *symEnv) fieldView(expr ast.Expr, prefix string) *symEnv {
-	view := e.clone()
+// a field is not seen. names lists them.
+func (e *symEnv) fieldView(expr ast.Expr, prefix string) (view *symEnv, names []string) {
+	view = e.clone()
 	seen := map[string]bool{}
 	visitExprs(reflect.ValueOf(expr), func(x ast.Expr) bool {
 		id, ok := x.(*ast.Ident)
@@ -305,6 +305,7 @@ func (e *symEnv) fieldView(expr ast.Expr, prefix string) *symEnv {
 			return true
 		}
 		seen[id.Name] = true
+		names = append(names, id.Name)
 		n, from := id.Name, prefix+id.Name
 		view.unbind(n)
 		under := func(k string) (string, bool) {
@@ -342,7 +343,7 @@ func (e *symEnv) fieldView(expr ast.Expr, prefix string) *symEnv {
 		}
 		return true
 	})
-	return view
+	return view, names
 }
 
 func (e *symEnv) pathCond() smt.BoolExpr {
@@ -2236,10 +2237,21 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 	if prefix != "" {
 		// Evaluate in a view where the names are bound to the fields, so
 		// that every form of expression reads them, and nothing else.
-		view := env.fieldView(expr, prefix)
+		view, names := env.fieldView(expr, prefix)
 		b := v.evalBoolWithPrefix(expr, view, "")
-		// What was learned about the symbols the evaluation made.
+		// What was learned about the symbols the evaluation made, and the
+		// lengths it named: the same field has the same length next time.
 		env.pc = append(env.pc, view.pc[len(env.pc):]...)
+		for _, n := range names {
+			for k, t := range view.listLens {
+				if k != n && !strings.HasPrefix(k, n+".") {
+					continue
+				}
+				if _, known := env.listLens[prefix+k]; !known {
+					env.listLens[prefix+k] = t
+				}
+			}
+		}
 		return b
 	}
 	switch e := expr.(type) {
