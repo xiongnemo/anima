@@ -968,46 +968,61 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 			// Check user callee requires & parameter range bounds
 			if fi, isFn := v.info.Funcs[id.Name]; isFn {
-				callEnv := env.clone()
+				// Arguments are evaluated in the caller's env before it is cloned, so the call env
+				// inherits their assumptions and never reuses one of their fresh names.
+				var binds []func(*symEnv)
 				for i, a := range e.Args {
-					if i < len(fi.Type.Params) {
-						p := fi.Type.Params[i]
-						callEnv.unbind(p.Name)
-						switch pt := p.Type.(type) {
-						case *sema.IntType:
-							valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
-							if pt.IsBounded {
-								v.checkIntRange(valT, a.Value, env, pt, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
-							}
-							callEnv.intTerms[p.Name] = valT
-						case sema.BoolType:
-							callEnv.boolTerms[p.Name] = v.evalBool(a.Value, env, scope)
-						case *sema.ListType:
-							callEnv.listLens[p.Name] = smt.Var(callEnv.freshVar("arglen"))
-							if argID, ok := a.Value.(*ast.Ident); ok {
-								if lt, ok := env.listLens[argID.Name]; ok {
-									callEnv.listLens[p.Name] = lt
-								}
-								if iv, ok := env.listElems[argID.Name]; ok {
-									callEnv.listElems[p.Name] = iv
-								}
-							}
-						case *sema.EntityType:
-							argID, _ := a.Value.(*ast.Ident)
-							for _, f := range pt.Fields {
-								if _, isInt := f.Type.(*sema.IntType); !isInt {
-									continue
-								}
-								t := smt.Var(callEnv.freshVar("argfield"))
-								if argID != nil {
-									if known, ok := env.intTerms[argID.Name+"."+f.Name]; ok {
-										t = known
-									}
-								}
-								callEnv.intTerms[p.Name+"."+f.Name] = t
+					if i >= len(fi.Type.Params) {
+						break
+					}
+					p := fi.Type.Params[i]
+					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
+					switch pt := p.Type.(type) {
+					case *sema.IntType:
+						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
+						if pt.IsBounded {
+							v.checkIntRange(valT, a.Value, env, pt, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
+						}
+						binds = append(binds, func(c *symEnv) { c.intTerms[p.Name] = valT })
+					case sema.BoolType:
+						valB := v.evalBool(a.Value, env, scope)
+						binds = append(binds, func(c *symEnv) { c.boolTerms[p.Name] = valB })
+					case *sema.ListType:
+						argID, _ := a.Value.(*ast.Ident)
+						lt, known := smt.LinearTerm{}, false
+						if argID != nil {
+							lt, known = env.listLens[argID.Name]
+						}
+						if !known {
+							lt = smt.Var(env.freshVar("arglen"))
+						}
+						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+						if argID != nil {
+							if iv, ok := env.listElems[argID.Name]; ok {
+								binds = append(binds, func(c *symEnv) { c.listElems[p.Name] = iv })
 							}
 						}
+					case *sema.EntityType:
+						argID, _ := a.Value.(*ast.Ident)
+						for _, f := range pt.Fields {
+							if _, isInt := f.Type.(*sema.IntType); !isInt {
+								continue
+							}
+							t, known := smt.LinearTerm{}, false
+							if argID != nil {
+								t, known = env.intTerms[argID.Name+"."+f.Name]
+							}
+							if !known {
+								t = smt.Var(env.freshVar("argfield"))
+							}
+							path := p.Name + "." + f.Name
+							binds = append(binds, func(c *symEnv) { c.intTerms[path] = t })
+						}
 					}
+				}
+				callEnv := env.clone()
+				for _, bind := range binds {
+					bind(callEnv)
 				}
 				for idx, req := range fi.Decl.Requires {
 					v.prove(fmt.Sprintf("%s.call_%s_requires_%d", scope, id.Name, idx+1), scope, e.Span, callEnv, v.evalBool(req, callEnv, scope))

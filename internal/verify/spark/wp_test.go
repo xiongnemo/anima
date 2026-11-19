@@ -202,6 +202,21 @@ def main() -> int:
     r = need(True)
     return 0
 `, ""},
+		{"call in the argument is not the call in requires", `
+def yes() -> bool:
+    return True
+
+def no() -> bool:
+    return False
+
+def need(flag: bool) -> int:
+    requires: flag or not yes()
+    return 0
+
+def main() -> int:
+    r = need(no())
+    return 0
+`, "call_need_requires_1"},
 		{"entity arg violates, caller has same-named entity", `
 type Money = int[0..1000]
 
