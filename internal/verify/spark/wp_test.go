@@ -2755,6 +2755,79 @@ def f(cmd: str, n: int) -> int:
         other if n > 0 -> return 1
     return 2
 `, "match_exhaustive_default"},
+		{"nested variants cover between them", `
+def f(o: Option[Option[int]]) -> int:
+    match o:
+        Some(Some(1)) -> return 1
+        Some(Some(v)) -> return 2
+        Some(None) -> return 3
+        None -> return 4
+`, ""},
+		{"a nested variant is missing", `
+def f(o: Option[Option[int]]) -> int:
+    match o:
+        Some(Some(1)) -> return 1
+        Some(None) -> return 3
+        None -> return 4
+    return 5
+`, "match_exhaustive_adt"},
+		{"two fields cover between them", `
+type Tree = Leaf(v: int) | Node(l: Option[int], r: Option[int])
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(0) -> return 0
+        Leaf(v) -> return 1
+        Node(Some(a), Some(b)) -> return 2
+        Node(Some(a), None) -> return 3
+        Node(None, _) -> return 4
+`, ""},
+		{"one combination of two fields is missing", `
+type Cmd = Get(key: str) | Set(key: str, on: bool) | Quit
+
+def f(c: Cmd) -> int:
+    match c:
+        Get(k) -> return 2
+        Set(_, False) -> return 4
+        Set("a", True) -> return 3
+        Quit -> return 6
+    return 7
+`, "match_exhaustive_adt"},
+		{"nested bools cover between them", `
+def f(a: Option[bool]) -> int:
+    match a:
+        Some(True) -> return 1
+        Some(False) -> return 2
+        None -> return 3
+`, ""},
+		{"a guarded nested arm does not cover", `
+def f(r: Result[Option[int], str]) -> int:
+    match r:
+        Ok(Some(v)) if v > 0 -> return v
+        Ok(None) -> return -1
+        Err(_) -> return -2
+    return 0
+`, "match_exhaustive_adt"},
+		{"recursive type, covered", `
+type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(_) -> return 0
+        Node(Leaf(_), Leaf(_)) -> return 1
+        Node(Node(_, _), _) -> return 2
+        Node(_, Node(_, _)) -> return 2
+`, ""},
+		{"recursive type, one shape missing", `
+type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(_) -> return 0
+        Node(Leaf(_), Leaf(_)) -> return 1
+        Node(Node(_, _), Leaf(_)) -> return 2
+    return 3
+`, "match_exhaustive_adt"},
 	}
 	for _, c := range cases {
 		failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n")

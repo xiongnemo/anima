@@ -130,6 +130,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
 		{"../tests/bugs/spark_match_nested_literal.anm", "match_exhaustive_adt"},
+		{"../tests/bugs/spark_match_nested_variant_missing.anm", "no arm for Some(Some(_))"},
 		{"../tests/bugs/spark_match_str_no_default.anm", "match_exhaustive_default"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},

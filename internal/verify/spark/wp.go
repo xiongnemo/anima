@@ -2499,38 +2499,18 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 		v.prove(scope+".match_exhaustive", scope, span, mEnv, smt.Or(covered...))
 
 	case *sema.ADTType:
-		covered := map[string]bool{}
-		hasWildcard := false
+		var rows [][]ast.Pattern
 		for _, arm := range arms {
-			if arm.guard != nil {
-				continue // guarded arm doesn't guarantee variant coverage alone
-			}
-			switch p := arm.pat.(type) {
-			case *ast.WildcardPat, *ast.VarPat:
-				hasWildcard = true
-			case *ast.VariantPat:
-				// `Ok(0)` covers only some values of the variant.
-				if variantPatIrrefutable(p) {
-					covered[p.Name] = true
-				}
+			if arm.guard == nil { // a guarded arm may not run
+				rows = append(rows, []ast.Pattern{arm.pat})
 			}
 		}
-		if hasWildcard {
-			v.record(scope+".match_exhaustive_adt", scope, span, t.Name, VCProved, "wildcard covers all variants", nil)
-			return
-		}
-		var missing []string
-		for _, vr := range t.Variants {
-			if !covered[vr.Name] {
-				missing = append(missing, vr.Name)
-			}
-		}
-		if len(missing) > 0 {
+		if missing, ok := v.unmatched(rows, []sema.Type{t}); ok {
 			v.record(scope+".match_exhaustive_adt", scope, span, t.Name, VCFailed,
-				fmt.Sprintf("non-exhaustive match on %s: missing variant(s) %s", t.Name, strings.Join(missing, ", ")), nil)
+				fmt.Sprintf("non-exhaustive match on %s: no arm for %s", t.Name, missing[0]), nil)
 		} else {
 			v.record(scope+".match_exhaustive_adt", scope, span, t.Name, VCProved,
-				fmt.Sprintf("all %d variants of %s covered", len(t.Variants), t.Name), nil)
+				fmt.Sprintf("every value of %s is matched", t.Name), nil)
 		}
 	case sema.BoolType:
 		covT, covF := false, false
@@ -2572,16 +2552,111 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 	}
 }
 
-// variantPatIrrefutable reports whether p matches every value of its variant.
-func variantPatIrrefutable(p *ast.VariantPat) bool {
-	for _, f := range p.Fields {
-		switch f.(type) {
+// unmatched looks for a tuple of values of types that no row of patterns
+// matches, and describes one. A column is split by variant or by bool
+// value where some row tells them apart; an int or a string in a nested
+// pattern is matched for certain only by a wildcard or a name.
+func (v *verifier) unmatched(rows [][]ast.Pattern, types []sema.Type) ([]string, bool) {
+	if len(types) == 0 {
+		return nil, len(rows) == 0
+	}
+	catchAll := func(p ast.Pattern) bool {
+		switch p.(type) {
 		case *ast.WildcardPat, *ast.VarPat:
-		default:
-			return false
+			return true
+		}
+		return false
+	}
+	rest := types[1:]
+	split := false
+	for _, r := range rows {
+		switch r[0].(type) {
+		case *ast.VariantPat, *ast.BoolPat:
+			split = true
 		}
 	}
-	return true
+	adt, isADT := types[0].(*sema.ADTType)
+	_, isBool := types[0].(sema.BoolType)
+	switch {
+	case split && isADT:
+		for _, vr := range adt.Variants {
+			fields := v.variantFieldTypes(adt, vr.Name)
+			var sub [][]ast.Pattern
+			for _, r := range rows {
+				head := make([]ast.Pattern, len(fields))
+				for i := range head {
+					head[i] = &ast.WildcardPat{}
+				}
+				if vp, ok := r[0].(*ast.VariantPat); ok {
+					if vp.Name != vr.Name || len(vp.Fields) > len(fields) {
+						continue
+					}
+					copy(head, vp.Fields)
+				} else if !catchAll(r[0]) {
+					continue
+				}
+				sub = append(sub, append(head, r[1:]...))
+			}
+			if w, ok := v.unmatched(sub, append(append([]sema.Type{}, fields...), rest...)); ok {
+				name := vr.Name
+				if len(fields) > 0 {
+					name += "(" + strings.Join(w[:len(fields)], ", ") + ")"
+				}
+				return append([]string{name}, w[len(fields):]...), true
+			}
+		}
+		return nil, false
+	case split && isBool:
+		for _, val := range []bool{true, false} {
+			var sub [][]ast.Pattern
+			for _, r := range rows {
+				if bp, ok := r[0].(*ast.BoolPat); (ok && bp.Value == val) || catchAll(r[0]) {
+					sub = append(sub, r[1:])
+				}
+			}
+			if w, ok := v.unmatched(sub, rest); ok {
+				name := "False"
+				if val {
+					name = "True"
+				}
+				return append([]string{name}, w...), true
+			}
+		}
+		return nil, false
+	}
+	var sub [][]ast.Pattern
+	for _, r := range rows {
+		if catchAll(r[0]) {
+			sub = append(sub, r[1:])
+		}
+	}
+	if w, ok := v.unmatched(sub, rest); ok {
+		return append([]string{"_"}, w...), true
+	}
+	return nil, false
+}
+
+// variantFieldTypes gives the types of the fields of a variant of adt, with
+// its type parameters replaced by the arguments of adt.
+func (v *verifier) variantFieldTypes(adt *sema.ADTType, name string) []sema.Type {
+	decl := v.info.Variants[name]
+	if decl == nil || decl.Name != adt.Name {
+		decl = adt
+	}
+	var out []sema.Type
+	for _, f := range adt.VariantMap[name].Fields {
+		fty := f.Type
+		if tv, ok := fty.(sema.TypeVar); ok {
+			fty = nil
+			for i, tp := range decl.TypeParams {
+				if tp == tv.Name && i < len(adt.TypeArgs) {
+					fty = adt.TypeArgs[i]
+				}
+			}
+		}
+		out = append(out, fty)
+	}
+	return out
 }
 
 func (v *verifier) patternCond(pat ast.Pattern, st smt.LinearTerm, env *symEnv) smt.BoolExpr {
