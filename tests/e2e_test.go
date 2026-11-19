@@ -478,6 +478,41 @@ def main() -> int:
     return 0
 `
 
+// Reading from a connection the peer has closed is an error on both backends.
+func TestE2ERecvAtEOFParity(t *testing.T) {
+	runOnBothBackends(t, "recv_eof", recvEOFSrc, "bye / error: EOF\n")
+}
+
+const recvEOFSrc = `import std.socket as sock
+
+def read_all(conn: sock.TcpStream) -> str:
+    first = match conn.recv_text(16):
+        Ok(text) -> text
+        Err(e) -> "error: " + e
+    second = match conn.recv_text(16):
+        Ok(text) -> "data: " + text
+        Err(e) -> "error: " + e
+    return first + " / " + second
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            match sock.connect_tcp("127.0.0.1", ln.port()):
+                Ok(client) ->
+                    match ln.accept(timeout_ms=3000):
+                        Ok(server) ->
+                            sent = server.send_text("bye")
+                            server.close()
+                            print(read_all(client))
+                        Err(e) -> print(f"accept failed: {e}")
+                    client.close()
+                Err(e) -> print(f"connect failed: {e}")
+            ln.close()
+            return 0
+        Err(e) -> print(f"listen failed: {e}")
+    return 1
+`
+
 const movedThenTrySrc = `import std.socket as sock
 import std.concurrent as conc
 import std.time as time
