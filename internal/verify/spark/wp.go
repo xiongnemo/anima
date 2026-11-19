@@ -88,6 +88,9 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
+	// entTypes gives the entity type of each variable, and field path,
+	// that is bound to an entity.
+	entTypes map[string]*sema.EntityType
 	// shared holds the variables whose entity can also be reached another
 	// way: through a second name, or inside a list, map, variant or entity.
 	shared map[string]bool
@@ -106,6 +109,7 @@ func newSymEnv() *symEnv {
 		sumInfos:   map[string]listSumInfo{},
 		entryTerms: map[string]smt.LinearTerm{},
 		shared:     map[string]bool{},
+		entTypes:   map[string]*sema.EntityType{},
 		fresh:      new(int),
 	}
 }
@@ -125,6 +129,10 @@ func (e *symEnv) clone() *symEnv {
 	}
 	for k := range e.shared {
 		c.shared[k] = true
+	}
+	c.entTypes = make(map[string]*sema.EntityType, len(e.entTypes))
+	for k, t := range e.entTypes {
+		c.entTypes[k] = t
 	}
 	for k, v := range e.intTerms {
 		c.intTerms[k] = v.Clone()
@@ -180,6 +188,11 @@ func (e *symEnv) unbind(name string) {
 			delete(e.sumInfos, k)
 		}
 	}
+	for k := range e.entTypes {
+		if under(k) {
+			delete(e.entTypes, k)
+		}
+	}
 }
 
 // rename moves what is bound under one program name to another, keeping the symbols.
@@ -218,6 +231,12 @@ func (e *symEnv) rename(from, to string) {
 		if nk, ok := move(k); ok {
 			delete(e.sumInfos, k)
 			e.sumInfos[nk] = si
+		}
+	}
+	for k, t := range e.entTypes {
+		if nk, ok := move(k); ok {
+			delete(e.entTypes, k)
+			e.entTypes[nk] = t
 		}
 	}
 }
@@ -405,6 +424,7 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 		if v.bindingEnts[t] {
 			return
 		}
+		env.entTypes[name] = t
 		if v.bindingEnts == nil {
 			v.bindingEnts = map[*sema.EntityType]bool{}
 		}

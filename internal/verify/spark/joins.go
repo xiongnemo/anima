@@ -115,6 +115,20 @@ func (v *verifier) joinBranches(env *symEnv, outs []*symEnv) {
 			env.shared[k] = true
 		}
 	}
+	// An entity type is kept for a name that has it on every path.
+	types := map[string]*sema.EntityType{}
+	for k, t := range outs[0].entTypes {
+		same := true
+		for _, o := range outs[1:] {
+			if o.entTypes[k] != t {
+				same = false
+			}
+		}
+		if same {
+			types[k] = t
+		}
+	}
+	env.entTypes = types
 	env.intTerms, env.listLens, env.boolTerms = ints, lens, bools
 	env.listElems, env.sumInfos = elems, sums
 }

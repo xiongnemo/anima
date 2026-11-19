@@ -15,33 +15,45 @@ import (
 // kept across a write made some other way while the variable is the one way
 // to reach its entity (it is not in symEnv.shared).
 
-// forgetEntity keeps of the entity under name only what its fields' types say.
-func (e *symEnv) forgetEntity(name string) {
-	for _, k := range sortedKeys(e.intTerms) {
-		if !strings.HasPrefix(k, name+".") {
-			continue
-		}
-		t := smt.Var(e.freshVar(k))
-		e.intTerms[k] = t
-		if iv, ok := e.intervals[k]; ok && iv.HasLo && iv.HasHi {
-			e.assume(smt.Ge(t, smt.Const(iv.Lo)))
-			e.assume(smt.Le(t, smt.Const(iv.Hi)))
-		} else {
-			e.assume(smt.FitsInt64(t))
-		}
+// holds reports whether goal is known to be true in env.
+func (v *verifier) holds(env *symEnv, goal smt.BoolExpr) bool {
+	if bc, ok := goal.(smt.BoolConst); ok {
+		return bc.Val
 	}
-	for _, k := range sortedKeys(e.boolTerms) {
-		if strings.HasPrefix(k, name+".") {
-			e.boolTerms[k] = smt.BoolVar{Name: e.freshVar(k)}
+	return smt.CheckSat(smt.And(smt.Int64Pins(), env.pathCond(), smt.Not(goal))).Status == smt.StatusUnsat
+}
+
+// forgetEntity keeps of the entity variable name only what its type says:
+// the ranges of its fields. Its invariants are kept too when they are known
+// to hold now and the entity is flat: every write that could have reached
+// it has proved them again (proveSharedEntity, a callee's exit).
+func (v *verifier) forgetEntity(env *symEnv, name string) {
+	et := env.entTypes[name]
+	if et == nil {
+		// Not an entity the kernel has bound: a list, or a value whose
+		// type is not known.
+		for _, k := range sortedKeys(env.intTerms) {
+			if strings.HasPrefix(k, name+".") {
+				t := smt.Var(env.freshVar(k))
+				env.intTerms[k] = t
+				env.assume(smt.FitsInt64(t))
+			}
 		}
-	}
-	for _, k := range sortedKeys(e.listLens) {
-		if strings.HasPrefix(k, name+".") {
-			delete(e.listLens, k)
-			delete(e.listElems, k)
-			delete(e.sumInfos, k)
+		for _, k := range sortedKeys(env.boolTerms) {
+			if strings.HasPrefix(k, name+".") {
+				env.boolTerms[k] = smt.BoolVar{Name: env.freshVar(k)}
+			}
 		}
+		return
 	}
+	valid := v.isFlatEntity(et)
+	for _, inv := range et.Invariants {
+		valid = valid && v.holds(env, v.evalBoolWithPrefix(inv, env, name+"."))
+	}
+	saved := v.noInvariants
+	v.noInvariants = !valid
+	v.bindFresh(env, name, et)
+	v.noInvariants = saved
 }
 
 // forgetAliases is called when the entity obj evaluates to has been written,
@@ -62,7 +74,7 @@ func (v *verifier) forgetAliases(obj ast.Expr, env *symEnv) {
 	}
 	for _, name := range sortedKeys(env.shared) {
 		if name != written {
-			env.forgetEntity(name)
+			v.forgetEntity(env, name)
 		}
 	}
 }
