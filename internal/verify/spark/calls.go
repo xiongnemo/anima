@@ -307,6 +307,9 @@ func mutRoot(e ast.Expr) *ast.Ident {
 // of its mut entities on the way out. Elsewhere the call may not have run,
 // and the entity may be in the middle of an update by the caller.
 func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
+	// The callee may have inserted into a map it reaches. What it
+	// guarantees about the argument is bound after that.
+	env.forgetMapLens()
 	saved := v.noInvariants
 	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {
@@ -315,10 +318,8 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}
 	v.noInvariants = saved
-	// The callee may have written the entity, which another name may share,
-	// or inserted into a map it reaches.
+	// The callee may have written the entity, which another name may share.
 	v.forgetAliases(a.Value, env)
-	env.forgetMapLens()
 }
 
 // havocMutArgs forgets every variable passed as mut anywhere under node,
