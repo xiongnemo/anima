@@ -200,6 +200,8 @@ def f() -> int:
     b[True] = 3
     c = {}
     c["k"] = 4
+    a = {}
+    a[2] = 3
     return 0
 `
 	prog, err := parser.Parse("ok.anm", ok)
@@ -209,7 +211,25 @@ def f() -> int:
 	if _, err := Check(prog); err != nil {
 		t.Errorf("int, bool and str keys into an empty map should be accepted, got %v", err)
 	}
-	bad := "def f() -> int:\n    c = {}\n    c[[1]] = 4\n    return 0\n"
+	// Without a declared type the keys are str, in every branch alike.
+	branches := `
+def f(flag: bool) -> int:
+    m = {}
+    if flag:
+        m = {}
+        m["a"] = 1
+    else:
+        m["b"] = 2
+    return 0
+`
+	prog, err = parser.Parse("branches.anm", branches)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err != nil {
+		t.Errorf("str keys in both branches should be accepted, got %v", err)
+	}
+	bad := "def f() -> int:\n    c = {}\n    c[1] = 4\n    return 0\n"
 	prog, err = parser.Parse("bad.anm", bad)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)

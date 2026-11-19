@@ -815,6 +815,15 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s)", s.Span, valTy, s.Name, annoTy)
 			}
 			valTy = annoTy
+		} else if mt, ok := valTy.(*MapType); ok && mt.Key.Kind() == KindUnknown {
+			// `{}` does not say what its keys are. A variable that is
+			// already a map keeps its type; a new one gets str keys, and
+			// other key types are declared: `m: map[int, V] = {}`.
+			if prev, found := sc.lookup(s.Name); found && prev.ty != nil && prev.ty.Kind() == KindMap {
+				valTy = prev.ty
+			} else {
+				valTy = &MapType{Key: StrType{}, Val: mt.Val, Cap: mt.Cap, HasCap: mt.HasCap}
+			}
 		}
 		if c.curFuncInfo != nil {
 			c.addUnique(&c.curFuncInfo.Frame.Writes, s.Name)
@@ -896,11 +905,6 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if mt, ok := lty.(*MapType); ok {
 			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
 				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
-			}
-			// The first write to `{}` decides its key type: keys are stored
-			// by their printed form, so 1 and "1" would be the same entry.
-			if mt.Key.Kind() == KindUnknown && ity.Kind() != KindUnknown {
-				mt.Key = ity
 			}
 			if !isAssignable(mt.Val, vty) {
 				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
