@@ -1525,6 +1525,11 @@ def f(mut b: Wide) -> int:
 	if failed := strings.Join(failedVCs(verifySrc(t, outer)), "\n"); !strings.Contains(failed, "div_nonzero") {
 		t.Errorf("outer field with the inner field's name: expected a failed div_nonzero, failed VCs:\n%s", failed)
 	}
+	// ...and the outer entity keeps its own fields.
+	kept := strings.Replace(outer, "    a = c.inner\n    return 10 / a.x\n", "    return 10 / c.x\n", 1)
+	if failed := failedVCs(verifySrc(t, kept)); len(failed) != 0 {
+		t.Errorf("outer field after replacing the inner entity: expected every VC proved, failed VCs: %v", failed)
+	}
 	ok := prelude + "\ndef f(mut b: Holder) -> int:\n    b.inner = P(x=2)\n    a = b.inner\n    return 10 / a.x\n"
 	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
 		t.Errorf("the new contents are known, failed VCs: %v", failed)
