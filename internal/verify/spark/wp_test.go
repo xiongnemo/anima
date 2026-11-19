@@ -1642,3 +1642,25 @@ def f(mut b: Holder) -> int:
 		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
 	}
 }
+
+// What does not give a second way to reach an entity leaves its two-step
+// updates alone.
+func TestSPARKUnsharedEntityKeepsTwoStepUpdates(t *testing.T) {
+	twoStep := "    b.x = 6\n    b.y = 4\n    return use(b)"
+	accepted := map[string]string{
+		"a number read out of it":           "    b = A(x=5, y=5)\n    saved = b.x\n" + twoStep,
+		"replaced in every branch":          "    b = A(x=5, y=5)\n    c = b\n    if len(rows) > 0:\n        b = A(x=5, y=5)\n    else:\n        b = A(x=5, y=5)\n" + twoStep,
+		"lambda parameter of the same name": "    b = A(x=5, y=5)\n    ys = rows |> map(b => [b])\n" + twoStep,
+	}
+	for name, body := range accepted {
+		src := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + body + "\n"
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+	// Replaced in one branch only: the other still shares it.
+	oneBranch := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    b = A(x=5, y=5)\n    c = b\n    if len(rows) > 0:\n        b = A(x=5, y=5)\n" + twoStep + "\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, oneBranch)), "\n"); !strings.Contains(failed, "entity_b_invariant_1") {
+		t.Errorf("replaced in one branch: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
+	}
+}
