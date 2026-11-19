@@ -1,0 +1,10 @@
+def f(xs: list[int[1..9]]) -> int:
+    s = xs |> fold(0, (a, v) => 0)
+    if len(xs) == 2:
+        return 10 / s
+    return 0
+
+def main() -> int:
+    xs: list[int[1..9]] = [1, 1]
+    print(f(xs))
+    return 0

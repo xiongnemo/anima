@@ -1,0 +1,9 @@
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = [0, 0]
+    if len(xs) > 5:
+        xs = mk()
+    print(10 / xs[0])
+    return 0

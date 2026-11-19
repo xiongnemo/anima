@@ -1,0 +1,5 @@
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 1}
+    m["a"] = 0
+    print(10 / m["a"])
+    return 0

@@ -1,0 +1,9 @@
+def pick(c: bool) -> int:
+    x = match c:
+        True -> 5
+        False -> 0
+    return 10 / x
+
+def main() -> int:
+    print(pick(False))
+    return 0

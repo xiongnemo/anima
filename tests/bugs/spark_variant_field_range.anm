@@ -1,0 +1,8 @@
+type Shape = Circle(r: int[1..9]) | Dot
+
+def main() -> int:
+    s = Circle(0)
+    match s:
+        Circle(r) -> print(10 / r)
+        Dot -> print(0)
+    return 0

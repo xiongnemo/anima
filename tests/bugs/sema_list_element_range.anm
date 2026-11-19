@@ -1,0 +1,9 @@
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    xs: list[int] = [0, 6]
+    print(f(xs))
+    return 0
