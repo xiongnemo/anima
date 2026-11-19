@@ -259,6 +259,8 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// lambdaDepth counts the lambda bodies being checked.
+	lambdaDepth int
 	// noInvariants makes bindVarType bind an entity without assuming its invariants.
 	noInvariants bool
 	// bindingEnts holds the entity types bindVarType is currently expanding.
@@ -1330,7 +1332,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Object, env, scope)
 	case *ast.TryExpr:
 		v.evalSideEffects(e.Inner, env, scope)
-		v.checkTryExit(env, scope, e.Span)
+		// Inside a lambda `?` returns from the lambda, not from the function.
+		if v.lambdaDepth == 0 {
+			v.checkTryExit(env, scope, e.Span)
+		}
 	case *ast.RangeExpr:
 		v.evalSideEffects(e.Lo, env, scope)
 		v.evalSideEffects(e.Hi, env, scope)
@@ -1622,7 +1627,9 @@ func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope strin
 		bodyEnv.intTerms[lam.Params[0]] = v.evalInt(args[0].Value, env, scope, false).Add(partial)
 		bodyEnv.intTerms[lam.Params[1]] = x
 		v.checkArith(lam.Body, bodyEnv, scope)
+		v.lambdaDepth++
 		v.evalSideEffects(lam.Body, bodyEnv, scope)
+		v.lambdaDepth--
 		return
 	}
 
@@ -1664,7 +1671,9 @@ func (v *verifier) checkLambdaArith(lam *ast.LambdaExpr, types []sema.Type, body
 		v.strParams[p] = isStr
 	}
 	v.checkArith(lam.Body, bodyEnv, scope)
+	v.lambdaDepth++
 	v.evalSideEffects(lam.Body, bodyEnv, scope)
+	v.lambdaDepth--
 	v.strParams = saved
 }
 

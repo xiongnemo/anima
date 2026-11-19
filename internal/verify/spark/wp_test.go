@@ -1074,6 +1074,22 @@ def g(mut s: S) -> int:
 			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
 		}
 	}
+	// A `?` in a lambda leaves the lambda, so the function's contracts are
+	// not due there.
+	inLambda := mutCallPrelude + `
+def check(x: int[0..9]) -> Result[int, str]:
+    return Ok(x)
+
+def g(mut s: S, xs: list[int[0..9]]) -> int:
+    ensures: s.n == 5
+    s.n = 0
+    ys = xs |> map(x => check(x)?)
+    s.n = 5
+    return 0
+`
+	if failed := failedVCs(verifySrc(t, inLambda)); len(failed) != 0 {
+		t.Errorf("a ? inside a lambda is not a return of the function, failed VCs: %v", failed)
+	}
 	stage := mutCallVCs(t, "    ys = xs |> map(x => five(mut s))\n    return 10 / (s.n + 1)")
 	if stage != "" {
 		t.Errorf("a pipeline stage may pass an outer variable as mut, failed VCs:\n%s", stage)
