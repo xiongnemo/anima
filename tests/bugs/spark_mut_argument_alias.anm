@@ -1,0 +1,17 @@
+# g is verified with p and q taken for two entities. Here they are one, and
+# g reads through q what it has just written through p.
+
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+
+def g(mut p: A, q: A) -> int:
+    requires: q.x >= 1
+    p.x = 0
+    return 10 / q.x
+
+def main() -> int:
+    b = A(x=5, y=5)
+    c = b
+    print(g(mut b, c))
+    return 0

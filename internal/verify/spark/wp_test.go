@@ -1689,3 +1689,135 @@ func TestSPARKEntityInAnUntypedMap(t *testing.T) {
 		t.Errorf("typed map, a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+const aliasPrelude = `
+entity P:
+    x: int[0..10]
+    y: int[0..10]
+
+entity Holder:
+    inner: P
+    k: int[0..9]
+
+def zero(mut p: P) -> int:
+    p.x = 0
+    return 0
+
+def peek(p: P) -> int:
+    return p.x
+`
+
+// Entities are references. What is known about a variable does not survive
+// a write made through another way to reach its entity.
+func TestSPARKWriteThroughAnAliasForgetsFacts(t *testing.T) {
+	stale := map[string]string{
+		"second name":                 "    b = P(x=5, y=5)\n    c = b\n    b.x = 0\n    return 10 / c.x",
+		"written through the copy":    "    b = P(x=5, y=5)\n    c = b\n    c.x = 0\n    return 10 / b.x",
+		"loop over a list holding it": "    b = P(x=5, y=5)\n    rows = [b]\n    for r in rows:\n        r.x = 0\n    return 10 / b.x",
+		"element written in place":    "    b = P(x=5, y=5)\n    rows = [b]\n    rows[0].x = 0\n    return 10 / b.x",
+		"mut call on the other name":  "    b = P(x=5, y=5)\n    c = b\n    _ = zero(mut b)\n    return 10 / c.x",
+		"inside another entity":       "    b = P(x=5, y=5)\n    h = Holder(inner=b, k=1)\n    h.inner.x = 0\n    return 10 / b.x",
+		"alias made in one branch":    "    b = P(x=5, y=5)\n    c = P(x=5, y=5)\n    if n > 1:\n        c = b\n    b.x = 0\n    return 10 / c.x",
+		"matched payload":             "    b = P(x=5, y=5)\n    o = Some(b)\n    match o:\n        Some(v) ->\n            v.x = 0\n        None ->\n            return 0\n    return 10 / b.x",
+	}
+	for name, body := range stale {
+		src := aliasPrelude + "\ndef f(n: int[0..9]) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	kept := map[string]string{
+		"two separate entities":      "    b = P(x=5, y=5)\n    c = P(x=7, y=1)\n    b.x = 0\n    return 10 / c.x",
+		"read by a call in between":  "    b = P(x=5, y=5)\n    c = P(x=7, y=1)\n    k = peek(b)\n    b.x = 2\n    return 10 / c.x + 10 / b.x",
+		"mut call on a separate one": "    b = P(x=5, y=5)\n    c = P(x=7, y=1)\n    _ = zero(mut b)\n    return 10 / c.x",
+	}
+	for name, body := range kept {
+		src := aliasPrelude + "\ndef f(n: int[0..9]) -> int:\n" + body + "\n"
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// What a function received without mut cannot be written through another name.
+func TestSPARKReadonlyParameterThroughAnotherName(t *testing.T) {
+	bodies := map[string]string{
+		"second name":     "readonly_c\x00    c = a\n    c.x = 0\n    return 0",
+		"loop variable":   "readonly_r\x00    for r in rows:\n        r.x = 0\n    return 0",
+		"element":         "readonly_r\x00    if len(rows) > 0:\n        r = rows[0]\n        r.x = 0\n    return 0",
+		"matched payload": "readonly_v\x00    match o:\n        Some(v) ->\n            v.x = 0\n            return 0\n        None -> return 0",
+		"mut argument":    "readonly_c\x00    c = a\n    return zero(mut c)",
+		"through a field": "readonly_c\x00    c = h.inner\n    c.x = 0\n    return 0",
+	}
+	for name, c := range bodies {
+		vc, body, _ := strings.Cut(c, "\x00")
+		src := aliasPrelude + "\ndef f(a: P, rows: list[P], o: Option[P], h: Holder) -> int:\n" + body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, vc) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, vc, failed)
+		}
+		src = aliasPrelude + "\ndef f(mut a: P, mut rows: list[P], mut o: Option[P], mut h: Holder) -> int:\n" + body + "\n"
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s with mut parameters: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// A callee is verified with its parameters taken for separate values, so a
+// mut argument must not be reachable from another argument.
+func TestSPARKMutArgumentAliasingAnotherArgument(t *testing.T) {
+	prelude := aliasPrelude + `
+def g(mut p: P, q: P) -> int:
+    requires: q.x >= 1
+    p.x = 0
+    return 10 / q.x
+
+def into(mut p: P, h: Holder) -> int:
+    p.x = 0
+    return h.k
+`
+	rejected := map[string]string{
+		"second name":       "    b = P(x=5, y=5)\n    c = b\n    return g(mut b, c)",
+		"held by an entity": "    b = P(x=5, y=5)\n    h = Holder(inner=b, k=1)\n    return into(mut b, h)",
+	}
+	for name, body := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, prelude+"\ndef f() -> int:\n"+body+"\n")), "\n")
+		if !strings.Contains(failed, "_mut_alias") {
+			t.Errorf("%s: expected a failed call_*_mut_alias, failed VCs:\n%s", name, failed)
+		}
+	}
+	separate := prelude + "\ndef f() -> int:\n    b = P(x=5, y=5)\n    c = P(x=5, y=5)\n    k = g(mut b, c)\n    return g(mut b, c)\n"
+	if failed := failedVCs(verifySrc(t, separate)); len(failed) != 0 {
+		t.Errorf("separate entities, twice: expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// An entity that a call may keep (inside a mut argument) or hand back is
+// shared afterwards, so a write to it has to keep its invariant.
+func TestSPARKEntityKeptOrReturnedByACall(t *testing.T) {
+	prelude := invariantPrelude + `
+def keep(mut bx: Box, a: A) -> int:
+    bx.inner = a
+    return 0
+
+def idf(a: A) -> A:
+    return a
+`
+	rejected := map[string]string{
+		"kept in a mut argument": "    b = A(x=5, y=5)\n    bx = Box(inner=A(x=1, y=1), k=1)\n    k = keep(mut bx, b)\n    b.x = 6\n    return open_box(bx)",
+		"handed back":            "    b = A(x=5, y=5)\n    c = idf(b)\n    b.x = 6\n    return use(c)",
+		"yielded by a lambda":    "    b = A(x=5, y=5)\n    ys = [1, 2] |> map(n => b)\n    b.x = 6\n    return 0",
+	}
+	for name, body := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, prelude+"\ndef f() -> int:\n"+body+"\n")), "\n")
+		if !strings.Contains(failed, "entity_b_invariant_1") {
+			t.Errorf("%s: expected a failed entity_b_invariant_1, failed VCs:\n%s", name, failed)
+		}
+	}
+	// A call that only reads keeps nothing: the two-step update stays.
+	read := prelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    k = use(b)\n    b.x = 6\n    b.y = 4\n    return use(b)\n"
+	if failed := failedVCs(verifySrc(t, read)); len(failed) != 0 {
+		t.Errorf("after a call that only reads: expected every VC proved, failed VCs: %v", failed)
+	}
+}

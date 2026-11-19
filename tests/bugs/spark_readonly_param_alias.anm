@@ -1,0 +1,17 @@
+# f does not take a as mut, so its caller keeps what it knows about b across
+# the call. Writing a through a second name must be rejected like writing a.
+
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+
+def f(a: A) -> int:
+    c = a
+    c.x = 0
+    return 0
+
+def main() -> int:
+    b = A(x=5, y=5)
+    _ = f(b)
+    print(10 / b.x)
+    return 0
