@@ -124,6 +124,7 @@ func (d *EntityDecl) GetSpan() Span { return d.Span }
 type Param struct {
 	Span Span
 	Mut  bool
+	Own  bool // ownership of a linear handle is transferred to the callee
 	Name string
 	Type TypeExpr
 }
@@ -757,6 +758,7 @@ type CallArg struct {
 	Span  Span
 	Name  string // optional keyword argument name
 	Mut   bool
+	Own   bool // `own x`: the caller gives up the handle x
 	Value Expr
 }
 

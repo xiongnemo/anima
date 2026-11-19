@@ -1,0 +1,92 @@
+# Concurrent HTTP server: the accept loop moves each connection into a worker.
+#
+# Ownership rules the typestate checker enforces here:
+#   - a connection has exactly one owner, who must close it on every path;
+#   - `own` moves it (into `handle`, and with it into the worker thread);
+#   - a borrowed connection (`respond`, `exchange`) cannot be closed or moved,
+#     so those functions may fail early with `?` without leaking it.
+#
+# The program is self-contained: four clients on a second pool hit the server
+# at the same time, so `anima run` and the native binary terminate on their own.
+
+import std.socket as sock
+import std.concurrent as conc
+
+type Count = int[0..4]
+type PortNum = int[0..65535]
+
+def response() -> str:
+    return "HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\nhello from anima\n"
+
+def respond(conn: sock.TcpStream) -> Result[int, str]:
+    req = conn.recv_text(4096)?
+    _ = conn.send_text(response())?
+    return Ok(len(req))
+
+def handle(own conn: sock.TcpStream) -> bool:
+    served = respond(conn)
+    conn.close()
+    match served:
+        Ok(n) -> return True
+        Err(e) -> return False
+    return False
+
+def exchange(conn: sock.TcpStream) -> Result[str, str]:
+    _ = conn.send_text("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")?
+    return conn.recv_text(4096)
+
+def fetch(port: PortNum) -> bool:
+    match sock.connect_tcp("127.0.0.1", port):
+        Ok(conn) ->
+            reply = exchange(conn)
+            conn.close()
+            match reply:
+                Ok(text) -> return text == response()
+                Err(e) -> return False
+        Err(e) -> return False
+    return False
+
+def tally(ok: bool) -> Count:
+    ensures: result <= 1
+    if ok:
+        return 1
+    return 0
+
+def serve(ln: sock.TcpListener, port: PortNum) -> str:
+    workers = conc.ThreadPool(4, 8)
+    clients = conc.ThreadPool(4, 8)
+    c1 = clients.submit(() => fetch(port))
+    c2 = clients.submit(() => fetch(port))
+    c3 = clients.submit(() => fetch(port))
+    c4 = clients.submit(() => fetch(port))
+
+    accepted: Count = 0
+    round: Count = 0
+    while round < 4:
+        invariant: accepted <= round
+        decreases: 4 - round
+        match ln.accept(timeout_ms=3000):
+            Ok(conn) ->
+                _ = workers.submit(() => handle(own conn))
+                accepted += 1
+            Err(e) -> print(f"accept failed: {e}")
+        round += 1
+
+    r1 = c1.await()
+    r2 = c2.await()
+    r3 = c3.await()
+    r4 = c4.await()
+    ok = tally(r1) + tally(r2) + tally(r3) + tally(r4)
+    clients.shutdown()
+    workers.shutdown()
+    return f"accepted={accepted} ok={ok}"
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            summary = serve(ln, ln.port())
+            ln.close()
+            print(f"concurrent_http {summary}")
+            return 0
+        Err(e) -> print(f"listen failed: {e}")
+    return 1

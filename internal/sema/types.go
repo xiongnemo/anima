@@ -212,6 +212,7 @@ func (t *ADTType) Equals(o Type) bool {
 type FuncParamInfo struct {
 	Name string
 	Mut  bool
+	Own  bool
 	Type Type
 }
 
@@ -226,6 +227,8 @@ func (t *FuncType) String() string {
 	for _, p := range t.Params {
 		if p.Mut {
 			ps = append(ps, "mut "+p.Type.String())
+		} else if p.Own {
+			ps = append(ps, "own "+p.Type.String())
 		} else {
 			ps = append(ps, p.Type.String())
 		}
@@ -270,6 +273,25 @@ func (t *HandleType) String() string {
 func (t *HandleType) Equals(o Type) bool {
 	oh, ok := o.(*HandleType)
 	return ok && oh.Name == t.Name
+}
+
+// LinearHandle returns the handle type whose ownership the typestate checker
+// tracks, or nil. wrapped is true when ty is a Result/Option carrying it.
+func LinearHandle(ty Type) (ht *HandleType, wrapped bool) {
+	switch t := ty.(type) {
+	case *HandleType:
+		switch t.Name {
+		case "sock.TcpListener", "sock.TcpStream", "fs.File":
+			return t, false
+		}
+	case *ADTType:
+		if (t.Name == "Result" || t.Name == "Option") && len(t.TypeArgs) > 0 {
+			if h, w := LinearHandle(t.TypeArgs[0]); h != nil && !w {
+				return h, true
+			}
+		}
+	}
+	return nil, false
 }
 
 type PortType struct {

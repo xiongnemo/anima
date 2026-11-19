@@ -24,19 +24,27 @@ def aggregate_quotes(quotes: list[UpstreamQuote, cap=8]) -> FetchState:
             total = valid |> map(q => q.score) |> fold(0, (a, b) => a + b)
             return Fresh(score=total / n)
 
+# A borrowed connection may use `?`: its owner closes it on every path.
+def ping(conn: sock.TcpStream) -> Result[str, str]:
+    _ = conn.send_text("PING")?
+    return conn.recv_text(128)
+
 def run_tcp_client(port: PortNum) -> Result[str, str]:
     conn = sock.connect_tcp("127.0.0.1", port)?
-    _ = conn.send_text("PING")?
-    reply = conn.recv_text(128)?
+    reply = ping(conn)
     conn.close()
-    return Ok(reply)
+    return reply
+
+def echo(conn: sock.TcpStream) -> Result[str, str]:
+    msg = conn.recv_text(128)?
+    _ = conn.send_text("ACK:" + msg)?
+    return Ok(msg)
 
 def handle_echo_server(ln: sock.TcpListener) -> Result[str, str]:
     conn = ln.accept(timeout_ms=3000)?
-    msg = conn.recv_text(128)?
-    _ = conn.send_text("ACK:" + msg)?
+    msg = echo(conn)
     conn.close()
-    return Ok(msg)
+    return msg
 
 def main() -> int:
     # 1. Functional pipeline + SMT-verified division + exhaustive ADT match

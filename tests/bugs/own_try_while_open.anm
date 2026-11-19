@@ -1,0 +1,8 @@
+import std.socket as sock
+
+# If send_text fails, `?` returns with conn still open.
+def serve() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 9)?
+    _ = conn.send_text("PING")?
+    conn.close()
+    return Ok(0)

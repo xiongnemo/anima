@@ -28,8 +28,8 @@ func TestE2EAllExamplesDualBackendParityAndExports(t *testing.T) {
 	animaBin := buildCLI(t, tmp)
 
 	examples, err := filepath.Glob("../examples/*.anm")
-	if err != nil || len(examples) != 5 {
-		t.Fatalf("expected 5 flagship examples, got %v (err=%v)", examples, err)
+	if err != nil || len(examples) != 6 {
+		t.Fatalf("expected 6 flagship examples, got %v (err=%v)", examples, err)
 	}
 
 	for _, ex := range examples {
@@ -108,6 +108,15 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/lts_livelock_progress.anm", "PROGRESS"},
 		{"../tests/bugs/socket_leak.anm", "resource handle leak"},
 		{"../tests/bugs/socket_use_after_close.anm", "use-after-close"},
+		{"../tests/bugs/own_param_never_closed.anm", "resource handle leak"},
+		{"../tests/bugs/own_use_after_move.anm", "after it was moved"},
+		{"../tests/bugs/own_alias_use_after_close.anm", "after it was moved"},
+		{"../tests/bugs/own_try_while_open.anm", "`?` may return early"},
+		{"../tests/bugs/own_branch_mismatch.anm", "every path must leave it in the same state"},
+		{"../tests/bugs/own_borrowed_closed.anm", "is borrowed"},
+		{"../tests/bugs/own_stream_shared_with_task.anm", "cannot be shared with a task"},
+		{"../tests/bugs/own_listener_closed_while_lent.anm", "while a task may still be using"},
+		{"../tests/bugs/own_stored_in_entity.anm", "cannot hold"},
 		{"../tests/bugs/petri_fork_merge_improper.anm", "IMPROPER COMPLETION"},
 		{"../tests/bugs/petri_choice_join_deadlock.anm", "OPTION TO COMPLETE"},
 		{"../tests/bugs/petri_pool_leak.anm", "IMPROPER COMPLETION"},

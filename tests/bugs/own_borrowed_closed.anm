@@ -1,0 +1,6 @@
+import std.socket as sock
+
+# conn is borrowed: the caller still owns it and will use or close it.
+def peek(conn: sock.TcpStream) -> int:
+    conn.close()
+    return 0

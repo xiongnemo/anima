@@ -1,0 +1,5 @@
+import std.socket as sock
+
+# An `own` parameter makes the callee responsible for the connection.
+def handle(own conn: sock.TcpStream) -> int:
+    return 0

@@ -1,0 +1,5 @@
+import std.socket as sock
+
+entity Peer:
+    name: str
+    conn: sock.TcpStream

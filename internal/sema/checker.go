@@ -326,7 +326,12 @@ func (c *checker) checkProgram() error {
 				if err != nil {
 					return err
 				}
-				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
+				if p.Own {
+					if h, wrapped := LinearHandle(pt); h == nil || wrapped {
+						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, fs.File), got %s", p.Span, p.Name, pt)
+					}
+				}
+				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})
 			}
 			var ret Type = VoidType{}
 			if node.ReturnType != nil {
@@ -346,6 +351,9 @@ func (c *checker) checkProgram() error {
 				pt, err := c.resolveTypeExpr(p.Type)
 				if err != nil {
 					return err
+				}
+				if p.Own {
+					return fmt.Errorf("%s: workflow parameter %s cannot be 'own'", p.Span, p.Name)
 				}
 				wf.Params = append(wf.Params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
 			}
@@ -1366,6 +1374,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if wi.Params[i].Mut && !arg.Mut {
 				return nil, fmt.Errorf("%s: argument %d to workflow %s must be marked 'mut'", arg.Span, i+1, e.Name)
 			}
+			if arg.Own {
+				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
+			}
 			if !isAssignable(wi.Params[i].Type, at) {
 				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
@@ -1523,6 +1534,16 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 					}
 				} else if a.Mut {
 					return nil, fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, i+1, id.Name)
+				}
+				if fi.Type.Params[i].Own {
+					if !a.Own {
+						return nil, fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, id.Name)
+					}
+					if _, ok := a.Value.(*ast.Ident); !ok {
+						return nil, fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
+					}
+				} else if a.Own {
+					return nil, fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, i+1, id.Name)
 				}
 				if !isAssignable(fi.Type.Params[i].Type, at) {
 					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
@@ -1905,7 +1926,7 @@ func (c *checker) funcSigToType(sig ast.FuncSig) (*FuncType, error) {
 		if err != nil {
 			return nil, err
 		}
-		ps = append(ps, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
+		ps = append(ps, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})
 	}
 	ret := Type(VoidType{})
 	if sig.ReturnType != nil {

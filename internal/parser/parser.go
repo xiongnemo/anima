@@ -675,6 +675,12 @@ func (p *Parser) parsePortDecl() (*ast.PortDecl, error) {
 	return port, nil
 }
 
+// atOwn reports whether the parser is at the contextual keyword `own`, which
+// is only a keyword when directly followed by a name (`own conn`).
+func (p *Parser) atOwn() bool {
+	return p.at(lexer.TokIdent) && p.cur().Text == "own" && p.peek(1).Kind == lexer.TokIdent
+}
+
 func (p *Parser) parseParamList() ([]ast.Param, error) {
 	if _, err := p.expect(lexer.TokLParen); err != nil {
 		return nil, err
@@ -682,6 +688,10 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 	var params []ast.Param
 	for !p.at(lexer.TokRParen) {
 		isMut := p.match(lexer.TokMut)
+		isOwn := !isMut && p.atOwn()
+		if isOwn {
+			p.advance()
+		}
 		pTok, err := p.expectIdent()
 		if err != nil {
 			return nil, err
@@ -693,7 +703,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 		if err != nil {
 			return nil, err
 		}
-		params = append(params, ast.Param{Span: pTok.Span, Mut: isMut, Name: pTok.Text, Type: pty})
+		params = append(params, ast.Param{Span: pTok.Span, Mut: isMut, Own: isOwn, Name: pTok.Text, Type: pty})
 		if !p.match(lexer.TokComma) {
 			break
 		}
@@ -2546,6 +2556,13 @@ func (p *Parser) parseCallArgs() ([]ast.CallArg, error) {
 				return nil, err
 			}
 			args = append(args, ast.CallArg{Span: aSpan, Mut: true, Value: val})
+		} else if p.atOwn() {
+			p.advance()
+			val, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, ast.CallArg{Span: aSpan, Own: true, Value: val})
 		} else if p.at(lexer.TokIdent) && p.peek(1).Kind == lexer.TokAssign {
 			name := p.advance().Text
 			p.advance() // =
