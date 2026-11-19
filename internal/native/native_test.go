@@ -82,16 +82,18 @@ def main() -> int:
     resps = req.gather([f1, f2])
     sess.close()
 
-    good_count = 0
+    good_count: int[0..1000] = 0
     for r in resps:
         match r:
             Ok(resp) ->
                 match json.decode[Quote](resp.body):
-                    Ok(q) -> good_count += q.score
+                    Ok(q) ->
+                        if good_count <= 900:
+                            good_count += q.score
                     Err(e) -> good_count += 0
             Err(e) -> good_count += 0
 
-    ch = conc.Channel[int](cap=4)
+    ch = conc.Channel[int[0..100]](cap=4)
     pool = conc.ThreadPool(2, 8)
     fut = pool.submit(() => ch.send(7))
     _ = fut.await()

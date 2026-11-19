@@ -98,6 +98,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		wantSub string
 	}{
 		{"../tests/bugs/spark_overflow.anm", "SPARK FAILED"},
+		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
@@ -171,12 +172,14 @@ def main() -> int:
     f2 = sess.get_async("%s/bad", timeout_ms=2000)
     resps = req.gather([f1, f2])
     sess.close()
-    total = 0
+    total: int[0..1000] = 0
     for r in resps:
         match r:
             Ok(resp) ->
                 match json.decode[Quote](resp.body):
-                    Ok(q) -> total += q.score
+                    Ok(q) ->
+                        if total <= 900:
+                            total += q.score
                     Err(e) -> total += 0
             Err(e) -> total += 0
     print(f"http_total={total}")

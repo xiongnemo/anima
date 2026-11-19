@@ -1,6 +1,7 @@
 package smt
 
 import (
+	"math"
 	"math/big"
 	"sort"
 )
@@ -97,13 +98,19 @@ func solveLIA_BnB(tagged []TaggedAtom, budget *int) LIAResult {
 	if fracVar == "" {
 		intModel := make(map[string]int64, len(qModel))
 		for k, r := range qModel {
+			if !r.Num().IsInt64() {
+				return LIAResult{Status: LIAUnknown, Explain: "model value exceeds 64 bits"}
+			}
 			intModel[k] = r.Num().Int64()
 		}
 		return LIAResult{Status: LIASat, Model: intModel}
 	}
 
 	// Branch on fracVar <= floor(val) OR fracVar >= ceil(val)
-	fl := ratFloor(fracVal)
+	fl, ok := ratFloor(fracVal)
+	if !ok || fl == math.MaxInt64 {
+		return LIAResult{Status: LIAUnknown, Explain: "branch bound exceeds 64 bits"}
+	}
 	ce := fl + 1
 
 	left := make([]TaggedAtom, len(tagged)+1)
@@ -139,10 +146,9 @@ func solveLIA_BnB(tagged []TaggedAtom, budget *int) LIAResult {
 	return LIAResult{Status: LIAUnknown, Explain: explain}
 }
 
-func ratFloor(r *big.Rat) int64 {
-	var q, rem big.Int
-	q.DivMod(r.Num(), r.Denom(), &rem)
-	return q.Int64()
+func ratFloor(r *big.Rat) (int64, bool) {
+	q := new(big.Int).Div(r.Num(), r.Denom())
+	return q.Int64(), q.IsInt64()
 }
 
 func mergeCore(a, b []int) []int {
@@ -249,8 +255,7 @@ func solveSimplexModel(tagged []TaggedAtom) (LIAResult, map[string]*big.Rat) {
 					reasonU[vi] = ta.LitID
 				}
 			} else {
-				lb := -floorDiv(ta.Atom.Bound, -coef)
-				r := big.NewRat(lb, 1)
+				r := new(big.Rat).SetInt(new(big.Int).Neg(big.NewInt(floorDiv(ta.Atom.Bound, -coef))))
 				if !hasL[vi] || r.Cmp(lo[vi]) > 0 {
 					hasL[vi] = true
 					lo[vi] = r
@@ -280,6 +285,9 @@ func solveSimplexModel(tagged []TaggedAtom) (LIAResult, map[string]*big.Rat) {
 		intModel := make(map[string]int64, numProb)
 		for i, name := range probVars {
 			outModel[name] = new(big.Rat).Set(val[i])
+			if !val[i].Num().IsInt64() {
+				return LIAResult{Status: LIAUnknown, Explain: "model value exceeds 64 bits"}, nil
+			}
 			intModel[name] = val[i].Num().Int64()
 		}
 		return LIAResult{Status: LIASat, Model: intModel}, outModel

@@ -36,7 +36,14 @@ func MulInterval(a, b Interval) Interval {
 	if !a.HasLo || !a.HasHi || !b.HasLo || !b.HasHi {
 		return Interval{}
 	}
-	prods := []int64{a.Lo * b.Lo, a.Lo * b.Hi, a.Hi * b.Lo, a.Hi * b.Hi}
+	var prods []int64
+	for _, pair := range [][2]int64{{a.Lo, b.Lo}, {a.Lo, b.Hi}, {a.Hi, b.Lo}, {a.Hi, b.Hi}} {
+		p, ok := mulChecked(pair[0], pair[1])
+		if !ok {
+			return Interval{}
+		}
+		prods = append(prods, p)
+	}
 	lo, hi := prods[0], prods[0]
 	for _, p := range prods[1:] {
 		if p < lo {
@@ -125,6 +132,10 @@ func OctagonAnalyze(atoms []LinearAtom) (unsat bool, explain string, bounds map[
 
 	usedOct := 0
 	for _, a := range atoms {
+		// Dropping a constraint can only lose an UNSAT answer; keep the closure far from 64-bit wraparound.
+		if a.Bound <= -octInf/4 || a.Bound >= octInf/4 {
+			continue
+		}
 		var nz []string
 		for k, c := range a.Coeffs {
 			if c != 0 {
@@ -246,6 +257,10 @@ func octSafeAdd(a, b int64) int64 {
 	}
 	if a > 0 && b > octInf-a {
 		return octInf
+	}
+	// A weight below the true one would be a stronger constraint than the atoms imply.
+	if a < 0 && b < -octInf-a {
+		return -octInf
 	}
 	return a + b
 }

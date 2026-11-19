@@ -1,0 +1,13 @@
+# The proof reasons over unbounded integers; the VM and the native backend compute in int64.
+# 4_000_000_000 * 4_000_000_000 wraps to a negative number at run time, so `result >= 0`
+# only holds if the multiplication is first shown to stay inside 64 bits.
+type Big = int[0..4_000_000_000]
+
+def scale(x: Big) -> int:
+    ensures: result >= 0
+    return x * 4_000_000_000
+
+def main() -> int:
+    r = scale(4_000_000_000)
+    print(f"r={r}")
+    return 0
