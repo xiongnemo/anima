@@ -1595,6 +1595,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		// User ADT variant constructor
 		if adt, ok := c.info.Variants[id.Name]; ok {
 			vi := adt.VariantMap[id.Name]
+			if len(e.Args) < len(vi.Fields) {
+				return nil, fmt.Errorf("%s: %s has %d field(s), got %d arguments", e.Span, id.Name, len(vi.Fields), len(e.Args))
+			}
 			for i, a := range e.Args {
 				at, err := c.checkExpr(a.Value, sc)
 				if err != nil {
