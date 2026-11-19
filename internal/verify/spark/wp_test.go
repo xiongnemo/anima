@@ -956,14 +956,15 @@ func TestSPARKMutCallAssumesEnsures(t *testing.T) {
 // the order of its reads and the call never decides a result.
 func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 	rejected := map[string]string{
-		"read beside the call":  "    y = s.n + five(mut s)\n    return 0",
-		"compound assignment":   "    s.n += five(mut s)\n    return 0",
-		"two calls":             "    y = five(mut s) + five(mut s)\n    return 0",
-		"guard before the call": "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
-		"field assignment":      "    s.n = five(mut s)\n    return 0",
-		"read inside a lambda":  "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
-		"condition of an if":    "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
-		"condition of a while":  "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"read beside the call":            "    y = s.n + five(mut s)\n    return 0",
+		"compound assignment":             "    s.n += five(mut s)\n    return 0",
+		"two calls":                       "    y = five(mut s) + five(mut s)\n    return 0",
+		"guard before the call":           "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
+		"field assignment":                "    s.n = five(mut s)\n    return 0",
+		"read inside a lambda":            "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
+		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
+		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
+		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
 	}
 	for name, body := range rejected {
 		if failed := mutCallVCs(t, body); !strings.Contains(failed, "mut_call_alone") {
@@ -971,12 +972,13 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		}
 	}
 	accepted := map[string]string{
-		"statement":               "    y = five(mut s)\n    return 0",
-		"operand":                 "    y = 1 + five(mut s)\n    return 0",
-		"condition":               "    if clear(mut s) and a:\n        return 1\n    return 0",
-		"next statement reads":    "    y = five(mut s)\n    z = s.n + y\n    return 0",
-		"while with invariant":    "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
-		"two different variables": "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"statement":                          "    y = five(mut s)\n    return 0",
+		"operand":                            "    y = 1 + five(mut s)\n    return 0",
+		"condition":                          "    if clear(mut s) and a:\n        return 1\n    return 0",
+		"guard of a match on something else": "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
+		"next statement reads":               "    y = five(mut s)\n    z = s.n + y\n    return 0",
+		"while with invariant":               "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
+		"two different variables":            "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
 	}
 	for name, body := range accepted {
 		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {
