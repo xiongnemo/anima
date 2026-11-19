@@ -749,7 +749,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			hasElse = true
 			continue
 		}
-		v.checkMutCalls([]ast.Expr{br.Guard}, scope, cn.Span)
+		v.checkMutCalls([]ast.Expr{br.Guard}, env, scope, cn.Span)
 		v.checkMutCaptures([]ast.Expr{br.Guard}, scope, cn.Span)
 		v.checkArith(br.Guard, env, scope)
 		v.evalSideEffects(br.Guard, env, scope)
@@ -787,7 +787,7 @@ func (v *verifier) execBlock(stmts []ast.Stmt, env *symEnv, scope string) bool {
 func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	groups := stmtExprGroups(stmt)
 	for _, g := range groups {
-		v.checkMutCalls(g, scope, stmt.GetSpan())
+		v.checkMutCalls(g, env, scope, stmt.GetSpan())
 		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)

@@ -424,7 +424,12 @@ func stmtExprGroups(stmt ast.Stmt) [][]ast.Expr {
 // checkMutCalls requires that a variable passed as mut in exprs, the
 // expressions of one statement, is passed by a single call and appears
 // nowhere else in them except among that call's own arguments.
-func (v *verifier) checkMutCalls(exprs []ast.Expr, scope string, span ast.Span) {
+//
+// The kernel reads the statement in the state its calls leave. So what a
+// callee may write is not read elsewhere in the statement under another
+// name either: when the variable passed as mut may be reached through
+// another name, no other such variable appears outside that call.
+func (v *verifier) checkMutCalls(exprs []ast.Expr, env *symEnv, scope string, span ast.Span) {
 	owner := map[string]ast.Expr{}
 	var roots []string
 	clash := ""
@@ -462,6 +467,26 @@ func (v *verifier) checkMutCalls(exprs []ast.Expr, scope string, span ast.Span) 
 	}
 	name := scope + ".mut_call_alone"
 	formula := "a variable passed as mut is not used elsewhere in the statement"
+	if clash == "" {
+		for _, root := range roots {
+			if !env.shared[root] {
+				continue
+			}
+			for _, other := range sortedKeys(env.shared) {
+				if other == root {
+					continue
+				}
+				for _, x := range exprs {
+					if mentionsOutside(reflect.ValueOf(x), other, owner[root]) {
+						v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
+							"%q is passed as mut and may be reached through %q, which is used elsewhere in this statement; "+
+								"put the call in a statement of its own", root, other), nil)
+						return
+					}
+				}
+			}
+		}
+	}
 	if clash != "" {
 		v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
 			"%q is passed as mut and also used elsewhere in this statement; "+

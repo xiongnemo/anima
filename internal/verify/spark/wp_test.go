@@ -972,6 +972,12 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
 		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
 		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		// The same entity under another name.
+		"read under another name":       "    t = s\n    if s.n == 0 or clear(mut t):\n        return 1\n    return 10 / s.n",
+		"another name beside the call":  "    t = s\n    y = s.n + five(mut t)\n    return 0",
+		"field assignment by an alias":  "    t = s\n    s.n = five(mut t)\n    return 0",
+		"another name inside a lambda":  "    t = s\n    ys = xs |> map(x => s.n + five(mut t))\n    return 0",
+		"another name in a match guard": "    t = s\n    match s.n:\n        5 if clear(mut t) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
 	}
 	for name, body := range rejected {
 		if failed := mutCallVCs(t, body); !strings.Contains(failed, "mut_call_alone") {
@@ -979,13 +985,15 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		}
 	}
 	accepted := map[string]string{
-		"statement":                          "    y = five(mut s)\n    return 0",
-		"operand":                            "    y = 1 + five(mut s)\n    return 0",
-		"condition":                          "    if clear(mut s) and a:\n        return 1\n    return 0",
-		"guard of a match on something else": "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
-		"next statement reads":               "    y = five(mut s)\n    z = s.n + y\n    return 0",
-		"while with invariant":               "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
-		"two different variables":            "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"statement":                            "    y = five(mut s)\n    return 0",
+		"operand":                              "    y = 1 + five(mut s)\n    return 0",
+		"condition":                            "    if clear(mut s) and a:\n        return 1\n    return 0",
+		"guard of a match on something else":   "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
+		"next statement reads":                 "    y = five(mut s)\n    z = s.n + y\n    return 0",
+		"while with invariant":                 "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
+		"two different variables":              "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"another name, a statement of its own": "    t = s\n    y = five(mut t)\n    z = s.n + y\n    return 0",
+		"another name, an unrelated variable":  "    t = s\n    u = S(n=1)\n    y = u.n + five(mut t)\n    return 0",
 	}
 	for name, body := range accepted {
 		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {
@@ -3592,6 +3600,17 @@ def gt(b: T, c: T) -> int:
 		"a loop":       "def f(mut m: map[str, int[1..9]], ks: list[str]) -> int:\n    if not (\"z\" in m):\n        for k in ks:\n            m[k] = 1\n        if \"z\" in m:\n            return 10 / 0\n    return 0\n",
 		"a field":      "def f() -> int:\n    m: map[str, int[1..9]] = {\"b\": 1}\n    b = T(tbl=m)\n    if not (\"z\" in b.tbl):\n        m[\"z\"] = 1\n        if \"z\" in b.tbl:\n            return 10 / 0\n    return 0\n",
 		"an int key":   "def f(mut mi: map[int, int[1..9]], i: int, j: int) -> int:\n    if not (i in mi):\n        mi[j] = 1\n        if i in mi:\n            return 10 / 0\n    return 0\n",
+	}
+	// A callee that is given the entity under another name may put another
+	// map in the field, or a key in the map, while the statement is read.
+	alone := map[string]string{
+		"an insertion into the field it replaces": "def one(mut b: T) -> int[1..9]:\n    e: map[str, int[1..9]] = {}\n    b.tbl = e\n    return 1\n\ndef f(mut b: T) -> int:\n    c = b\n    b.tbl[\"a\"] = one(mut c)\n    return 10 / b.tbl[\"a\"]\n",
+		"a condition before an insertion":         "def no(mut m: map[str, int[1..9]]) -> bool:\n    m[\"a\"] = 1\n    return False\n\ndef f(mut m: map[str, int[1..9]]) -> int:\n    m2 = m\n    c = \"a\" in m or no(mut m2)\n    if not c:\n        if \"a\" in m:\n            return 10 / 0\n    return 1\n",
+	}
+	for name, src := range alone {
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, "mut_call_alone") {
+			t.Errorf("%s: expected a failed mut_call_alone, failed VCs:\n%s", name, failed)
+		}
 	}
 	for name, src := range reached {
 		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, "div_nonzero") {

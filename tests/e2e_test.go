@@ -144,6 +144,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_index_through_field.anm", "index_bounds"},
 		{"../tests/bugs/spark_string_index.anm", "index_bounds"},
 		{"../tests/bugs/spark_map_missing_key.anm", "key_present"},
+		{"../tests/bugs/spark_mut_call_through_alias.anm", "mut_call_alone"},
 		{"../tests/bugs/spark_element_write_out_of_range.anm", "index_bounds"},
 		{"../tests/bugs/spark_index_of_unnamed_list.anm", "give it a name first"},
 		{"../tests/bugs/spark_stale_field_length.anm", "index_bounds"},

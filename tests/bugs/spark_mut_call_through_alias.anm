@@ -1,0 +1,19 @@
+# The kernel reads a statement in the state its calls leave. A callee given
+# the entity under another name wrote the field the condition had read.
+entity B:
+    n: int
+
+def zero(mut b: B) -> bool:
+    b.n = 0
+    return False
+
+def f(mut b: B) -> int:
+    c = b
+    if b.n == 0 or zero(mut c):
+        return 1
+    return 10 / b.n
+
+def main() -> int:
+    b = B(n=5)
+    print(f(mut b))
+    return 0
