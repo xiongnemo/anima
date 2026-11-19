@@ -705,6 +705,14 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 			g.line("AnimaVal %s = v_entity_get(%s, %s);", curF, objC, cEscapeStr(tgt.Field))
 			rhsC := g.emitExpr(s.Value)
 			g.line("v_entity_set(%s, %s, v_int(%s.u.i %s (%s).u.i));", objC, cEscapeStr(tgt.Field), curF, opSym, rhsC)
+		case *ast.IndexExpr:
+			lC := g.emitExpr(tgt.List)
+			iC := g.emitExpr(tgt.Index)
+			inRange := fmt.Sprintf("(%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len)", lC, lC, iC, iC, lC)
+			cur := g.freshTmp("elem")
+			g.line("AnimaVal %s = %s ? %s.u.list->items[(%s).u.i] : v_none();", cur, inRange, lC, iC)
+			rhsC := g.emitExpr(s.Value)
+			g.line("if %s { %s.u.list->items[(%s).u.i] = v_int(%s.u.i %s (%s).u.i); }", inRange, lC, iC, cur, opSym, rhsC)
 		}
 
 	case *ast.FieldAssignStmt:

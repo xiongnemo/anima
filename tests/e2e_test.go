@@ -271,6 +271,10 @@ def yes(tag: str) -> bool:
     print(tag)
     return True
 
+def zero(tag: str) -> int[0..0]:
+    print(tag)
+    return 0
+
 def fail(tag: str) -> Result[bool, str]:
     print(tag)
     return Err(tag)
@@ -346,6 +350,9 @@ def main() -> int:
     ch = conc.Channel[int[0..9]](cap=capacity(mut box))
     ch.close()
     print(f"cap box={box.v}")
+    ys: list[int[0..100]] = [5, 6]
+    ys[0] += zero("index-rhs")
+    print(f"ys0={ys[0]}")
     return 0
 `
 
@@ -371,6 +378,8 @@ reset
 total=6 after=0
 capacity
 cap box=2
+index-rhs
+ys0=5
 `
 
 const movedThenTrySrc = `import std.socket as sock
