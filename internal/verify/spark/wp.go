@@ -665,6 +665,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Index, env, scope)
 		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
+		v.evalSideEffects(s.Value, env, scope)
 
 	case *ast.CallStmt:
 		if s.Call != nil {
@@ -1059,6 +1060,18 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	switch e := expr.(type) {
 	case *ast.BinaryExpr:
 		v.evalSideEffects(e.Left, env, scope)
+		switch e.Op {
+		case "and", "implies", "or":
+			// The right operand only runs when the left one does not decide the result.
+			rEnv := env.clone()
+			left := v.evalBool(e.Left, rEnv, scope)
+			if e.Op == "or" {
+				left = smt.Not(left)
+			}
+			rEnv.assume(left)
+			v.evalSideEffects(e.Right, rEnv, scope)
+			return
+		}
 		v.evalSideEffects(e.Right, env, scope)
 		if e.Op == "/" || e.Op == "%" {
 			den := v.evalInt(e.Right, env, scope, true)

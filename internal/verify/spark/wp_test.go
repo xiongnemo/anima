@@ -740,3 +740,45 @@ def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
 		}
 	}
 }
+
+// A division is only checked on the paths that evaluate it: the right operand
+// of and/or/implies runs only when the left one does not decide the result.
+func TestSPARKDivisionUnderShortCircuitAndInElementWrites(t *testing.T) {
+	cases := []struct {
+		name, src string
+		wantFail  bool
+	}{
+		{"guarded by and", `
+def f(n: int[0..3]) -> bool:
+    ok = n != 0 and 10 / n > 1
+    return ok
+`, false},
+		{"guarded by or", `
+def f(n: int[0..3]) -> bool:
+    ok = n == 0 or 10 / n > 1
+    return ok
+`, false},
+		{"or with the wrong guard", `
+def f(n: int[0..3]) -> bool:
+    bad = n != 0 or 10 / n > 1
+    return bad
+`, true},
+		{"value written to a map", `
+def f(mut m: map[str, int], n: int[0..3]) -> int:
+    m["k"] = 10 / n
+    return 0
+`, true},
+		{"value added to a list element", `
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    if len(xs) > 1:
+        xs[0] += 9 / n
+    return 0
+`, true},
+	}
+	for _, c := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n")
+		if got := strings.Contains(failed, "div_nonzero"); got != c.wantFail {
+			t.Errorf("%s: div_nonzero failed = %v, want %v; failed VCs:\n%s", c.name, got, c.wantFail, failed)
+		}
+	}
+}
