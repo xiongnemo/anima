@@ -860,6 +860,17 @@ func (g *cgen) emitMatchArms(subject ast.Expr, n int, arm func(i int) (ast.Patte
 		pat, guard := arm(i)
 		g.line("if (!%s && %s) {", done, g.emitPatternCond(pat, subjTmp))
 		g.indent++
+		// An arm whose guard fails binds nothing: its names get their
+		// values back.
+		var restore []string
+		if guard != nil {
+			for _, name := range patternNames(pat) {
+				dst := g.ensureVarDeclared(name)
+				sv := g.freshTmp("msave")
+				g.line("AnimaVal %s = %s;", sv, dst)
+				restore = append(restore, fmt.Sprintf("%s = %s;", dst, sv))
+			}
+		}
 		g.emitPatternBinds(pat, subjTmp)
 		if guard != nil {
 			guardC := g.emitExpr(guard)
@@ -871,6 +882,12 @@ func (g *cgen) emitMatchArms(subject ast.Expr, n int, arm func(i int) (ast.Patte
 			return err
 		}
 		if guard != nil {
+			g.indent--
+			g.line("} else {")
+			g.indent++
+			for k := len(restore) - 1; k >= 0; k-- {
+				g.line("%s", restore[k])
+			}
 			g.indent--
 			g.line("}")
 		}
@@ -917,6 +934,21 @@ func (g *cgen) emitPatternCond(pat ast.Pattern, subj string) string {
 		return "(" + cond + ")"
 	}
 	return "true"
+}
+
+// patternNames lists the names pat binds.
+func patternNames(pat ast.Pattern) []string {
+	switch p := pat.(type) {
+	case *ast.VarPat:
+		return []string{p.Name}
+	case *ast.VariantPat:
+		var out []string
+		for _, sub := range p.Fields {
+			out = append(out, patternNames(sub)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {

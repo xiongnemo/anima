@@ -479,6 +479,53 @@ def main() -> int:
     return 0
 `
 
+// An arm that is not taken binds nothing: neither a pattern that fails
+// after one of its names was reached, nor one whose guard fails.
+func TestE2EUntakenArmBindsNothing(t *testing.T) {
+	runOnBothBackends(t, "untaken_arm", untakenArmSrc, "2 2 2\n7\n5\n300\n7 5 300\n")
+}
+
+const untakenArmSrc = `type P = Pair(a: int, b: int) | Zed
+
+def later_field(p: P) -> int:
+    x = 5
+    match p:
+        Pair(x, 0) -> return 1
+        _ -> return 10 / x
+
+def later_field_expr(p: P) -> int:
+    x = 5
+    y = match p:
+        Pair(x, 0) -> 1
+        _ -> 10 / x
+    return y
+
+def guard(n: int) -> int:
+    x = 5
+    match n:
+        x if x > 100 -> return 1
+        _ -> return 10 / x
+
+def taken(p: P) -> int:
+    x = 5
+    match p:
+        Pair(x, _) -> print(x)
+        Zed -> print(2)
+    return x
+
+def guarded(n: int) -> int:
+    x = 5
+    match n:
+        x if x > 100 -> print(x)
+        _ -> print(x)
+    return x
+
+def main() -> int:
+    print(f"{later_field(Pair(0, 1))} {later_field_expr(Pair(0, 1))} {guard(0)}")
+    print(f"{taken(Pair(7, 1))} {guarded(3)} {guarded(300)}")
+    return 0
+`
+
 // Reading from a connection the peer has closed is an error on both backends.
 func TestE2ERecvAtEOFParity(t *testing.T) {
 	runOnBothBackends(t, "recv_eof", recvEOFSrc, "bye / error: EOF\n")

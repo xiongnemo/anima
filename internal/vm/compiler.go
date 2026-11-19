@@ -718,33 +718,17 @@ func (f *fnCompiler) compileStmt(stmt ast.Stmt) error {
 		f.emit(EncodeImm(OpStoreLocal, uint32(subjSlot)), s.Span.Line)
 		var endJumps []int
 		for _, arm := range s.Arms {
-			if err := f.compilePatternCheck(arm.Pattern, subjSlot, arm.Span.Line); err != nil {
+			notTaken, err := f.compileArmHead(arm.Pattern, arm.Guard, subjSlot, arm.Span.Line)
+			if err != nil {
 				return err
 			}
-			if arm.Guard != nil {
-				jfPat := f.emitJump(OpJmpIfFalse, arm.Span.Line)
-				if err := f.compileExpr(arm.Guard); err != nil {
+			for _, st := range arm.Body {
+				if err := f.compileStmt(st); err != nil {
 					return err
 				}
-				jfGuard := f.emitJump(OpJmpIfFalse, arm.Span.Line)
-				for _, st := range arm.Body {
-					if err := f.compileStmt(st); err != nil {
-						return err
-					}
-				}
-				endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
-				f.patchJump(jfPat)
-				f.patchJump(jfGuard)
-			} else {
-				jf := f.emitJump(OpJmpIfFalse, arm.Span.Line)
-				for _, st := range arm.Body {
-					if err := f.compileStmt(st); err != nil {
-						return err
-					}
-				}
-				endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
-				f.patchJump(jf)
 			}
+			endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
+			notTaken()
 		}
 		for _, ej := range endJumps {
 			f.patchJump(ej)
@@ -770,14 +754,64 @@ func (f *fnCompiler) compileStmt(stmt ast.Stmt) error {
 	return nil
 }
 
-func (f *fnCompiler) compilePatternCheck(pat ast.Pattern, subjSlot int, line int) error {
+// patBind is a name a pattern binds and the slot that holds its value once
+// the pattern has matched.
+type patBind struct {
+	name string
+	from int
+}
+
+// compileArmHead emits the test of a match arm: it falls through into the
+// arm's body with the names of the pattern bound, and jumps past it when the
+// pattern does not match or the guard fails. The caller emits the body and
+// its jump to the end of the match, then calls notTaken. An arm that is not
+// taken binds nothing: the names are assigned only once the whole pattern
+// has matched, and get their values back when the guard fails.
+func (f *fnCompiler) compileArmHead(pat ast.Pattern, guard ast.Expr, subjSlot int, line int) (notTaken func(), err error) {
+	var binds []patBind
+	if err := f.compilePatternCheck(pat, subjSlot, line, &binds); err != nil {
+		return nil, err
+	}
+	jfPat := f.emitJump(OpJmpIfFalse, line)
+	slots := make([]int, len(binds))
+	saved := make([]int, len(binds))
+	for i, b := range binds {
+		slots[i] = f.declareLocal(b.name)
+		if guard != nil {
+			saved[i] = f.newTemp()
+			f.emit(EncodeImm(OpLoadLocal, uint32(slots[i])), line)
+			f.emit(EncodeImm(OpStoreLocal, uint32(saved[i])), line)
+		}
+	}
+	for i, b := range binds {
+		f.emit(EncodeImm(OpLoadLocal, uint32(b.from)), line)
+		f.emit(EncodeImm(OpStoreLocal, uint32(slots[i])), line)
+	}
+	if guard == nil {
+		return func() { f.patchJump(jfPat) }, nil
+	}
+	if err := f.compileExpr(guard); err != nil {
+		return nil, err
+	}
+	jfGuard := f.emitJump(OpJmpIfFalse, line)
+	return func() {
+		f.patchJump(jfGuard)
+		for i := len(binds) - 1; i >= 0; i-- {
+			f.emit(EncodeImm(OpLoadLocal, uint32(saved[i])), line)
+			f.emit(EncodeImm(OpStoreLocal, uint32(slots[i])), line)
+		}
+		f.patchJump(jfPat)
+	}, nil
+}
+
+// compilePatternCheck pushes whether the value in subjSlot matches pat. It
+// assigns no name: binds collects what to bind once the arm is taken.
+func (f *fnCompiler) compilePatternCheck(pat ast.Pattern, subjSlot int, line int, binds *[]patBind) error {
 	switch p := pat.(type) {
 	case *ast.WildcardPat:
 		f.emit(EncodeABC(OpPushBool, 1, 0), line)
 	case *ast.VarPat:
-		f.emit(EncodeImm(OpLoadLocal, uint32(subjSlot)), line)
-		slot := f.declareLocal(p.Name)
-		f.emit(EncodeImm(OpStoreLocal, uint32(slot)), line)
+		*binds = append(*binds, patBind{name: p.Name, from: subjSlot})
 		f.emit(EncodeABC(OpPushBool, 1, 0), line)
 	case *ast.IntPat:
 		f.emit(EncodeImm(OpLoadLocal, uint32(subjSlot)), line)
@@ -818,9 +852,9 @@ func (f *fnCompiler) compilePatternCheck(pat ast.Pattern, subjSlot int, line int
 				f.emit(EncodeImm(OpExtractField, uint32(i)), line)
 				// A fresh slot per field: a nested variant pattern must not
 				// overwrite the value its parent is still reading from.
-				subSlot := f.declareLocal(fmt.Sprintf("__pat_%d", f.proto.NumLocals))
+				subSlot := f.newTemp()
 				f.emit(EncodeImm(OpStoreLocal, uint32(subSlot)), line)
-				if err := f.compilePatternCheck(sub, subSlot, line); err != nil {
+				if err := f.compilePatternCheck(sub, subSlot, line, binds); err != nil {
 					return err
 				}
 				fails = append(fails, f.emitJump(OpJmpIfFalse, line))
@@ -1008,28 +1042,15 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 		f.emit(EncodeImm(OpStoreLocal, uint32(subjSlot)), e.Span.Line)
 		var endJumps []int
 		for _, arm := range e.Arms {
-			if err := f.compilePatternCheck(arm.Pattern, subjSlot, arm.Span.Line); err != nil {
+			notTaken, err := f.compileArmHead(arm.Pattern, arm.Guard, subjSlot, arm.Span.Line)
+			if err != nil {
 				return err
 			}
-			jf := f.emitJump(OpJmpIfFalse, arm.Span.Line)
-			if arm.Guard != nil {
-				if err := f.compileExpr(arm.Guard); err != nil {
-					return err
-				}
-				jf2 := f.emitJump(OpJmpIfFalse, arm.Span.Line)
-				if err := f.compileExpr(arm.Value); err != nil {
-					return err
-				}
-				endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
-				f.patchJump(jf2)
-				f.patchJump(jf)
-			} else {
-				if err := f.compileExpr(arm.Value); err != nil {
-					return err
-				}
-				endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
-				f.patchJump(jf)
+			if err := f.compileExpr(arm.Value); err != nil {
+				return err
 			}
+			endJumps = append(endJumps, f.emitJump(OpJmp, arm.Span.Line))
+			notTaken()
 		}
 		f.emit(EncodeImm(OpPushNone, 0), e.Span.Line)
 		for _, ej := range endJumps {
