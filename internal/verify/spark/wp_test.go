@@ -2401,6 +2401,17 @@ def f(mut o: Outer) -> int:
     h.x = 0
     return 0
 `,
+		"lambda parameter with the name of a function": invariantPrelude + `
+def mk(n: int) -> A:
+    return A(x=5, y=5)
+
+def f() -> int:
+    ys = [1, 2] |> map(mk => mk + 1)
+    b = mk(1)
+    b.x = 6
+    b.y = 4
+    return use(b)
+`,
 		"a ? that cannot return": nested + `
 def f(mut o: Outer) -> Option[int]:
     o.inner.x = 6

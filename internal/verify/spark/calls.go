@@ -137,7 +137,7 @@ func (v *verifier) neverFails(e ast.Expr) bool {
 		return false
 	}
 	id, ok := call.Callee.(*ast.Ident)
-	return ok && (id.Name == "Some" || id.Name == "Ok") && !v.curLocals[id.Name]
+	return ok && (id.Name == "Some" || id.Name == "Ok") && !v.callsClosure(call)
 }
 
 // checkTryExit proves what a caller may rely on when a `?` returns from the

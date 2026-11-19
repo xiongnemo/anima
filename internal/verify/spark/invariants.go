@@ -274,7 +274,7 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 		keeps := false
 		switch c := x.Callee.(type) {
 		case *ast.Ident:
-			if v.curLocals[c.Name] {
+			if v.callsClosure(x) {
 				// A closure: it can hand back what it is given.
 				keeps = true
 			} else if fi := v.info.Funcs[c.Name]; fi != nil {
@@ -468,7 +468,7 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 		}
 	case *ast.CallExpr:
 		id, ok := x.Callee.(*ast.Ident)
-		if !ok || v.curLocals[id.Name] {
+		if !ok || v.callsClosure(x) {
 			// A closure can hand back what it captured.
 			return false
 		}
@@ -480,29 +480,71 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 	return false
 }
 
-// boundNames lists the names a function binds: its parameters and, in its
-// body, assigned variables, loop variables, lambda parameters and the
-// variables of patterns.
-func boundNames(params []sema.FuncParamInfo, body any) map[string]bool {
-	out := map[string]bool{}
+// closureCalls finds, in the body of a function, the calls of a name that
+// the function binds where the call stands: a parameter, an assigned
+// variable, a loop variable or a pattern variable anywhere in the body, or
+// a parameter of a lambda the call is inside. Such a call calls a closure,
+// not the function of that name. names is every name bound anywhere, for
+// the calls the kernel builds itself (a pipeline stage).
+func closureCalls(params []sema.FuncParamInfo, body any) (calls map[*ast.CallExpr]bool, names map[string]bool) {
+	calls, names = map[*ast.CallExpr]bool{}, map[string]bool{}
+	wide := map[string]bool{}
 	for _, p := range params {
-		out[p.Name] = true
+		wide[p.Name] = true
 	}
 	visitNodes(reflect.ValueOf(body), func(n any) {
 		switch x := n.(type) {
 		case *ast.LetAssignStmt:
-			out[x.Name] = true
+			wide[x.Name] = true
 		case *ast.ForStmt:
-			out[x.Var] = true
+			wide[x.Var] = true
+		case *ast.VarPat:
+			wide[x.Name] = true
 		case *ast.LambdaExpr:
 			for _, p := range x.Params {
-				out[p] = true
+				names[p] = true
 			}
-		case *ast.VarPat:
-			out[x.Name] = true
 		}
 	})
-	return out
+	for name := range wide {
+		names[name] = true
+	}
+	var walk func(node any, scoped map[string]bool)
+	walk = func(node any, scoped map[string]bool) {
+		visitNodesUntil(reflect.ValueOf(node), func(n any) bool {
+			switch x := n.(type) {
+			case *ast.LambdaExpr:
+				inner := map[string]bool{}
+				for name := range scoped {
+					inner[name] = true
+				}
+				for _, p := range x.Params {
+					inner[p] = true
+				}
+				walk(x.Body, inner)
+				return false
+			case *ast.CallExpr:
+				if id, ok := x.Callee.(*ast.Ident); ok {
+					calls[x] = wide[id.Name] || scoped[id.Name]
+				}
+			}
+			return true
+		})
+	}
+	walk(body, nil)
+	return calls, names
+}
+
+// callsClosure reports whether call calls a closure held in a variable.
+func (v *verifier) callsClosure(call *ast.CallExpr) bool {
+	id, ok := call.Callee.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if local, seen := v.curCalls[call]; seen {
+		return local
+	}
+	return v.curLocals[id.Name]
 }
 
 // sharedIn lists the variables that the code under node can make shared.
