@@ -816,7 +816,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if lhsTy.Kind() != KindInt || (rhsTy.Kind() != KindInt && rhsTy.Kind() != KindUnknown) {
 			return fmt.Errorf("%s: compound assignment %s requires int operands", s.Span, s.Op)
 		}
-		if root, ok := rootVarPath(s.Target); ok {
+		if root, ok := elementOwnerPath(s.Target); ok {
 			if err := c.ensureMutableTarget(root, sc, s.Span); err != nil {
 				return err
 			}
@@ -875,9 +875,17 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				return fmt.Errorf("%s: list element expects %s, got %s", s.Span, lt.Elem, vty)
 			}
 		}
+		if mt, ok := lty.(*MapType); ok {
+			if !isAssignable(mt.Key, ity) {
+				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
+			}
+			if !isAssignable(mt.Val, vty) {
+				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
+			}
+		}
 		// Writing an element writes the list: a read-only parameter cannot
 		// be changed this way either.
-		if root, ok := rootVarPath(s.List); ok {
+		if root, ok := elementOwnerPath(s.List); ok {
 			if err := c.ensureMutableTarget(root, sc, s.Span); err != nil {
 				return err
 			}
@@ -1917,11 +1925,21 @@ func rootVarPath(e ast.Expr) (string, bool) {
 			return "", false
 		}
 		return base + "." + x.Field, true
-	case *ast.IndexExpr:
-		// An element belongs to its list.
-		return rootVarPath(x.List)
 	default:
 		return "", false
+	}
+}
+
+// elementOwnerPath returns the variable path of the list or map that the
+// assignment target e is an element of (xs for xs[i], box.rows for
+// box.rows[i][j]); for any other target it is rootVarPath.
+func elementOwnerPath(e ast.Expr) (string, bool) {
+	for {
+		ix, ok := e.(*ast.IndexExpr)
+		if !ok {
+			return rootVarPath(e)
+		}
+		e = ix.List
 	}
 }
 

@@ -114,3 +114,36 @@ func TestSemaRejectsElementWriteToReadOnlyList(t *testing.T) {
 		}
 	}
 }
+
+// Reading an element is not a write: it may be passed next to a mut list,
+// and a map only accepts values of its value type.
+func TestSemaElementReadsAndMapValueTypes(t *testing.T) {
+	ok := `
+def set_first(mut xs: list[int[0..9]], v: int[0..9]) -> int:
+    xs[0] = v
+    return 0
+
+def f(mut xs: list[int[0..9]]) -> int:
+    return set_first(mut xs, xs[1])
+`
+	prog, err := parser.Parse("ok.anm", ok)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err != nil {
+		t.Errorf("an element passed by value is not an alias, got %v", err)
+	}
+	bad := `
+def f() -> int:
+    m: map[str, int[0..9]] = {"count": 1}
+    m["count"] = "unknown"
+    return 0
+`
+	prog, err = parser.Parse("bad.anm", bad)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "map value expects") {
+		t.Errorf("expected a map value type error, got %v", err)
+	}
+}
