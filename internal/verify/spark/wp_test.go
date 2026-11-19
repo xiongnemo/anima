@@ -375,6 +375,29 @@ def flip() -> int:
     lo: int = -9_223_372_036_854_775_807 - 1
     return -lo
 `, VCFailed},
+		{"overflow in a with-update", `
+entity Acct:
+    bal: int
+
+def credit(a: Acct, x: int) -> Acct:
+    return a with { bal: x + 1 }
+`, VCFailed},
+		{"overflow in a run_workflow argument", `
+workflow Echo(n: int) -> int:
+    start -> work:
+        k = n
+    step finish after work -> done:
+        return 0
+
+def launch(x: int) -> int:
+    return run_workflow Echo(x + 1)
+`, VCFailed},
+		{"overflow in the subject of a match statement", `
+def classify(x: int) -> int:
+    match x + 1:
+        0 -> return 0
+        _ -> return 1
+`, VCFailed},
 		{"product of unconstrained ints", `
 def mul(x: int, y: int) -> int:
     return x * y

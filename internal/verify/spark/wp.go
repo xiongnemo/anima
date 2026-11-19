@@ -762,6 +762,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 
 	case *ast.MatchStmt:
+		v.checkArith(s.Subject, env, scope)
 		v.verifyMatchExhaustive(s.Subject, extractMatchArmsFromStmt(s.Arms), env, scope, s.Span)
 		for _, arm := range s.Arms {
 			armEnv := env.clone()
@@ -1241,6 +1242,15 @@ func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
 		v.checkArith(e.Index, env, scope)
 	case *ast.CallExpr:
 		v.checkArith(e.Callee, env, scope)
+		for _, a := range e.Args {
+			v.checkArith(a.Value, env, scope)
+		}
+	case *ast.WithExpr:
+		v.checkArith(e.Base, env, scope)
+		for _, f := range e.Fields {
+			v.checkArith(f.Value, env, scope)
+		}
+	case *ast.RunWorkflowExpr:
 		for _, a := range e.Args {
 			v.checkArith(a.Value, env, scope)
 		}
