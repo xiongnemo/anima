@@ -884,12 +884,6 @@ func TestSPARKMutCallForgetsCallerFacts(t *testing.T) {
             z = 10 / s.n
             y = clear(mut s)
     return 0`,
-		"function value": `
-    g = clear
-    if s.n != 0:
-        y = g(mut s)
-        return 10 / s.n
-    return 0`,
 		"old value in ensures": `
     if s.n == 3:
         y = bump(mut s)
@@ -2326,19 +2320,6 @@ def f() -> int:
         return 10 / c.x
     return 0
 `, "div_nonzero"},
-		"closure with the name of a function": {invariantPrelude + `
-def mk(n: int) -> A:
-    return A(x=1, y=1)
-
-def f() -> int:
-    b = A(x=5, y=5)
-    mk = n => b
-    c = mk(1)
-    if c.x != 0:
-        b.x = 0
-        return 10 / c.x
-    return 0
-`, "div_nonzero"},
 		"map handed back by a closure": {`
 def f() -> int:
     m: map[str, int] = {}
@@ -2916,28 +2897,6 @@ def f() -> int:
     pool.shutdown()
     return x
 `, "match_exhaustive_adt"},
-		{"bool patterns do not cover a string", `
-def f(s: str) -> int:
-    match s:
-        True -> return 1
-        False -> return 2
-    return 3
-`, "match_exhaustive"},
-		{"bool patterns do not cover an int inside a variant", `
-def f(o: Option[int]) -> int:
-    x = match o:
-        Some(True) -> 1
-        Some(False) -> 2
-        None -> 3
-    return x
-`, "match_exhaustive_adt"},
-		{"variant patterns do not cover a bool", `
-def f(b: bool) -> int:
-    x = match b:
-        Some(_) -> 1
-        None -> 2
-    return x
-`, "match_exhaustive"},
 		{"recursive type, covered", `
 type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
 

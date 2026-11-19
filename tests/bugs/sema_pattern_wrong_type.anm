@@ -1,0 +1,9 @@
+# A bool pattern never matches a string: a mistake, not an arm.
+def f(s: str) -> int:
+    match s:
+        True -> return 1
+        _ -> return 2
+
+def main() -> int:
+    print(f("a"))
+    return 0

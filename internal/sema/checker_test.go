@@ -290,7 +290,8 @@ func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
 	}
 }
 
-// The element-alias rule also holds for a call through a function value.
+// A function is not a value, so no call can go around the element-alias
+// rule through one.
 func TestSemaRejectsElementAliasThroughFunctionValue(t *testing.T) {
 	src := `
 entity Row:
@@ -309,8 +310,8 @@ def f(mut rows: list[Row]) -> int:
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "anti-aliasing") {
-		t.Errorf("expected an anti-aliasing error, got %v", err)
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "function bump is not a value") {
+		t.Errorf("expected bump to be rejected as a value, got %v", err)
 	}
 }
 
@@ -596,6 +597,133 @@ def g() -> int:
 		}
 		if _, err := Check(prog); (err == nil) != ok {
 			t.Errorf("%s: accepted = %v, want %v (%v)", call, err == nil, ok, err)
+		}
+	}
+}
+
+// What a program calls, reads a member of, or matches against has to be
+// there at run time: sema is the only check of it.
+func TestSemaCallsMembersAndPatternsExist(t *testing.T) {
+	prelude := `
+import std.concurrent as conc
+
+type Shape = Circle(r: int, k: int) | Dot
+type Other = Left(n: int) | Right
+
+entity Box:
+    n: int[0..9]
+
+def first(n: int) -> int:
+    return n
+
+def work(n: int) -> Result[bool, str]:
+    return Ok(n > 0)
+
+def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Option[int], bx: Box) -> int:
+`
+	cases := []struct {
+		body string
+		want string // "" when the body is accepted
+	}{
+		// A function is called, not held.
+		{"g = first\n    return 0", "function first is not a value"},
+		{"ys = [first]\n    return 0", "function first is not a value"},
+		{"ys = xs |> map(first)\n    return 0", "function first is not a value"},
+		{"ys = xs |> filter(first)\n    return 0", "function first is not a value"},
+		{"t = xs |> fold(0, first)\n    return 0", "function first is not a value"},
+		{"ys = xs |> filter(5)\n    return 0", "filter takes a function"},
+		{"return first(n)", ""},
+		{"return n |> first", ""},
+		{"ys = xs |> map((v) => first(v))\n    return 0", ""},
+		{"g = (v) => first(v)\n    return g(1)", ""},
+		{"g = (v) => v > 1\n    ys = xs |> filter(g)\n    return 0", ""},
+		{"first = 3\n    return first", ""},
+		// A call by a name that is a variable and a function at once: the
+		// backends call the variable, the kernels would check the function.
+		{"first = 3\n    return first(1)", "both a variable and a function"},
+		{"first = (v) => 0\n    return first(1)", "both a variable and a function"},
+		{"first = (v) => 0\n    return n |> first", "both a variable and a function"},
+		{"len = 5\n    return len(xs)", "both a variable and a function"},
+		{"filter = 5\n    ys = xs |> filter((v) => v > 1)\n    return 0", "both a variable and a function"},
+		{"sum = 0\n    for v in xs:\n        sum = v\n    return sum", ""},
+		{"ys = xs |> map(first => first)\n    return first(n)", ""},
+		// Only a function is called.
+		{"return n(1)", "cannot be called"},
+		{"return s(1)", "cannot be called"},
+		{"return bx.n(1)", "cannot be called"},
+		{"return sh()", "cannot be called"},
+		// Members.
+		{"x = s.upper()\n    return 0", `has no member "upper"`},
+		{"x = xs.nope()\n    return 0", `has no member "nope"`},
+		{"x = m.len()\n    return 0", `has no member "len"`},
+		{"x = n.foo\n    return 0", `has no member "foo"`},
+		{"x = b.foo\n    return 0", `has no member "foo"`},
+		{"x = o.is_some()\n    return 0", "match on it to reach what it holds"},
+		{"x = first(n).foo\n    return 0", `has no member "foo"`},
+		{"x = bx.missing\n    return 0", `has no field "missing"`},
+		{"return xs.len() + s.len() + len(m) + bx.n", ""},
+		// A variant is made with all of its fields.
+		{"x = Circle(5)\n    return 0", "Circle has 2 field(s), got 1"},
+		{"x = Circle()\n    return 0", "Circle has 2 field(s), got 0"},
+		{"x = Circle(5, 6)\n    y = Dot\n    return 0", ""},
+		// A pattern names every field and has the type of its subject.
+		{"match sh:\n        Circle(r) -> return 1\n        _ -> return 0", "variant Circle has 2 field(s), pattern has 1"},
+		{"match sh:\n        Circle -> return 1\n        _ -> return 0", "variant Circle has 2 field(s), pattern has 0"},
+		{"match sh:\n        Left(v) -> return 1\n        _ -> return 0", "variant Left of Other cannot match"},
+		{"match sh:\n        1 -> return 1\n        _ -> return 0", "an int pattern cannot match"},
+		{"match s:\n        True -> return 1\n        _ -> return 0", "a bool pattern cannot match"},
+		{"match s:\n        1..5 -> return 1\n        _ -> return 0", "an int range pattern cannot match"},
+		{"match n:\n        \"a\" -> return 1\n        _ -> return 0", "a string pattern cannot match"},
+		{"match b:\n        Some(v) -> return 1\n        _ -> return 0", "a variant pattern cannot match"},
+		{"match o:\n        Some(True) -> return 1\n        _ -> return 0", "a bool pattern cannot match"},
+		{"match sh:\n        Circle(1, \"a\") -> return 1\n        _ -> return 0", "a string pattern cannot match"},
+		{"match sh:\n        Circle(1, k) -> return k\n        Circle(_, _) -> return 2\n        Dot -> return 0", ""},
+		{"match o:\n        Some(1..5) -> return 1\n        Some(v) -> return v\n        None -> return 0", ""},
+		{"match s:\n        \"a\" -> return 1\n        _ -> return 0", ""},
+		// The result of a future has no type for sema: its patterns say.
+		{"pool = conc.ThreadPool(2, 4)\n    fut = pool.submit(() => work(3))\n    r = fut.await()\n    match r:\n        Ok(True) -> print(1)\n        Ok(False) -> print(2)\n        Err(e) -> print(e)\n    pool.shutdown()\n    return 0", ""},
+	}
+	for _, tc := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+tc.body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+}
+
+// Both backends call a function of the program that is named like a
+// pipeline stage, so `xs |> filter(2)` is checked as `filter(xs, 2)`.
+func TestSemaUserFunctionNamedLikeAStage(t *testing.T) {
+	prelude := `
+def filter(xs: list[int], n: int[0..9]) -> int:
+    return n
+
+def fold(xs: list[int], s: str) -> str:
+    return s
+
+def f(xs: list[int]) -> int:
+`
+	cases := map[string]bool{
+		"n = xs |> filter(2)\n    return n":                 true,
+		"s = xs |> fold(\"a\")\n    return len(s)":          true,
+		"n = xs |> filter(\"a\")\n    return n":             false, // not an int
+		"n = xs |> filter((v) => v > 1)\n    return 0":      false, // not an int
+		"ys = xs |> map((v) => v) |> take(1)\n    return 0": true,  // stages no function shadows
+	}
+	for body, ok := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", body, err)
+		}
+		if _, err := Check(prog); (err == nil) != ok {
+			t.Errorf("%q: accepted = %v, want %v (%v)", body, err == nil, ok, err)
 		}
 	}
 }

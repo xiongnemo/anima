@@ -1,0 +1,9 @@
+# `Circle` has two fields; one argument left `k` without a value.
+type Shape = Circle(r: int[1..9], k: int[1..9]) | Dot
+
+def main() -> int:
+    s = Circle(5)
+    match s:
+        Circle(r, k) -> print(10 / k)
+        Dot -> print(0)
+    return 0

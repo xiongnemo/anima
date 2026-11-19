@@ -1095,13 +1095,38 @@ func (c *checker) ensureMutableTarget(root string, sc *scope, span ast.Span) err
 }
 
 func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
-	switch p := pat.(type) {
-	case *ast.WildcardPat, *ast.IntPat, *ast.RangePat, *ast.BoolPat, *ast.StrPat:
+	// A pattern of another type than a subject whose type is known never
+	// matches: it is a mistake, not an arm.
+	fits := func(span ast.Span, what string, kind TypeKind) error {
+		if subjTy == nil {
+			return nil
+		}
+		switch k := subjTy.Kind(); k {
+		case KindInt, KindBool, KindStr, KindList, KindMap, KindEntity, KindADT:
+			if k != kind {
+				return fmt.Errorf("%s: %s pattern cannot match a value of type %s", span, what, subjTy)
+			}
+		}
 		return nil
+	}
+	switch p := pat.(type) {
+	case *ast.WildcardPat:
+		return nil
+	case *ast.IntPat:
+		return fits(p.Span, "an int", KindInt)
+	case *ast.RangePat:
+		return fits(p.Span, "an int range", KindInt)
+	case *ast.BoolPat:
+		return fits(p.Span, "a bool", KindBool)
+	case *ast.StrPat:
+		return fits(p.Span, "a string", KindStr)
 	case *ast.VarPat:
 		sc.defineLocal(p.Name, varBinding{ty: subjTy, span: p.Span})
 		return nil
 	case *ast.VariantPat:
+		if err := fits(p.Span, "a variant", KindADT); err != nil {
+			return err
+		}
 		adt, ok := c.info.Variants[p.Name]
 		if !ok {
 			if subjADT, isADT := subjTy.(*ADTType); isADT {
@@ -1110,12 +1135,15 @@ func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
 				return fmt.Errorf("%s: unknown ADT variant %q", p.Span, p.Name)
 			}
 		}
+		if subjADT, isADT := subjTy.(*ADTType); isADT && subjADT.Name != adt.Name {
+			return fmt.Errorf("%s: variant %s of %s cannot match a value of type %s", p.Span, p.Name, adt.Name, subjTy)
+		}
 		vi, ok := adt.VariantMap[p.Name]
 		if !ok {
 			return fmt.Errorf("%s: variant %q not in ADT %s", p.Span, p.Name, adt.Name)
 		}
-		if len(p.Fields) > len(vi.Fields) {
-			return fmt.Errorf("%s: variant %s expects %d fields, pattern has %d", p.Span, p.Name, len(vi.Fields), len(p.Fields))
+		if len(p.Fields) != len(vi.Fields) {
+			return fmt.Errorf("%s: variant %s has %d field(s), pattern has %d", p.Span, p.Name, len(vi.Fields), len(p.Fields))
 		}
 		// Resolve TypeVars using subjTy TypeArgs if applicable
 		subMap := map[string]Type{}
@@ -1190,8 +1218,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if pt, ok := c.info.Ports[e.Name]; ok {
 			return pt, nil
 		}
-		if fi, ok := c.info.Funcs[e.Name]; ok {
-			return fi.Type, nil
+		if _, ok := c.info.Funcs[e.Name]; ok {
+			// Neither backend has a value for a function that is not called.
+			return nil, fmt.Errorf("%s: function %s is not a value: call it, or write a lambda such as `(v) => %s(v)`", e.Span, e.Name, e.Name)
 		}
 		if adt, ok := c.info.Variants[e.Name]; ok {
 			return adt, nil
@@ -1367,6 +1396,14 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if objTy.Kind() == KindStr && e.Field == "len" {
 			return &FuncType{Return: NewIntRange(0, DefaultMaxInt, "")}, nil
 		}
+		// A value of a type that is known has no other member: the VM
+		// stops on one and the native backend gives `()`.
+		switch objTy.Kind() {
+		case KindADT:
+			return nil, fmt.Errorf("%s: a value of type %s has no member %q; match on it to reach what it holds", e.Span, objTy, e.Field)
+		case KindInt, KindBool, KindStr, KindList, KindMap:
+			return nil, fmt.Errorf("%s: a value of type %s has no member %q", e.Span, objTy, e.Field)
+		}
 		return UnknownType{}, nil
 
 	case *ast.IndexExpr:
@@ -1490,10 +1527,38 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
+// builtinCallables are the names that mean something of their own when
+// called, to sema and to the kernels.
+var builtinCallables = map[string]bool{
+	"len": true, "print": true, "assert": true, "str": true, "to_str": true,
+	"abs": true, "min": true, "max": true, "Some": true, "Ok": true, "Err": true,
+	"filter": true, "map": true, "flat_map": true, "fold": true, "sum": true,
+	"any": true, "all": true, "find": true, "take": true, "drop": true,
+	"filter_ok": true, "unwrap_or": true, "and_then": true,
+}
+
+// checkCalleeNotShadowed rejects a call by a name that is a variable and a
+// function at once. Both backends call the variable; sema and the kernels
+// would check the function.
+func (c *checker) checkCalleeNotShadowed(name string, span ast.Span, sc *scope) error {
+	if _, local := sc.lookup(name); !local {
+		return nil
+	}
+	if _, fn := c.info.Funcs[name]; fn || builtinCallables[name] {
+		return fmt.Errorf("%s: %s is called here, and is both a variable and a function: rename the variable", span, name)
+	}
+	return nil
+}
+
 func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	// SPARK Anti-Aliasing rule on all call sites
 	if err := c.checkCallAliasing(e.Args, false); err != nil {
 		return nil, err
+	}
+	if id, ok := e.Callee.(*ast.Ident); ok {
+		if err := c.checkCalleeNotShadowed(id.Name, id.Span, sc); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check special built-in functions first
@@ -1588,6 +1653,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		// User ADT variant constructor
 		if adt, ok := c.info.Variants[id.Name]; ok {
 			vi := adt.VariantMap[id.Name]
+			if len(e.Args) < len(vi.Fields) {
+				return nil, fmt.Errorf("%s: %s has %d field(s), got %d arguments", e.Span, id.Name, len(vi.Fields), len(e.Args))
+			}
 			for i, a := range e.Args {
 				at, err := c.checkExpr(a.Value, sc)
 				if err != nil {
@@ -1705,6 +1773,12 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	}
 	if ft, ok := calleeTy.(*FuncType); ok {
 		return ft.Return, nil
+	}
+	// A value of a type that is known and is not a function cannot be
+	// called: the VM stops on it and the native backend gives `()`.
+	switch calleeTy.Kind() {
+	case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
+		return nil, fmt.Errorf("%s: a value of type %s cannot be called", e.Span, calleeTy)
 	}
 	return UnknownType{}, nil
 }
@@ -1838,7 +1912,41 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		elemTy = lt.Elem
 	}
 
-	switch fnName {
+	if direct {
+		if err := c.checkCalleeNotShadowed(fnName, e.Right.GetSpan(), sc); err != nil {
+			return nil, err
+		}
+	}
+
+	// A function of the program named like a stage is what both backends
+	// call: `xs |> filter(2)` is then `filter(xs, 2)`.
+	stage := fnName
+	if _, user := c.info.Funcs[fnName]; user && direct {
+		stage = ""
+	}
+
+	// The function a stage takes is a lambda or a variable holding one.
+	fnArg := -1
+	switch stage {
+	case "filter", "map", "flat_map", "any", "all", "find", "and_then":
+		fnArg = 0
+	case "fold":
+		fnArg = 1
+	}
+	if fnArg >= 0 && fnArg < len(callArgs) {
+		if _, isLam := callArgs[fnArg].Value.(*ast.LambdaExpr); !isLam {
+			at, err := c.checkExpr(callArgs[fnArg].Value, sc)
+			if err != nil {
+				return nil, err
+			}
+			switch at.Kind() {
+			case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
+				return nil, fmt.Errorf("%s: %s takes a function, got %s", callArgs[fnArg].Value.GetSpan(), fnName, at)
+			}
+		}
+	}
+
+	switch stage {
 	case "filter":
 		if len(callArgs) == 1 {
 			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
