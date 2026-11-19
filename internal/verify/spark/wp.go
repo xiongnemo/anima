@@ -794,13 +794,23 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
 		v.checkArith(s.Value, env, scope)
+		// A variable with a range is taken to be in it wherever it is
+		// read, so every value it is given is proved in it. A quotient
+		// is proved from its operands, as they are before the assignment.
+		rng := v.info.LetRanges[s]
+		var before *symEnv
+		if be, ok := s.Value.(*ast.BinaryExpr); ok && be.Op == "/" && rng != nil {
+			before = env.clone()
+		}
 		v.assignSymbolic(s.Name, s.Value, env, scope, s.Span)
-		if s.TypeAnno != nil {
-			if ty, ok := v.info.ExprTypes[s.Value]; ok {
-				if it, ok := ty.(*sema.IntType); ok && it.IsBounded {
-					t := v.evalInt(s.Value, env, scope, true)
-					v.checkIntRange(t, s.Value, env, it, scope+".let_"+s.Name, scope, s.Span)
-				}
+		if rng != nil {
+			vc := scope + ".let_" + s.Name
+			if before != nil {
+				v.checkIntRange(smt.Const(0), s.Value, before, rng, vc, scope, s.Span)
+			} else if t, ok := env.intTerms[s.Name]; ok {
+				v.prove(vc, scope, s.Span, env, smt.And(smt.Ge(t, smt.Const(rng.Lo)), smt.Le(t, smt.Const(rng.Hi))))
+			} else {
+				v.prove(vc, scope, s.Span, env, smt.BoolConst{Val: false})
 			}
 		}
 
@@ -1828,21 +1838,29 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 	}
 	v.forgetWrittenAliases(stmts, env)
 	v.forgetInsertedMapLens(stmts, env)
-	names, compound := collectAssignedVars(stmts)
+	names, compound, lets := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
 			t := smt.Var(env.freshVar(name))
 			env.intTerms[name] = t
+			// The range each write of the variable was proved in, when
+			// they all were and it is the one range.
 			var rng *sema.IntType
-			for i, target := range compound[name] {
-				it, _ := v.info.ExprTypes[target].(*sema.IntType)
-				if it == nil || !it.IsBounded || (i > 0 && (rng == nil || it.Lo != rng.Lo || it.Hi != rng.Hi)) {
-					rng = nil
-					break
+			same := true
+			proved := func(it *sema.IntType) {
+				if it == nil || !it.IsBounded || (rng != nil && (it.Lo != rng.Lo || it.Hi != rng.Hi)) {
+					same = false
 				}
 				rng = it
 			}
-			if rng != nil {
+			for _, target := range compound[name] {
+				it, _ := v.info.ExprTypes[target].(*sema.IntType)
+				proved(it)
+			}
+			for _, let := range lets[name] {
+				proved(v.info.LetRanges[let])
+			}
+			if same && rng != nil {
 				env.assumeRange(t, rng)
 			} else {
 				env.assume(smt.FitsInt64(t))
@@ -2808,12 +2826,14 @@ func (v *verifier) bindVariantPat(p *ast.VariantPat, subjTy sema.Type, env *symE
 	}
 }
 
-// collectAssignedVars lists what stmts may assign. compound holds, for the names that are
-// only ever the target of a compound assignment, those targets.
-func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]ast.Expr) {
+// collectAssignedVars lists what stmts may assign. compound and lets hold, for the names
+// that are only ever written by a compound assignment or an assignment to the variable
+// itself, those targets and those assignments.
+func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]ast.Expr, lets map[string][]*ast.LetAssignStmt) {
 	seen := map[string]bool{}
 	plain := map[string]bool{}
 	compound = map[string][]ast.Expr{}
+	lets = map[string][]*ast.LetAssignStmt{}
 	add := func(name string) {
 		if name != "" && !seen[name] {
 			seen[name] = true
@@ -2831,7 +2851,10 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 		for _, s := range ss {
 			switch x := s.(type) {
 			case *ast.LetAssignStmt:
+				was := plain[x.Name]
 				add(x.Name)
+				plain[x.Name] = was
+				lets[x.Name] = append(lets[x.Name], x)
 			case *ast.CompoundAssignStmt:
 				name := path(x.Target)
 				was := plain[name]
@@ -2868,7 +2891,8 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 	for name := range plain {
 		if plain[name] {
 			delete(compound, name)
+			delete(lets, name)
 		}
 	}
-	return out, compound
+	return out, compound, lets
 }
