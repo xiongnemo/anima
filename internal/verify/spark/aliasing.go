@@ -44,29 +44,42 @@ func (e *symEnv) forgetEntity(name string) {
 	}
 }
 
-// forgetAliases is called when the entity obj evaluates to has been written.
-// A shared variable other than the one written through may be that entity.
+// forgetAliases is called when the entity obj evaluates to has been written,
+// or handed to a callee as mut. A shared variable other than the one written
+// through may be that entity, or one inside it.
 func (v *verifier) forgetAliases(obj ast.Expr, env *symEnv) {
 	written := ""
-	root := obj
-	for {
-		fe, ok := root.(*ast.FieldExpr)
-		if !ok {
-			break
-		}
-		root = fe.Object
-	}
-	if id, ok := root.(*ast.Ident); ok {
-		if !env.shared[id.Name] {
+	if id, ok := obj.(*ast.Ident); ok {
+		// Written through a variable that is the one way to reach its
+		// entity, which holds nothing another variable could be.
+		if !env.shared[id.Name] && v.isFlatEntity(v.info.ExprTypes[id]) {
 			return
 		}
 		written = id.Name
+	} else if root := mutRoot(obj); root != nil {
+		// box.inner, rows[i]: the object may be one a shared variable names.
+		written = root.Name
 	}
 	for _, name := range sortedKeys(env.shared) {
 		if name != written {
 			env.forgetEntity(name)
 		}
 	}
+}
+
+// isFlatEntity reports whether t is an entity whose fields are all numbers,
+// booleans and strings: nothing reachable from it can be shared on its own.
+func (v *verifier) isFlatEntity(t sema.Type) bool {
+	et, ok := t.(*sema.EntityType)
+	if !ok {
+		return false
+	}
+	for _, f := range et.Fields {
+		if !isScalar(f.Type) {
+			return false
+		}
+	}
+	return true
 }
 
 // forgetWrittenAliases applies forgetAliases for every entity that the code
