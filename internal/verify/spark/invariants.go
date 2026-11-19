@@ -482,14 +482,13 @@ func (v *verifier) proveElementWrite(obj ast.Expr, field string, value ast.Expr,
 	// The written field is what the write makes it; what it was, and what
 	// was inside it, is gone.
 	path := entityProbe + "." + field
-	probe.unbind(path)
-	switch et.FieldMap[field].(type) {
-	case *sema.IntType:
+	if value != nil {
+		// As for a field of a variable: an entity or a list is assigned
+		// with what is known of it, a boolean is evaluated.
+		v.setField(path, value, term, probe, scope, span)
+	} else {
+		probe.unbind(path)
 		probe.intTerms[path] = term
-	case sema.BoolType:
-		if value != nil {
-			probe.boolTerms[path] = v.evalBool(value, env, scope)
-		}
 	}
 	v.proveInvariants(et, entityProbe, "element", span, probe, scope, map[*sema.EntityType]bool{})
 }
