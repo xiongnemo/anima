@@ -108,6 +108,8 @@ func (v *verifier) joinBranches(env *symEnv, outs []*symEnv) {
 			env.intervals[k] = iv
 		}
 	}
+	// Shared after the join: what some branch left shared.
+	env.shared = map[string]bool{}
 	for _, o := range outs {
 		for k := range o.shared {
 			env.shared[k] = true
