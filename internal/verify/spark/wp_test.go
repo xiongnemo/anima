@@ -577,6 +577,57 @@ def count(n: int[0..1000]) -> int:
         total = total + 2
     return total
 `, ""},
+		{"read_u32_be yields the whole unsigned 32-bit range", `
+import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_hex("ffffffff")
+    x = bv.read_u32_be(0) * 3_000_000_000
+    return 0
+`, VCFailed},
+		{"read_u32_be scaled within int64", `
+import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_hex("ffffffff")
+    x = bv.read_u32_be(0) * 2_000_000_000
+    return 0
+`, ""},
+		{"now_ms is not bounded by a billion", `
+import std.time as time
+
+def main() -> int:
+    t = time.now_ms() * 9_000_000_000
+    return 0
+`, VCFailed},
+		{"difference of two timestamps", `
+import std.time as time
+
+def main() -> int:
+    t0 = time.now_ms()
+    d = time.now_ms() - t0
+    return 0
+`, ""},
+		{"constant overflow on a skipped short-circuit operand", `
+def main() -> int:
+    b = False and (9223372036854775807 + 1 > 0)
+    return 0
+`, ""},
+		{"constant overflow on an evaluated short-circuit operand", `
+def main() -> int:
+    b = True and (9223372036854775807 + 1 > 0)
+    return 0
+`, VCFailed},
+		{"entity with a field of its own type", `
+entity Node:
+    val: int[0..10]
+    next: Node
+    invariant: val + 1 <= 11
+
+def get(n: Node) -> int:
+    ensures: result <= 10
+    return n.val
+`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
