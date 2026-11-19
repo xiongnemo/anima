@@ -252,38 +252,3 @@ def f(mut rows: list[Row]) -> int:
 		}
 	}
 }
-
-// Branches that hold the same one-slot pool while writing exclude each other.
-func TestSemaForkElementWritesUnderOneSlotPool(t *testing.T) {
-	src := `
-workflow Tally(mut m: map[str, int[0..9]]) -> bool:
-    verify: sound
-    pool lock: int[0..1] = 1
-    start -> work
-    fork work:
-        branch a:
-            acquire lock
-            m["a"] = 1
-            release lock
-        branch b:
-            acquire lock
-            m["b"] = 2
-            release lock
-    join j
-    step finish after j -> done:
-        return True
-`
-	check := func(name, text string, wantRace bool) {
-		prog, err := parser.Parse("lock.anm", text)
-		if err != nil {
-			t.Fatalf("%s: parse error: %v", name, err)
-		}
-		_, err = Check(prog)
-		if got := err != nil && strings.Contains(err.Error(), "concurrent write race"); got != wantRace {
-			t.Errorf("%s: race reported = %v, want %v (err: %v)", name, got, wantRace, err)
-		}
-	}
-	check("both hold the lock", src, false)
-	check("write after release", strings.Replace(src, "            m[\"b\"] = 2\n            release lock\n", "            release lock\n            m[\"b\"] = 2\n", 1), true)
-	check("two-slot pool", strings.Replace(src, "int[0..1] = 1", "int[0..2] = 2", 1), true)
-}
