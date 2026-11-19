@@ -1596,6 +1596,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		for _, arm := range e.Arms {
 			v.havocMutArgs(arm.Value, env)
 		}
+		v.forgetPatternNames(e, env)
 	case *ast.LambdaExpr:
 		// The body is checked where its parameters are known: checkLambdaArith.
 	case *ast.UnaryExpr:
@@ -1841,37 +1842,63 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 				env.assume(smt.FitsInt64(t))
 			}
 		}
-		if _, ok := env.boolTerms[name]; ok {
-			env.boolTerms[name] = smt.BoolVar{Name: env.freshVar(name)}
-		}
-		delete(env.listLens, name)
-		delete(env.listElems, name)
-		delete(env.sumInfos, name)
-		// An entity that is assigned as a whole: everything inside it.
-		for _, k := range sortedKeys(env.intTerms) {
-			if strings.HasPrefix(k, name+".") {
-				t := smt.Var(env.freshVar(k))
-				env.intTerms[k] = t
-				env.assume(smt.FitsInt64(t))
-			}
-		}
-		for _, k := range sortedKeys(env.boolTerms) {
-			if strings.HasPrefix(k, name+".") {
-				env.boolTerms[k] = smt.BoolVar{Name: env.freshVar(k)}
-			}
-		}
-		for _, k := range sortedKeys(env.listLens) {
-			if strings.HasPrefix(k, name+".") {
-				delete(env.listLens, k)
-				delete(env.listElems, k)
-			}
-		}
+		v.forgetRest(name, env)
 	}
 	if writesElems(stmts) {
 		env.forgetElemHulls()
 	}
 	// What the statements pass as mut may change on every pass too.
 	v.havocMutArgs(stmts, env)
+}
+
+// forgetRest forgets what is known of the variable name beyond its integer
+// value: its truth, its length and elements, the fields of the entity it is.
+func (v *verifier) forgetRest(name string, env *symEnv) {
+	if _, ok := env.boolTerms[name]; ok {
+		env.boolTerms[name] = smt.BoolVar{Name: env.freshVar(name)}
+	}
+	delete(env.listLens, name)
+	delete(env.listElems, name)
+	delete(env.sumInfos, name)
+	// An entity that is assigned as a whole: everything inside it.
+	for _, k := range sortedKeys(env.intTerms) {
+		if strings.HasPrefix(k, name+".") {
+			t := smt.Var(env.freshVar(k))
+			env.intTerms[k] = t
+			env.assume(smt.FitsInt64(t))
+		}
+	}
+	for _, k := range sortedKeys(env.boolTerms) {
+		if strings.HasPrefix(k, name+".") {
+			env.boolTerms[k] = smt.BoolVar{Name: env.freshVar(k)}
+		}
+	}
+	for _, k := range sortedKeys(env.listLens) {
+		if strings.HasPrefix(k, name+".") {
+			delete(env.listLens, k)
+			delete(env.listElems, k)
+		}
+	}
+}
+
+// forgetPatternNames forgets the variables that the patterns of a match
+// expression name: the arm that matches writes them, and the arms were run
+// on copies of env.
+func (v *verifier) forgetPatternNames(e *ast.MatchExpr, env *symEnv) {
+	for _, arm := range e.Arms {
+		visitNodes(reflect.ValueOf(arm.Pattern), func(n any) {
+			vp, ok := n.(*ast.VarPat)
+			if !ok {
+				return
+			}
+			if _, ok := env.intTerms[vp.Name]; ok {
+				t := smt.Var(env.freshVar(vp.Name))
+				env.intTerms[vp.Name] = t
+				env.assume(smt.FitsInt64(t))
+			}
+			v.forgetRest(vp.Name, env)
+		})
+	}
 }
 
 // stageName is the combinator a call names, written bare (`sum`) or through the std.fp

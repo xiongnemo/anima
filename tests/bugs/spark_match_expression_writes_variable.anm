@@ -1,0 +1,12 @@
+# The arm of a match expression that matches writes x, but the kernel ran
+# the arms on copies of what it knew and still took x for 5 afterwards.
+def g(o: Option[int]) -> int:
+    x = 5
+    r = match o:
+        Some(x) -> x
+        None -> 0
+    return 10 / x
+
+def main() -> int:
+    print(g(Some(0)))
+    return 0
