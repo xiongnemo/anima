@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -176,10 +177,22 @@ func (v Value) IsTruthy() bool {
 	}
 }
 
+// Equals is `==`: lists, maps and variants are equal when what they hold is
+// equal, an entity is equal to itself only. The native runtime has the same
+// rule (v_eq in runtime_c.go).
 func (v Value) Equals(o Value) bool {
+	return valuesEqual(v, o, nil)
+}
+
+// eqPair is two containers being compared. A pair met again while it is
+// being compared is inside a cycle and holds nothing new to compare.
+type eqPair struct{ a, b uintptr }
+
+func valuesEqual(v, o Value, open []eqPair) bool {
 	if v.Kind != o.Kind {
 		return false
 	}
+	var pair eqPair
 	switch v.Kind {
 	case ValVoid, ValNone:
 		return true
@@ -189,18 +202,72 @@ func (v Value) Equals(o Value) bool {
 		return v.Bool == o.Bool
 	case ValStr:
 		return v.Str == o.Str
+	case ValEntity:
+		return v.Entity == o.Entity
+	case ValClosure:
+		return v.Closure == o.Closure
+	case ValHandle:
+		return v.Handle == o.Handle
+	case ValList:
+		pair = eqPair{reflect.ValueOf(v.List).Pointer(), reflect.ValueOf(o.List).Pointer()}
+	case ValMap:
+		pair = eqPair{reflect.ValueOf(v.Map).Pointer(), reflect.ValueOf(o.Map).Pointer()}
 	case ValVariant:
-		if v.Variant.Name != o.Variant.Name || len(v.Variant.Fields) != len(o.Variant.Fields) {
+		pair = eqPair{reflect.ValueOf(v.Variant).Pointer(), reflect.ValueOf(o.Variant).Pointer()}
+	default:
+		return false
+	}
+	if pair.a == pair.b {
+		return true
+	}
+	for _, p := range open {
+		if p == pair {
+			return true
+		}
+	}
+	open = append(open, pair)
+	switch v.Kind {
+	case ValList:
+		var a, b []Value
+		if v.List != nil {
+			a = *v.List
+		}
+		if o.List != nil {
+			b = *o.List
+		}
+		if len(a) != len(b) {
 			return false
 		}
-		for i := range v.Variant.Fields {
-			if !v.Variant.Fields[i].Equals(o.Variant.Fields[i]) {
+		for i := range a {
+			if !valuesEqual(a[i], b[i], open) {
+				return false
+			}
+		}
+		return true
+	case ValMap:
+		if len(v.Map) != len(o.Map) {
+			return false
+		}
+		for k, x := range v.Map {
+			y, ok := o.Map[k]
+			if !ok || !valuesEqual(x, y, open) {
 				return false
 			}
 		}
 		return true
 	default:
-		return false
+		if v.Variant == nil || o.Variant == nil {
+			return false
+		}
+		if v.Variant.Name != o.Variant.Name || len(v.Variant.Fields) != len(o.Variant.Fields) {
+			return false
+		}
+		for i := range v.Variant.Fields {
+			if !valuesEqual(v.Variant.Fields[i], o.Variant.Fields[i], open) {
+				return false
+			}
+		}
+		return true
 	}
 }
 

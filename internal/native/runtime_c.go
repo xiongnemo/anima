@@ -315,22 +315,59 @@ static AnimaVal v_variant_field(AnimaVal v, size_t idx) {
     return v_none();
 }
 
-static bool v_eq(AnimaVal a, AnimaVal b) {
+// Equality (==), the same as Value.Equals in the VM: lists, maps and variants are
+// equal when what they hold is equal, an entity is equal to itself only.
+// EqOpen is the containers being compared: a pair met again while it is
+// being compared is inside a cycle and holds nothing new to compare.
+typedef struct EqOpen { const void *a; const void *b; const struct EqOpen *up; } EqOpen;
+
+static bool v_eq_in(AnimaVal a, AnimaVal b, const EqOpen *up) {
     if (a.kind != b.kind) return false;
+    EqOpen here = {NULL, NULL, up};
     switch (a.kind) {
         case VAL_VOID: case VAL_NONE: return true;
         case VAL_INT: return a.u.i == b.u.i;
         case VAL_BOOL: return a.u.b == b.u.b;
-        case VAL_STR: return strcmp(a.u.s, b.u.s) == 0;
-        case VAL_VARIANT:
-            if (strcmp(a.u.var->name, b.u.var->name) != 0 || a.u.var->len != b.u.var->len) return false;
-            for (size_t i = 0; i < a.u.var->len; i++) {
-                if (!v_eq(a.u.var->fields[i], b.u.var->fields[i])) return false;
-            }
-            return true;
+        case VAL_STR: return strcmp(a.u.s ? a.u.s : "", b.u.s ? b.u.s : "") == 0;
+        case VAL_ENTITY: return a.u.ent == b.u.ent;
+        case VAL_CLOSURE: return a.u.clos == b.u.clos;
+        case VAL_HANDLE: return a.u.hdl == b.u.hdl;
+        case VAL_LIST: here.a = a.u.list; here.b = b.u.list; break;
+        case VAL_MAP: here.a = a.u.map; here.b = b.u.map; break;
+        case VAL_VARIANT: here.a = a.u.var; here.b = b.u.var; break;
         default: return false;
     }
+    if (here.a == here.b) return true;
+    for (const EqOpen *o = up; o; o = o->up) {
+        if (o->a == here.a && o->b == here.b) return true;
+    }
+    if (a.kind == VAL_LIST) {
+        size_t na = a.u.list ? a.u.list->len : 0, nb = b.u.list ? b.u.list->len : 0;
+        if (na != nb) return false;
+        for (size_t i = 0; i < na; i++) {
+            if (!v_eq_in(a.u.list->items[i], b.u.list->items[i], &here)) return false;
+        }
+        return true;
+    }
+    if (a.kind == VAL_MAP) {
+        size_t na = a.u.map ? a.u.map->len : 0, nb = b.u.map ? b.u.map->len : 0;
+        if (na != nb) return false;
+        for (size_t i = 0; i < na; i++) {
+            size_t j = 0;
+            while (j < nb && strcmp(a.u.map->entries[i].key, b.u.map->entries[j].key) != 0) j++;
+            if (j == nb || !v_eq_in(a.u.map->entries[i].val, b.u.map->entries[j].val, &here)) return false;
+        }
+        return true;
+    }
+    if (!a.u.var || !b.u.var) return false;
+    if (strcmp(a.u.var->name, b.u.var->name) != 0 || a.u.var->len != b.u.var->len) return false;
+    for (size_t i = 0; i < a.u.var->len; i++) {
+        if (!v_eq_in(a.u.var->fields[i], b.u.var->fields[i], &here)) return false;
+    }
+    return true;
 }
+
+static bool v_eq(AnimaVal a, AnimaVal b) { return v_eq_in(a, b, NULL); }
 
 // A value as text, the same as Value.String in the VM: map entries and
 // entity fields in the order of their keys.
