@@ -315,8 +315,10 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}
 	v.noInvariants = saved
-	// The callee may have written the entity, which another name may share.
+	// The callee may have written the entity, which another name may share,
+	// or inserted into a map it reaches.
 	v.forgetAliases(a.Value, env)
+	env.forgetMapLens()
 }
 
 // havocMutArgs forgets every variable passed as mut anywhere under node,

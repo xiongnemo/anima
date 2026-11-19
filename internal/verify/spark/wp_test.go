@@ -2103,3 +2103,60 @@ def g(mut rows: list[A]) -> int:
 		}
 	}
 }
+
+// A map's length changes when a key is inserted, through any name for it.
+func TestSPARKMapLengthAfterInsertion(t *testing.T) {
+	stale := map[string]string{
+		"same name": `
+def f(mut m: map[str, int]) -> int:
+    if len(m) == 0:
+        m["a"] = 1
+        return 10 / (1 - len(m))
+    return 0
+`,
+		"second name": `
+def f(mut m: map[str, int]) -> int:
+    k = m
+    if len(m) == 0:
+        k["a"] = 1
+        return 10 / (1 - len(m))
+    return 0
+`,
+		"in a loop": `
+def f(mut m: map[str, int]) -> int:
+    if len(m) == 0:
+        for i in 0..1:
+            m["a"] = 1
+        return 10 / (1 - len(m))
+    return 0
+`,
+	}
+	for name, src := range stale {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	invariant := `
+entity T:
+    tbl: map[str, int]
+    n: int[0..10]
+    invariant: len(tbl) == 0
+
+def insert(mut t: T) -> int:
+    t.tbl["a"] = 1
+    return 0
+
+def untouched(mut t: T) -> int:
+    t.n = 2
+    return 0
+
+def read(m: map[str, int]) -> int:
+    if len(m) > 0:
+        return 10 / len(m)
+    return 0
+`
+	failed := failedVCs(verifySrc(t, invariant))
+	if len(failed) != 1 || failed[0] != "insert.mut_t_invariant" {
+		t.Errorf("expected only insert.mut_t_invariant to fail, failed VCs: %v", failed)
+	}
+}

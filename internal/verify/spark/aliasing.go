@@ -342,3 +342,46 @@ func (v *verifier) checkMutAliases(groups [][]ast.Expr, env *symEnv, scope strin
 		return true
 	})
 }
+
+// A list, a string and a byte view never change their length. A map does,
+// when a key is inserted, and so may a value whose type is not known.
+func hasFixedLen(t sema.Type) bool {
+	switch t.(type) {
+	case *sema.ListType, sema.StrType, *sema.HandleType:
+		return true
+	}
+	return false
+}
+
+// forgetMapLens drops every map length: a map may have been inserted into,
+// and maps are references, so which one is not known.
+func (e *symEnv) forgetMapLens() {
+	for k := range e.mapLens {
+		delete(e.listLens, k)
+		delete(e.mapLens, k)
+	}
+}
+
+// mayInsert reports whether the code under node can insert into a map:
+// an element assignment on something that is not a list, or a mut argument.
+func (v *verifier) mayInsert(node any) bool {
+	found := false
+	visitNodes(reflect.ValueOf(node), func(n any) {
+		switch x := n.(type) {
+		case *ast.IndexAssignStmt:
+			found = found || !hasFixedLen(v.info.ExprTypes[x.List])
+		case *ast.CompoundAssignStmt:
+			if ix, ok := x.Target.(*ast.IndexExpr); ok {
+				found = found || !hasFixedLen(v.info.ExprTypes[ix.List])
+			}
+		}
+	})
+	visitExprs(reflect.ValueOf(node), func(e ast.Expr) bool {
+		args, _ := callArgs(e)
+		for _, a := range args {
+			found = found || a.Mut
+		}
+		return true
+	})
+	return found
+}

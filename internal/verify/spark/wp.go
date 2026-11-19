@@ -88,6 +88,9 @@ type symEnv struct {
 	sumInfos   map[string]listSumInfo
 	entryTerms map[string]smt.LinearTerm
 	pc         []smt.BoolExpr
+	// mapLens marks the entries of listLens that are the length of a map,
+	// which an insertion changes.
+	mapLens map[string]bool
 	// entTypes gives the entity type of each variable, and field path,
 	// that is bound to an entity.
 	entTypes map[string]*sema.EntityType
@@ -110,6 +113,7 @@ func newSymEnv() *symEnv {
 		entryTerms: map[string]smt.LinearTerm{},
 		shared:     map[string]bool{},
 		entTypes:   map[string]*sema.EntityType{},
+		mapLens:    map[string]bool{},
 		fresh:      new(int),
 	}
 }
@@ -129,6 +133,10 @@ func (e *symEnv) clone() *symEnv {
 	}
 	for k := range e.shared {
 		c.shared[k] = true
+	}
+	c.mapLens = make(map[string]bool, len(e.mapLens))
+	for k := range e.mapLens {
+		c.mapLens[k] = true
 	}
 	c.entTypes = make(map[string]*sema.EntityType, len(e.entTypes))
 	for k, t := range e.entTypes {
@@ -193,6 +201,11 @@ func (e *symEnv) unbind(name string) {
 			delete(e.entTypes, k)
 		}
 	}
+	for k := range e.mapLens {
+		if under(k) {
+			delete(e.mapLens, k)
+		}
+	}
 }
 
 // rename moves what is bound under one program name to another, keeping the symbols.
@@ -237,6 +250,12 @@ func (e *symEnv) rename(from, to string) {
 		if nk, ok := move(k); ok {
 			delete(e.entTypes, k)
 			e.entTypes[nk] = t
+		}
+	}
+	for k := range e.mapLens {
+		if nk, ok := move(k); ok {
+			delete(e.mapLens, k)
+			e.mapLens[nk] = true
 		}
 	}
 }
@@ -835,6 +854,9 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
+		if !hasFixedLen(v.info.ExprTypes[s.List]) {
+			env.forgetMapLens()
+		}
 
 	case *ast.CallStmt:
 		if s.Call != nil {
@@ -1714,6 +1736,9 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 		env.shared[name] = true
 	}
 	v.forgetWrittenAliases(stmts, env)
+	if v.mayInsert(stmts) {
+		env.forgetMapLens()
+	}
 	names, compound := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
@@ -2178,6 +2203,9 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			if argID, ok := e.Args[0].Value.(*ast.Ident); ok {
+				if !hasFixedLen(v.info.ExprTypes[argID]) {
+					env.mapLens[argID.Name] = true
+				}
 				return env.lenOf(argID.Name)
 			}
 		}
@@ -2249,6 +2277,9 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 				}
 				if _, known := env.listLens[prefix+k]; !known {
 					env.listLens[prefix+k] = t
+				}
+				if view.mapLens[k] {
+					env.mapLens[prefix+k] = true
 				}
 			}
 		}
