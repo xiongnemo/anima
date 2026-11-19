@@ -1513,9 +1513,12 @@ entity Wide:
     inner: P
     x: int[0..10]
 
+def make_p() -> P:
+    return P(x=0)
+
 def f(mut b: Wide) -> int:
     b.x = 5
-    c = b with {inner: P(x=0)}
+    c = b with {inner: make_p()}
     a = c.inner
     return 10 / a.x
 `
