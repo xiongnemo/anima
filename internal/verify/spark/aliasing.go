@@ -41,7 +41,9 @@ func (v *verifier) forgetEntity(env *symEnv, name string) {
 			}
 		}
 		for _, k := range sortedKeys(env.boolTerms) {
-			if strings.HasPrefix(k, name+".") {
+			// The keys of the map a variable holds stay in it, whatever
+			// is written through another name (forgetMapLens).
+			if strings.HasPrefix(k, name+".") && !strings.HasPrefix(k, name+inMark) {
 				env.boolTerms[k] = smt.BoolVar{Name: env.freshVar(k)}
 			}
 		}
@@ -411,6 +413,19 @@ func (e *symEnv) forgetMapLens(written ast.Expr) {
 			continue
 		}
 		e.listLens[k] = e.freshLen(k)
+	}
+	// A key that was not in such a map may be in it now.
+	for _, k := range sortedKeys(e.boolTerms) {
+		if !strings.Contains(k, inMark) {
+			continue
+		}
+		if root != nil && !e.shared[root.Name] && !strings.HasPrefix(k, root.Name+".") {
+			continue
+		}
+		// A map only gains keys: one that was in it still is.
+		now := smt.BoolVar{Name: e.freshVar("in")}
+		e.assume(smt.Implies(e.boolTerms[k], now))
+		e.boolTerms[k] = now
 	}
 }
 

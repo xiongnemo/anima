@@ -3,6 +3,7 @@ package spark
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -320,7 +321,20 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 	saved := v.noInvariants
 	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {
+		// A callee given a map cannot make the name hold another one: the
+		// keys that were in it still are (forgetMapLens).
+		kept := map[string]smt.BoolExpr{}
+		if _, isMap := v.info.ExprTypes[a.Value].(*sema.MapType); isMap {
+			for k, b := range env.boolTerms {
+				if strings.HasPrefix(k, path+inMark) {
+					kept[k] = b
+				}
+			}
+		}
 		v.bindFresh(env, path, v.info.ExprTypes[a.Value])
+		for k, b := range kept {
+			env.boolTerms[k] = b
+		}
 	} else if root := mutRoot(a.Value); root != nil {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}
@@ -411,7 +425,12 @@ func stmtExprGroups(stmt ast.Stmt) [][]ast.Expr {
 // checkMutCalls requires that a variable passed as mut in exprs, the
 // expressions of one statement, is passed by a single call and appears
 // nowhere else in them except among that call's own arguments.
-func (v *verifier) checkMutCalls(exprs []ast.Expr, scope string, span ast.Span) {
+//
+// The kernel reads the statement in the state its calls leave. So what a
+// callee may write is not read elsewhere in the statement under another
+// name either: when the variable passed as mut may be reached through
+// another name, no other such variable appears outside that call.
+func (v *verifier) checkMutCalls(exprs []ast.Expr, env *symEnv, scope string, span ast.Span) {
 	owner := map[string]ast.Expr{}
 	var roots []string
 	clash := ""
@@ -449,6 +468,24 @@ func (v *verifier) checkMutCalls(exprs []ast.Expr, scope string, span ast.Span) 
 	}
 	name := scope + ".mut_call_alone"
 	formula := "a variable passed as mut is not used elsewhere in the statement"
+	if clash == "" {
+		for _, root := range roots {
+			if !env.shared[root] {
+				continue
+			}
+			for _, other := range sortedKeys(env.shared) {
+				if other == root {
+					continue
+				}
+				if outerMentioned(exprs, other, owner[root]) {
+					v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
+						"%q is passed as mut and may be reached through %q, which is used elsewhere in this statement; "+
+							"put the call in a statement of its own", root, other), nil)
+					return
+				}
+			}
+		}
+	}
 	if clash != "" {
 		v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
 			"%q is passed as mut and also used elsewhere in this statement; "+
@@ -475,8 +512,47 @@ func mentionsOutside(n reflect.Value, root string, owner ast.Expr) bool {
 		if id, ok := e.(*ast.Ident); ok && id.Name == root {
 			found = true
 		}
+		// A parameter of that name is another variable in a lambda's body,
+		// unless owner is in that body: then it is the one owner speaks of.
+		if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, root) {
+			return owner != nil && containsExpr(lam.Body, owner)
+		}
 		return true
 	})
+	return found
+}
+
+// containsExpr reports whether target is n or a part of it.
+func containsExpr(n ast.Expr, target ast.Expr) bool {
+	found := false
+	visitExprs(reflect.ValueOf(n), func(e ast.Expr) bool {
+		if e == target {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// outerMentioned reports whether the outer variable name appears in exprs
+// anywhere but among the arguments of the call owner. A lambda's parameter
+// of that name is another variable, and hides it in the lambda's body.
+func outerMentioned(exprs []ast.Expr, name string, owner ast.Expr) bool {
+	found := false
+	for _, x := range exprs {
+		visitExprs(reflect.ValueOf(x), func(e ast.Expr) bool {
+			if found || e == owner {
+				return false
+			}
+			if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, name) {
+				return false
+			}
+			if id, ok := e.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+			return true
+		})
+	}
 	return found
 }
 

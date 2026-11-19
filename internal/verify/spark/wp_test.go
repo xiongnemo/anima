@@ -963,15 +963,23 @@ func TestSPARKMutCallAssumesEnsures(t *testing.T) {
 // the order of its reads and the call never decides a result.
 func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 	rejected := map[string]string{
-		"read beside the call":            "    y = s.n + five(mut s)\n    return 0",
-		"compound assignment":             "    s.n += five(mut s)\n    return 0",
-		"two calls":                       "    y = five(mut s) + five(mut s)\n    return 0",
-		"guard before the call":           "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
-		"field assignment":                "    s.n = five(mut s)\n    return 0",
-		"read inside a lambda":            "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
-		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
-		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
-		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"read beside the call":             "    y = s.n + five(mut s)\n    return 0",
+		"compound assignment":              "    s.n += five(mut s)\n    return 0",
+		"two calls":                        "    y = five(mut s) + five(mut s)\n    return 0",
+		"guard before the call":            "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
+		"field assignment":                 "    s.n = five(mut s)\n    return 0",
+		"read inside a lambda":             "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
+		"guard changes the match subject":  "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
+		"condition of an if":               "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
+		"condition of a while":             "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"an element under a lambda's name": "    rows = [s]\n    ys = rows |> map(r => r.n != 0 and not clear(mut s) and 10 / r.n > 1)\n    return 0",
+		"a lambda's own parameter":         "    rows = [s]\n    ys = rows |> map(r => r.n + five(mut r))\n    return 0",
+		// The same entity under another name.
+		"read under another name":       "    t = s\n    if s.n == 0 or clear(mut t):\n        return 1\n    return 10 / s.n",
+		"another name beside the call":  "    t = s\n    y = s.n + five(mut t)\n    return 0",
+		"field assignment by an alias":  "    t = s\n    s.n = five(mut t)\n    return 0",
+		"another name inside a lambda":  "    t = s\n    ys = xs |> map(x => s.n + five(mut t))\n    return 0",
+		"another name in a match guard": "    t = s\n    match s.n:\n        5 if clear(mut t) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
 	}
 	for name, body := range rejected {
 		if failed := mutCallVCs(t, body); !strings.Contains(failed, "mut_call_alone") {
@@ -979,13 +987,17 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		}
 	}
 	accepted := map[string]string{
-		"statement":                          "    y = five(mut s)\n    return 0",
-		"operand":                            "    y = 1 + five(mut s)\n    return 0",
-		"condition":                          "    if clear(mut s) and a:\n        return 1\n    return 0",
-		"guard of a match on something else": "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
-		"next statement reads":               "    y = five(mut s)\n    z = s.n + y\n    return 0",
-		"while with invariant":               "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
-		"two different variables":            "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"statement":                            "    y = five(mut s)\n    return 0",
+		"operand":                              "    y = 1 + five(mut s)\n    return 0",
+		"condition":                            "    if clear(mut s) and a:\n        return 1\n    return 0",
+		"guard of a match on something else":   "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
+		"next statement reads":                 "    y = five(mut s)\n    z = s.n + y\n    return 0",
+		"while with invariant":                 "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
+		"two different variables":              "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"another name, a statement of its own": "    t = s\n    y = five(mut t)\n    z = s.n + y\n    return 0",
+		"another name, an unrelated variable":  "    t = s\n    u = S(n=1)\n    y = u.n + five(mut t)\n    return 0",
+		"a lambda's parameter of that name":    "    ys = [five(mut s), len(xs |> map(s => s))]\n    return 0",
+		"another name, hidden by a lambda's":   "    t = s\n    ys = xs |> map(t => t + five(mut s))\n    return 0",
 	}
 	for name, body := range accepted {
 		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {
@@ -1034,6 +1046,18 @@ def fail() -> Result[int, str]:
 
 def e(mut s: S) -> Result[int, str]:
     ensures: s.n == 5
+    s.n = 0
+    x = fail()?
+    s.n = 5
+    return Ok(1)
+`, "e.ensures_1"},
+		// A lambda's parameter called result is not the function's result.
+		{"early return through ?, a lambda's result", `
+def fail() -> Result[int, str]:
+    return Err("no")
+
+def e(mut s: S, xs: list[int]) -> Result[int, str]:
+    ensures: s.n == 5 or len(xs |> filter(result => result > 0)) > 99
     s.n = 0
     x = fail()?
     s.n = 5
@@ -3501,10 +3525,153 @@ def h(xss: list[list[int]], o: Option[str], ws: list[str], m: map[str, int]) -> 
         if len(w) > 0:
             print(w[0])
     # A map is keyed.
-    if len(m) > 0:
+    if "a" in m:
         t = m["a"]
         m2: map[str, int] = {}
         m2["b"] = 1
+    return t
+`
+	if failed := failedVCs(verifySrc(t, prelude+proved)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// A map read at a key that is not there gives None, whatever the value
+// type says, so every read is proved to find its key: under `k in m`, after
+// `m[k] = v`, or a key of the literal. What is known of a key holds for the
+// map and the key it was learnt of, and a map only gains keys.
+func TestSPARKMapKeyIsPresent(t *testing.T) {
+	prelude := `
+entity T:
+    tbl: map[str, int[1..9]]
+
+def other() -> map[str, int[1..9]]:
+    m: map[str, int[1..9]] = {"b": 1}
+    return m
+
+def put(mut m: map[str, int[1..9]]) -> int:
+    m["a"] = 1
+    return 0
+
+def swap(mut b: T) -> int:
+    e: map[str, int[1..9]] = {}
+    b.tbl = e
+    return 0
+
+def g(m: map[str, int[1..9]], k: str) -> int:
+    requires: k in m
+    return 10 / m[k]
+
+def ga(m: map[str, int[1..9]]) -> int:
+    requires: "a" in m
+    return 10 / m["a"]
+
+def gt(b: T, c: T) -> int:
+    requires: "a" in c.tbl
+    return 10 / c.tbl["a"]
+`
+	rejected := map[string]string{
+		"no guard":               "def f(m: map[str, int[1..9]]) -> int:\n    return 10 / m[\"zz\"]\n",
+		"another key":            "def f(m: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return 10 / m[\"b\"]\n    return 0\n",
+		"a key not in a literal": "def f() -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    return 10 / m[\"b\"]\n",
+		"a compound write":       "def f(mut m: map[str, int]) -> int:\n    m[\"zz\"] += 1\n    return 0\n",
+		"a guard in one branch":  "def f(m: map[str, int[1..9]], c: bool) -> int:\n    t = 0\n    if c:\n        if \"a\" in m:\n            t = 1\n    return 10 / m[\"a\"]\n",
+		"the else branch":        "def f(m: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return 1\n    else:\n        return 10 / m[\"a\"]\n",
+		"an int key":             "def f(mi: map[int, int[1..9]], i: int) -> int:\n    requires: i > 0 and i < 100\n    j = i\n    if j in mi:\n        j += 1\n        return 10 / mi[j]\n    return 0\n",
+		"a field":                "def f(b: T) -> int:\n    return 10 / b.tbl[\"a\"]\n",
+		"a lambda":               "def f(ms: list[map[str, int[1..9]]]) -> list[int]:\n    return ms |> map(m => 10 / m[\"a\"])\n",
+		// The map the name holds is another one.
+		"the map assigned":          "def f() -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    if \"a\" in m:\n        m = other()\n        return 10 / m[\"a\"]\n    return 0\n",
+		"the map assigned in an if": "def f(m: map[str, int[1..9]], n: map[str, int[1..9]], c: bool) -> int:\n    x = m\n    if \"a\" in x:\n        if c:\n            x = n\n        return 10 / x[\"a\"]\n    return 0\n",
+		"the map a loop variable":   "def f(ms: list[map[str, int[1..9]]]) -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    for m in ms:\n        print(1)\n    return 10 / m[\"a\"]\n",
+		"the field assigned":        "def f(mut b: T) -> int:\n    if \"a\" in b.tbl:\n        e: map[str, int[1..9]] = {}\n        b.tbl = e\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		"the field by another name": "def f(mut b: T) -> int:\n    c = b\n    if \"a\" in b.tbl:\n        e: map[str, int[1..9]] = {}\n        c.tbl = e\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		"the field by a callee":     "def f(mut b: T) -> int:\n    if \"a\" in b.tbl:\n        z = swap(mut b)\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		// The key the name holds is another one.
+		"the key assigned":           "def f(m: map[str, int[1..9]]) -> int:\n    k = \"a\"\n    if k in m:\n        k = \"zz\"\n        return 10 / m[k]\n    return 0\n",
+		"the key a loop variable":    "def f(m: map[str, int[1..9]], ks: list[str]) -> int:\n    k = \"a\"\n    if k in m:\n        for k in ks:\n            print(k)\n        return 10 / m[k]\n    return 0\n",
+		"the key a pattern name":     "def f(m: map[str, int[1..9]], o: Option[str]) -> int:\n    k = \"a\"\n    if k in m:\n        match o:\n            Some(k) -> print(k)\n            None -> print(0)\n        return 10 / m[k]\n    return 0\n",
+		"the key a lambda parameter": "def f(m: map[str, int[1..9]], ks: list[str]) -> list[int]:\n    k = \"a\"\n    if k in m:\n        return ks |> map(k => 10 / m[k])\n    return []\n",
+		"a key of the loop":          "def f(m: map[str, int[1..9]], ks: list[str]) -> int:\n    t = 0\n    for k in ks:\n        if \"a\" in m:\n            t = 10 / m[k]\n    return t\n",
+		// A callee's requires is proved of the map and the key it is given.
+		"requires, another map":   "def f(m: map[str, int[1..9]], n: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return ga(n)\n    return 0\n",
+		"requires, another key":   "def f(m: map[str, int[1..9]], k: str, w: str) -> int:\n    if k in m:\n        return g(m, w)\n    return 0\n",
+		"requires, another field": "def f(b: T, c: T) -> int:\n    if \"a\" in b.tbl:\n        return gt(b, c)\n    return 0\n",
+	}
+	for name, src := range rejected {
+		want := "key_present"
+		if strings.HasPrefix(name, "requires") {
+			want = "_requires_1"
+		}
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, want) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, want, failed)
+		}
+	}
+	// A key that was not in the map may be in it after an insertion, by
+	// this name, another one, a callee or a loop: the branch is checked.
+	reached := map[string]string{
+		"this name":    "def f(mut m: map[str, int[1..9]], k: str) -> int:\n    if not (\"z\" in m):\n        m[k] = 1\n        if \"z\" in m:\n            return 10 / 0\n    return 0\n",
+		"another name": "def f(mut m: map[str, int[1..9]]) -> int:\n    m2 = m\n    if not (\"a\" in m):\n        m2[\"a\"] = 1\n        if \"a\" in m:\n            return 10 / 0\n    return 0\n",
+		"a callee":     "def f(mut m: map[str, int[1..9]]) -> int:\n    if not (\"a\" in m):\n        z = put(mut m)\n        if \"a\" in m:\n            return 10 / 0\n    return 0\n",
+		"a loop":       "def f(mut m: map[str, int[1..9]], ks: list[str]) -> int:\n    if not (\"z\" in m):\n        for k in ks:\n            m[k] = 1\n        if \"z\" in m:\n            return 10 / 0\n    return 0\n",
+		"a field":      "def f() -> int:\n    m: map[str, int[1..9]] = {\"b\": 1}\n    b = T(tbl=m)\n    if not (\"z\" in b.tbl):\n        m[\"z\"] = 1\n        if \"z\" in b.tbl:\n            return 10 / 0\n    return 0\n",
+		"an int key":   "def f(mut mi: map[int, int[1..9]], i: int, j: int) -> int:\n    if not (i in mi):\n        mi[j] = 1\n        if i in mi:\n            return 10 / 0\n    return 0\n",
+	}
+	// A callee that is given the entity under another name may put another
+	// map in the field, or a key in the map, while the statement is read.
+	alone := map[string]string{
+		"an insertion into the field it replaces": "def one(mut b: T) -> int[1..9]:\n    e: map[str, int[1..9]] = {}\n    b.tbl = e\n    return 1\n\ndef f(mut b: T) -> int:\n    c = b\n    b.tbl[\"a\"] = one(mut c)\n    return 10 / b.tbl[\"a\"]\n",
+		"a condition before an insertion":         "def no(mut m: map[str, int[1..9]]) -> bool:\n    m[\"a\"] = 1\n    return False\n\ndef f(mut m: map[str, int[1..9]]) -> int:\n    m2 = m\n    c = \"a\" in m or no(mut m2)\n    if not c:\n        if \"a\" in m:\n            return 10 / 0\n    return 1\n",
+	}
+	for name, src := range alone {
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, "mut_call_alone") {
+			t.Errorf("%s: expected a failed mut_call_alone, failed VCs:\n%s", name, failed)
+		}
+	}
+	for name, src := range reached {
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := `
+def f(mut m: map[str, int[1..9]], ks: list[str], mi: map[int, int], i: int, b: T) -> int:
+    t = 0
+    for k in ks:
+        if k in m:
+            t = 10 / m[k]
+    m["q"] = 3
+    t = 10 / m["q"]
+    k2 = "w"
+    m[k2] = 4
+    t = m[k2] + m["q"]
+    if "a" in m:
+        # What was found stays found when the map gains a key.
+        m["b"] = 2
+        z = put(mut m)
+        m["a"] += 1 - 1
+        t = m["a"] + m["b"]
+        t = ga(m)
+        t = g(m, k2)
+    if i in mi:
+        t = mi[i]
+        j = i
+        t = mi[j]
+    if "a" in b.tbl and "b" in b.tbl:
+        t = b.tbl["a"] + b.tbl["b"]
+        t = gt(b, b)
+    lit: map[str, int] = {"x": 1, "y": 2}
+    lit["z"] = 3
+    al = lit
+    al["u"] = 4
+    print(lit["x"], lit["y"], lit["z"], al["u"])
+    mn: map[int, int] = {1: 5}
+    print(mn[1])
+    # A closure reads the map and the key it was made with.
+    x = m
+    if k2 in x:
+        h = () => 10 / x[k2]
+        x = other()
+        t = h()
     return t
 `
 	if failed := failedVCs(verifySrc(t, prelude+proved)); len(failed) != 0 {

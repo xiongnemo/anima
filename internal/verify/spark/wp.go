@@ -172,6 +172,7 @@ func (e *symEnv) freshVar(prefix string) string {
 // unbind drops every binding of name, so a callee parameter cannot resolve to a caller variable of the same name.
 func (e *symEnv) unbind(name string) {
 	under := func(k string) bool { return k == name || strings.HasPrefix(k, name+".") }
+	e.forgetKeysOf(name)
 	for k := range e.intTerms {
 		if under(k) {
 			delete(e.intTerms, k)
@@ -748,7 +749,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			hasElse = true
 			continue
 		}
-		v.checkMutCalls([]ast.Expr{br.Guard}, scope, cn.Span)
+		v.checkMutCalls([]ast.Expr{br.Guard}, env, scope, cn.Span)
 		v.checkMutCaptures([]ast.Expr{br.Guard}, scope, cn.Span)
 		v.checkArith(br.Guard, env, scope)
 		v.evalSideEffects(br.Guard, env, scope)
@@ -786,7 +787,7 @@ func (v *verifier) execBlock(stmts []ast.Stmt, env *symEnv, scope string) bool {
 func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	groups := stmtExprGroups(stmt)
 	for _, g := range groups {
-		v.checkMutCalls(g, scope, stmt.GetSpan())
+		v.checkMutCalls(g, env, scope, stmt.GetSpan())
 		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)
@@ -835,7 +836,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		if ix, ok := s.Target.(*ast.IndexExpr); ok {
 			v.evalSideEffects(ix.List, env, scope)
 			v.evalSideEffects(ix.Index, env, scope)
-			v.proveIndex(ix.List, v.evalInt(ix.Index, env, scope, false), env, scope, s.Span)
+			v.proveIndex(ix.List, ix.Index, v.evalInt(ix.Index, env, scope, false), false, env, scope, s.Span)
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
 			v.evalSideEffects(fe.Object, env, scope)
 		}
@@ -873,12 +874,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		// The index is evaluated before the value, the write comes last.
-		v.proveIndex(s.List, v.evalInt(s.Index, env, scope, false), env, scope, s.Span)
+		v.proveIndex(s.List, s.Index, v.evalInt(s.Index, env, scope, false), true, env, scope, s.Span)
 		v.proveEntityValue(s.Value, env, scope)
 		v.proveElemAssign(s.List, s.Value, env, scope, s.Span)
 		env.forgetElemHulls()
 		if !hasFixedLen(v.info.ExprTypes[s.List]) {
 			env.forgetMapLens(s.List)
+			v.keyWritten(s.List, s.Index, env)
 		}
 
 	case *ast.CallStmt:
@@ -1223,6 +1225,16 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			if lt, ok := v.lenOfValue(rhs, env); ok {
 				env.listLens[name] = lt
 			}
+		case *sema.MapType:
+			// The keys a literal is written with are in it.
+			if ml, ok := rhs.(*ast.MapLit); ok {
+				for _, en := range ml.Entries {
+					switch en.Key.(type) {
+					case *ast.StrLit, *ast.IntLit:
+						env.boolTerms[name+inMark+v.literalKey(en.Key)] = smt.BoolConst{Val: true}
+					}
+				}
+			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
 				if ce, ok := rhs.(*ast.CallExpr); ok && len(ce.Args) >= 1 {
@@ -1409,7 +1421,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	case *ast.IndexExpr:
 		v.evalSideEffects(e.List, env, scope)
 		v.evalSideEffects(e.Index, env, scope)
-		v.proveIndex(e.List, v.evalInt(e.Index, env, scope, true), env, scope, e.Span)
+		v.proveIndex(e.List, e.Index, v.evalInt(e.Index, env, scope, true), false, env, scope, e.Span)
 	case *ast.CallExpr:
 		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
@@ -1482,12 +1494,31 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				for _, p := range fi.Type.Params {
 					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
 				}
+				// The string variables given for string parameters: a key the
+				// caller looked up by one is the key the callee names by the other.
+				strParams := map[string][]string{}
+				for i, a := range e.Args {
+					if argParam[i] < 0 {
+						continue
+					}
+					p := fi.Type.Params[argParam[i]]
+					if _, isStr := p.Type.(sema.StrType); !isStr {
+						continue
+					}
+					if id, ok := a.Value.(*ast.Ident); ok {
+						strParams[id.Name] = append(strParams[id.Name], p.Name)
+					}
+				}
 				for i, a := range e.Args {
 					if argParam[i] < 0 {
 						continue
 					}
 					p := fi.Type.Params[argParam[i]]
 					switch pt := p.Type.(type) {
+					case *sema.MapType:
+						if path, ok := mutArgPath(a.Value); ok {
+							binds = append(binds, keyBinds(env, path, p.Name, strParams)...)
+						}
 					case *sema.IntType:
 						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
 						if pt.IsBounded {
@@ -1525,6 +1556,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 									lt := env.lenOf(argID.Name + "." + f.Name)
 									path := p.Name + "." + f.Name
 									binds = append(binds, func(c *symEnv) { c.listLens[path] = lt })
+								}
+							case *sema.MapType:
+								if argID != nil {
+									binds = append(binds, keyBinds(env, argID.Name+"."+f.Name, p.Name+"."+f.Name, strParams)...)
 								}
 							}
 							if _, isInt := f.Type.(*sema.IntType); !isInt {
@@ -1903,6 +1938,7 @@ func (v *verifier) forgetRest(name string, env *symEnv) {
 	delete(env.listLens, name)
 	delete(env.listElems, name)
 	delete(env.sumInfos, name)
+	env.forgetKeysOf(name)
 	// An entity that is assigned as a whole: everything inside it.
 	for _, k := range sortedKeys(env.intTerms) {
 		if strings.HasPrefix(k, name+".") {
@@ -2491,6 +2527,10 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 			return smt.Or(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
 		case "implies":
 			return smt.Implies(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
+		case "in":
+			if _, isMap := v.info.ExprTypes[e.Right].(*sema.MapType); isMap {
+				return v.memberOf(e.Right, e.Left, env)
+			}
 		case "==", "!=", "<", "<=", ">", ">=":
 			if e.Op == "==" || e.Op == "!=" {
 				if b, ok := v.evalEquality(e, env); ok {
