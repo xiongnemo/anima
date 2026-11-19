@@ -398,6 +398,44 @@ def classify(x: int) -> int:
         0 -> return 0
         _ -> return 1
 `, VCFailed},
+		{"qualified sum stage", `
+import std.fp
+
+type Huge = int[0..9_000_000_000_000_000_000]
+
+def total(xs: list[Huge, cap=8]) -> int:
+    return xs |> fp.sum()
+`, VCFailed},
+		{"qualified sum call", `
+import std.fp
+
+type Huge = int[0..9_000_000_000_000_000_000]
+
+def total(xs: list[Huge, cap=8]) -> int:
+    return fp.sum(xs)
+`, VCFailed},
+		{"qualified sum of unbounded elements", `
+import std.fp
+
+def total(xs: list[int, cap=8]) -> int:
+    return fp.sum(xs)
+`, VCUnknown},
+		{"qualified fold call", `
+import std.fp as f
+
+type Huge = int[0..9_000_000_000_000_000_000]
+
+def total(xs: list[Huge, cap=8]) -> int:
+    return f.fold(xs, 0, (acc, x) => acc + x)
+`, VCFailed},
+		{"qualified map stage feeding a sum", `
+import std.fp
+
+type Half = int[0..4_000_000_000_000_000_000]
+
+def total(xs: list[Half, cap=2]) -> int:
+    return xs |> fp.map(x => x + x) |> fp.sum()
+`, VCFailed},
 		{"product of unconstrained ints", `
 def mul(x: int, y: int) -> int:
     return x * y
@@ -463,6 +501,17 @@ def doubled(x: int[0..1]) -> int:
 def raised() -> int:
     lo: int = -9_223_372_036_854_775_807 - 1
     return lo + 1
+`, ""},
+		{"qualified sum of bounded elements", `
+import std.fp
+
+type Score = int[0..100]
+
+def total(xs: list[Score, cap=8]) -> int:
+    return fp.sum(xs)
+
+def doubled(xs: list[Score, cap=8]) -> int:
+    return xs |> fp.map(x => x * 2) |> fp.sum()
 `, ""},
 		{"division and remainder by a constant", `
 def halve(x: int) -> int:

@@ -1241,6 +1241,14 @@ func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
 		v.checkArith(e.List, env, scope)
 		v.checkArith(e.Index, env, scope)
 	case *ast.CallExpr:
+		if name := v.stageName(e); name != "" && len(e.Args) > 0 {
+			if _, qualified := e.Callee.(*ast.FieldExpr); qualified {
+				// fp.sum(xs) runs the same code as xs |> sum().
+				stage := &ast.CallExpr{Span: e.Span, Callee: &ast.Ident{Span: e.Span, Name: name}, Args: e.Args[1:]}
+				v.checkArith(&ast.PipeExpr{Span: e.Span, Left: e.Args[0].Value, Right: stage}, env, scope)
+				break
+			}
+		}
 		v.checkArith(e.Callee, env, scope)
 		for _, a := range e.Args {
 			v.checkArith(a.Value, env, scope)
@@ -1314,6 +1322,28 @@ func (v *verifier) lambdaEnv(lam *ast.LambdaExpr, types []sema.Type, env *symEnv
 	return bodyEnv
 }
 
+// stageName is the combinator a call names, written bare (`sum`) or through the std.fp
+// module (`fp.sum`); it is empty for a method call on a value.
+func (v *verifier) stageName(call *ast.CallExpr) string {
+	switch c := call.Callee.(type) {
+	case *ast.Ident:
+		return c.Name
+	case *ast.FieldExpr:
+		// Sema does not type the callee of a pipeline stage, so fall back to the import table.
+		switch t := v.info.ExprTypes[c.Object].(type) {
+		case *sema.ModuleType:
+			if t.Path == "std.fp" {
+				return c.Field
+			}
+		case nil:
+			if id, ok := c.Object.(*ast.Ident); ok && v.info.Imports[id.Name] == "std.fp" {
+				return c.Field
+			}
+		}
+	}
+	return ""
+}
+
 // checkPipeStepArith covers the arithmetic a pipeline stage runs per element of pe.Left.
 func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope string) {
 	var name string
@@ -1321,9 +1351,7 @@ func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope strin
 	switch rhs := pe.Right.(type) {
 	case *ast.CallExpr:
 		args = rhs.Args
-		if id, ok := rhs.Callee.(*ast.Ident); ok {
-			name = id.Name
-		}
+		name = v.stageName(rhs)
 	case *ast.Ident:
 		name = rhs.Name
 	}
@@ -1472,7 +1500,7 @@ func (v *verifier) pipeMaxLen(e ast.Expr, env *symEnv) (int64, bool) {
 		if !ok {
 			break
 		}
-		if id, ok := call.Callee.(*ast.Ident); ok && (id.Name == "filter" || id.Name == "map") {
+		if name := v.stageName(call); name == "filter" || name == "map" {
 			return v.pipeMaxLen(x.Left, env)
 		}
 	}
@@ -1494,12 +1522,11 @@ func (v *verifier) pipeElemInterval(e ast.Expr, env *symEnv, scope string) smt.I
 		if !ok || len(call.Args) != 1 {
 			break
 		}
-		id, _ := call.Callee.(*ast.Ident)
 		lam, _ := call.Args[0].Value.(*ast.LambdaExpr)
-		if id == nil || lam == nil || len(lam.Params) != 1 {
+		if lam == nil || len(lam.Params) != 1 {
 			break
 		}
-		switch id.Name {
+		switch v.stageName(call) {
 		case "filter":
 			return v.pipeElemInterval(x.Left, env, scope)
 		case "map":
