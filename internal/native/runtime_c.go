@@ -474,14 +474,17 @@ static AnimaVal anima_print(AnimaVal v) {
 }
 
 // print(a, b, ...) writes its arguments on one line with a space between.
+// The line goes out in one call, so that the lines of two threads do not mix.
 static AnimaVal anima_print_n(int argc, AnimaVal *argv) {
+    AnimaBuf b = {0};
+    buf_put(&b, "");
     for (int i = 0; i < argc; i++) {
-        char *s = v_to_cstr(argv[i]);
-        printf(i > 0 ? " %s" : "%s", s);
-        free(s);
+        if (i > 0) buf_put(&b, " ");
+        v_fmt(&b, argv[i]);
     }
-    printf("\n");
+    printf("%s\n", b.p);
     fflush(stdout);
+    free(b.p);
     return v_void();
 }
 
