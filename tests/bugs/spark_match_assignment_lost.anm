@@ -1,0 +1,13 @@
+# What the arms of a match assign is the value after the match. Both arms
+# set x to zero, so the division is not proved (it always divides by zero).
+
+def f(o: Option[int]) -> int:
+    x = 1
+    match o:
+        Some(v) -> x = 0
+        None -> x = 0
+    return 10 / x
+
+def main() -> int:
+    print(f(Some(3)))
+    return 0

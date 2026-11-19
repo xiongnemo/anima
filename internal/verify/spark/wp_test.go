@@ -1216,3 +1216,176 @@ def divide(a: int[0..9], b: int[0..9]) -> int:
 		}
 	}
 }
+
+const joinPrelude = `
+entity S:
+    n: int[0..9]
+
+def make(k: int[0..9]) -> S:
+    return S(n=k)
+
+def one() -> list[int]:
+    return [1]
+
+def name_of(k: int[0..9]) -> str:
+    return "a"
+`
+
+// joinVCs verifies body as a function body and returns the VCs not proved.
+func joinVCs(t *testing.T, body string) string {
+	t.Helper()
+	src := joinPrelude + "\ndef f(o: Option[int[1..9]], n: int[0..9], c: bool, xs: list[int[0..9]]) -> int:\n" + body + "\n"
+	return strings.Join(failedVCs(verifySrc(t, src)), "\n")
+}
+
+// What a branch or an arm assigns is the value after the if or the match.
+func TestSPARKStateAfterIfAndMatch(t *testing.T) {
+	stale := map[string]string{
+		"match arms assign": `
+    x = 1
+    match o:
+        Some(v) -> x = 0
+        None -> x = 0
+    return 10 / x`,
+		"one match arm assigns": `
+    x = 5
+    match o:
+        Some(v) -> x = 0
+        None -> x = 7
+    return 10 / x`,
+		"loop inside a match arm": `
+    x = 5
+    match o:
+        Some(v) ->
+            for y in xs:
+                x = 0
+        None -> x = 7
+    return 10 / x`,
+		"match that may run no arm": `
+    t = name_of(n)
+    x = 0
+    match t:
+        "a" -> x = 2
+        "b" -> x = 3
+    return 10 / x`,
+		"boolean assigned in both branches": `
+    safe = False
+    if n == 0:
+        safe = True
+    else:
+        safe = True
+    if safe:
+        return 10 / n
+    return 1`,
+		"entity reassigned in a branch": `
+    s = S(n=3)
+    if c:
+        s = make(0)
+    return 10 / s.n`,
+	}
+	for name, body := range stale {
+		if failed := joinVCs(t, body); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	if failed := joinVCs(t, "    ys = [1, 2, 3]\n    if c:\n        ys = [1]\n    return ys[2]"); !strings.Contains(failed, "index_bounds") {
+		t.Errorf("list reassigned in a branch: expected a failed index_bounds, failed VCs:\n%s", failed)
+	}
+	precise := map[string]string{
+		"every arm assigns a nonzero value": `
+    x = 0
+    match o:
+        Some(v) -> x = 5
+        None -> x = 7
+    return 10 / x`,
+		"arm assigns the bound field": `
+    x = 0
+    match o:
+        Some(v) -> x = v
+        None -> x = 7
+    return 10 / x`,
+		"boolean records the test": `
+    ok = False
+    if n > 0:
+        ok = True
+    if ok:
+        return 10 / n
+    return 0`,
+		"nested if and match": `
+    x = 1
+    if c:
+        match o:
+            Some(v) -> x = 2
+            None -> x = 3
+    else:
+        if n > 3:
+            x = 4
+    return 10 / x`,
+		"match that may run no arm keeps a safe value": `
+    t = name_of(n)
+    x = 1
+    match t:
+        "a" -> x = 2
+        "b" -> x = 3
+    return 10 / x`,
+		"guarded arm with a catch-all": `
+    x = 1
+    match n:
+        k if k > 5 -> x = 2
+        _ -> x = 3
+    return 10 / x`,
+		"every arm returns": `
+    match o:
+        Some(v) -> return 10 / v
+        None -> return 0`,
+	}
+	for name, body := range precise {
+		if failed := joinVCs(t, body); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// An assignment replaces everything known about the variable.
+func TestSPARKAssignmentForgetsTheOldValue(t *testing.T) {
+	stale := map[string]string{
+		"entity from a call":         "    s = S(n=5)\n    s = make(0)\n    return 10 / s.n",
+		"entity from a variable":     "    s = S(n=5)\n    z = S(n=0)\n    s = z\n    return 10 / s.n",
+		"positional constructor":     "    s = S(n=5)\n    s = S(0)\n    return 10 / s.n",
+		"length of an earlier value": "    ys = one()\n    k = len(ys)\n    ys = one()\n    return 10 / (len(ys) - k + 1)",
+	}
+	for name, body := range stale {
+		if failed := joinVCs(t, body); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	if failed := joinVCs(t, "    ys = [1, 2, 3]\n    ys = one()\n    return ys[2]"); !strings.Contains(failed, "index_bounds") {
+		t.Errorf("list from a call: expected a failed index_bounds, failed VCs:\n%s", failed)
+	}
+	loop := `
+def g(xs: list[int], c: int[0..3]) -> int:
+    requires: len(xs) >= 3
+    i: int = 0
+    while i < c:
+        invariant: i >= 0
+        decreases: c - i
+        xs = []
+        i += 1
+    return 10 / len(xs)
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, loop)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("list parameter reassigned in a loop: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	precise := map[string]string{
+		"new value reads the old one":    "    s = S(n=3)\n    s = S(n=s.n + 1)\n    return 10 / (s.n - 3)",
+		"integer reads itself":           "    k = n\n    k = k + 1\n    return 10 / k",
+		"pipeline keeps the length":      "    ys = xs |> map(x => x + 1)\n    if len(xs) > 2:\n        return ys[2]\n    return 0",
+		"field set after a call":         "    s = make(n)\n    s.n = 4\n    return 10 / s.n",
+		"same unknown length read twice": "    ys = one()\n    if len(ys) > 0:\n        return 10 / len(ys)\n    return 0",
+	}
+	for name, body := range precise {
+		if failed := joinVCs(t, body); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+}
