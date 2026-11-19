@@ -13,21 +13,22 @@ import (
 func Check(prog *ast.Program) (*ProgramInfo, error) {
 	c := &checker{
 		info: &ProgramInfo{
-			Program:    prog,
-			Types:      map[string]Type{},
-			Entities:   map[string]*EntityType{},
-			ADTs:       map[string]*ADTType{},
-			Variants:   map[string]*ADTType{},
-			Ports:      map[string]*PortType{},
-			Machines:   map[string]*ast.MachineDecl{},
-			Properties: map[string]*ast.PropertyDecl{},
-			Progresses: map[string]*ast.ProgressDecl{},
-			Workflows:  map[string]*WorkflowInfo{},
-			Systems:    map[string]*ast.SystemDecl{},
-			Funcs:      map[string]*FuncInfo{},
-			ExprTypes:  map[ast.Expr]Type{},
-			Imports:    map[string]string{},
-			StdHandles: defaultStdHandles(),
+			Program:        prog,
+			Types:          map[string]Type{},
+			Entities:       map[string]*EntityType{},
+			ADTs:           map[string]*ADTType{},
+			Variants:       map[string]*ADTType{},
+			Ports:          map[string]*PortType{},
+			Machines:       map[string]*ast.MachineDecl{},
+			Properties:     map[string]*ast.PropertyDecl{},
+			Progresses:     map[string]*ast.ProgressDecl{},
+			Workflows:      map[string]*WorkflowInfo{},
+			Systems:        map[string]*ast.SystemDecl{},
+			Funcs:          map[string]*FuncInfo{},
+			ExprTypes:      map[ast.Expr]Type{},
+			LiteralTargets: map[ast.Expr]Type{},
+			Imports:        map[string]string{},
+			StdHandles:     defaultStdHandles(),
 		},
 	}
 	c.registerBuiltins()
@@ -815,7 +816,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			if !isAssignable(annoTy, valTy) && !(emptyMap && annoTy.Kind() == KindMap) {
+			if !(emptyMap && annoTy.Kind() == KindMap) && !c.assignable(annoTy, valTy, s.Value) {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s)", s.Span, valTy, s.Name, annoTy)
 			}
 			valTy = annoTy
@@ -874,7 +875,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !exists {
 				return fmt.Errorf("%s: entity %s has no field %q", s.Span, et.Name, s.Field)
 			}
-			if !isAssignable(ft, valTy) {
+			if !c.assignable(ft, valTy, s.Value) {
 				return fmt.Errorf("%s: field %s.%s expects %s, got %s", s.Span, et.Name, s.Field, ft, valTy)
 			}
 		}
@@ -897,7 +898,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if ity.Kind() != KindInt {
 				return fmt.Errorf("%s: list index must be int, got %s", s.Span, ity)
 			}
-			if !isAssignable(lt.Elem, vty) {
+			if !c.assignable(lt.Elem, vty, s.Value) {
 				return fmt.Errorf("%s: list element expects %s, got %s", s.Span, lt.Elem, vty)
 			}
 		}
@@ -905,7 +906,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
 				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
 			}
-			if !isAssignable(mt.Val, vty) {
+			if !c.assignable(mt.Val, vty, s.Value) {
 				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
 			}
 		}
@@ -1050,7 +1051,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			return err
 		}
 		if c.curReturn != nil && c.curReturn.Kind() != KindVoid {
-			if !isAssignable(c.curReturn, vty) {
+			if !c.assignable(c.curReturn, vty, s.Value) {
 				return fmt.Errorf("%s: return type mismatch: expected %s, got %s", s.Span, c.curReturn, vty)
 			}
 		}
@@ -1240,6 +1241,11 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			// are joined, as are the arguments of Result and Option.
 			elem = unifyTypes(elem, et)
 		}
+		// On its own a literal is a list of int: a narrower element range
+		// is one it is given where it goes (assignable).
+		if _, ok := elem.(*IntType); ok {
+			elem = NewUnboundedInt()
+		}
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
 	case *ast.MapLit:
@@ -1265,6 +1271,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		}
 		if !isMapKeyType(kt) {
 			return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", e.Span, kt)
+		}
+		if _, ok := vt.(*IntType); ok {
+			vt = NewUnboundedInt()
 		}
 		return &MapType{Key: kt, Val: vt}, nil
 
@@ -1424,7 +1433,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if arg.Own {
 				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
 			}
-			if !isAssignable(wi.Params[i].Type, at) {
+			if !c.assignable(wi.Params[i].Type, at, arg.Value) {
 				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
 		}
@@ -1543,7 +1552,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 						if !isRel {
 							return nil, fmt.Errorf("%s: entity %s has no field %q", a.Span, et.Name, a.Name)
 						}
-					} else if !isAssignable(ft, at) {
+					} else if !c.assignable(ft, at, a.Value) {
 						return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", a.Span, et.Name, a.Name, ft, at)
 					}
 				}
@@ -1595,7 +1604,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				} else if a.Own {
 					return nil, fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, i+1, id.Name)
 				}
-				if !isAssignable(fi.Type.Params[i].Type, at) {
+				if !c.assignable(fi.Type.Params[i].Type, at, a.Value) {
 					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
 				}
 			}
@@ -2240,12 +2249,12 @@ func isAssignable(expected, actual Type) bool {
 	if expected.Kind() == KindList && actual.Kind() == KindList {
 		el := expected.(*ListType)
 		al := actual.(*ListType)
-		return isAssignable(el.Elem, al.Elem)
+		return isAssignable(el.Elem, al.Elem) && sameElemRange(el.Elem, al.Elem)
 	}
 	if expected.Kind() == KindMap && actual.Kind() == KindMap {
 		em := expected.(*MapType)
 		am := actual.(*MapType)
-		return isAssignable(em.Key, am.Key) && isAssignable(em.Val, am.Val)
+		return isAssignable(em.Key, am.Key) && isAssignable(em.Val, am.Val) && sameElemRange(em.Val, am.Val)
 	}
 	if ea, ok := expected.(*ADTType); ok {
 		if aa, ok := actual.(*ADTType); ok && ea.Name == aa.Name {
@@ -2258,6 +2267,61 @@ func isAssignable(expected, actual Type) bool {
 		}
 	}
 	return expected.Equals(actual)
+}
+
+// sameElemRange reports whether two element types of a list or map agree on
+// the range of an int. A list is a reference: seen as a list of int[1..9]
+// by one name and as a list of int by another, a write through the second
+// breaks what the first relies on, so the two ranges have to be the same.
+func sameElemRange(expected, actual Type) bool {
+	e, ok := expected.(*IntType)
+	a, ok2 := actual.(*IntType)
+	if !ok || !ok2 {
+		return true
+	}
+	if e.IsBounded != a.IsBounded {
+		return false
+	}
+	return !e.IsBounded || (e.Lo == a.Lo && e.Hi == a.Hi)
+}
+
+// assignable is isAssignable for the value of expr. A list or map literal
+// is a new value, so it takes the element type of where it goes: its type
+// becomes expected, and the kernel proves each element in that range
+// (ProgramInfo.LiteralTargets).
+func (c *checker) assignable(expected, actual Type, expr ast.Expr) bool {
+	if expected == nil || actual == nil {
+		return true
+	}
+	switch lit := expr.(type) {
+	case *ast.ListLit:
+		el, ok := expected.(*ListType)
+		if !ok {
+			break
+		}
+		for _, x := range lit.Elems {
+			if !c.assignable(el.Elem, c.info.ExprTypes[x], x) {
+				return false
+			}
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	case *ast.MapLit:
+		em, ok := expected.(*MapType)
+		if !ok {
+			break
+		}
+		for _, en := range lit.Entries {
+			if !isAssignable(em.Key, c.info.ExprTypes[en.Key]) || !c.assignable(em.Val, c.info.ExprTypes[en.Value], en.Value) {
+				return false
+			}
+		}
+		c.info.ExprTypes[lit] = expected
+		c.info.LiteralTargets[lit] = expected
+		return true
+	}
+	return isAssignable(expected, actual)
 }
 
 func unifyTypes(a, b Type) Type {

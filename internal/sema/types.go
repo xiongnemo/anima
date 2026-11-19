@@ -333,20 +333,23 @@ type WorkflowInfo struct {
 
 // ProgramInfo holds all resolved types, symbol tables, and inferred frames.
 type ProgramInfo struct {
-	Program     *ast.Program
-	Types       map[string]Type
-	Entities    map[string]*EntityType
-	ADTs        map[string]*ADTType
-	Variants    map[string]*ADTType // variant name -> owning ADT
-	Ports       map[string]*PortType
-	Machines    map[string]*ast.MachineDecl
-	Properties  map[string]*ast.PropertyDecl
-	Progresses  map[string]*ast.ProgressDecl
-	Workflows   map[string]*WorkflowInfo
-	Systems     map[string]*ast.SystemDecl
-	Funcs       map[string]*FuncInfo
-	ExprTypes   map[ast.Expr]Type
-	Imports     map[string]string // alias -> canonical std module path
-	StdHandles  map[string]*TypestateSpec
-	Diagnostics []string
+	Program    *ast.Program
+	Types      map[string]Type
+	Entities   map[string]*EntityType
+	ADTs       map[string]*ADTType
+	Variants   map[string]*ADTType // variant name -> owning ADT
+	Ports      map[string]*PortType
+	Machines   map[string]*ast.MachineDecl
+	Properties map[string]*ast.PropertyDecl
+	Progresses map[string]*ast.ProgressDecl
+	Workflows  map[string]*WorkflowInfo
+	Systems    map[string]*ast.SystemDecl
+	Funcs      map[string]*FuncInfo
+	ExprTypes  map[ast.Expr]Type
+	// LiteralTargets: the declared type a list or map literal was given to.
+	// The kernel proves the literal's elements in its element range.
+	LiteralTargets map[ast.Expr]Type
+	Imports        map[string]string // alias -> canonical std module path
+	StdHandles     map[string]*TypestateSpec
+	Diagnostics    []string
 }

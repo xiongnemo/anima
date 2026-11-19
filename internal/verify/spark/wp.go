@@ -1215,6 +1215,8 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	var curElem smt.Interval
 	if id, ok := cur.(*ast.Ident); ok {
 		curElem = env.listElems[id.Name]
+	} else if ll, ok := cur.(*ast.ListLit); ok {
+		curElem = v.literalHull(ll, env, scope)
 	}
 	if curTy, ok := v.info.ExprTypes[cur]; ok {
 		if lt, ok := curTy.(*sema.ListType); ok {
@@ -1290,6 +1292,27 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	if curElem.HasLo && curElem.HasHi {
 		env.listElems[targetVar] = curElem
 	}
+}
+
+// literalHull bounds the int elements of a list literal: the smallest
+// interval that holds each of them, none when one is not bounded.
+func (v *verifier) literalHull(ll *ast.ListLit, env *symEnv, scope string) smt.Interval {
+	var hull smt.Interval
+	for i, el := range ll.Elems {
+		if _, ok := v.info.ExprTypes[el].(*sema.IntType); !ok {
+			return smt.Interval{}
+		}
+		iv := v.termInterval(v.evalInt(el, env, scope, false), env)
+		if !iv.HasLo || !iv.HasHi {
+			return smt.Interval{}
+		}
+		if i == 0 {
+			hull = iv
+			continue
+		}
+		hull.Lo, hull.Hi = min(hull.Lo, iv.Lo), max(hull.Hi, iv.Hi)
+	}
+	return hull
 }
 
 func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
@@ -1993,6 +2016,8 @@ func (v *verifier) pipeElemInterval(e ast.Expr, env *symEnv, scope string) smt.I
 	switch x := e.(type) {
 	case *ast.Ident:
 		return env.listElems[x.Name]
+	case *ast.ListLit:
+		return v.literalHull(x, env, scope)
 	case *ast.PipeExpr:
 		call, ok := x.Right.(*ast.CallExpr)
 		if !ok || len(call.Args) != 1 {
