@@ -1,0 +1,15 @@
+# The loop variable writes y with any int, while y kept the type int[1..9],
+# which the second loop then assumed of it.
+def f(xs: list[int], n: int) -> int:
+    y: int[1..9] = 5
+    for y in xs:
+        print(y)
+    i = 0
+    while i < n:
+        y += 0
+        i += 1
+    return 10 / y
+
+def main() -> int:
+    print(f([0], 0))
+    return 0
