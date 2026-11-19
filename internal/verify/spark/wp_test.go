@@ -1821,3 +1821,50 @@ def idf(a: A) -> A:
 		t.Errorf("after a call that only reads: expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// A forgotten alias keeps what its type says, not what an earlier binding
+// of the name said, and keeps an invariant that every write preserves.
+func TestSPARKForgottenAliasIsReboundFromItsType(t *testing.T) {
+	stale := `
+entity P1:
+    x: int[1..10]
+
+entity P2:
+    x: int
+
+def f(n: P1) -> int:
+    n = P2(x=0)
+    m = n
+    m.x = 0
+    return 10 / n.x
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, stale)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("a name rebound to another entity type: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	valid := invariantPrelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    c = b\n    b.x = 0\n    return use(c)\n"
+	if failed := failedVCs(verifySrc(t, valid)); len(failed) != 0 {
+		t.Errorf("a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
+	}
+	// c was broken before it got a second name: nothing restores it.
+	broken := invariantPrelude + "\ndef f() -> int:\n    b = A(x=5, y=5)\n    d = A(x=1, y=1)\n    b.x = 6\n    c = b\n    e = d\n    d.x = 2\n    return use(c)\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, broken)), "\n"); !strings.Contains(failed, "entity_c_invariant_1") {
+		t.Errorf("an alias that was already broken: expected a failed entity_c_invariant_1, failed VCs:\n%s", failed)
+	}
+}
+
+// `with` copies one level: a flat entity's copy is separate, the copy of an
+// entity that holds entities shares them.
+func TestSPARKWithCopySharesNestedEntities(t *testing.T) {
+	flat := aliasPrelude + "\ndef f(a: P) -> int:\n    c = a with {x: 1}\n    c.y = 2\n    return c.x + c.y\n"
+	if failed := failedVCs(verifySrc(t, flat)); len(failed) != 0 {
+		t.Errorf("copy of a flat read-only parameter: expected every VC proved, failed VCs: %v", failed)
+	}
+	nested := aliasPrelude + "\ndef f() -> int:\n    h = Holder(inner=P(x=5, y=5), k=1)\n    h.inner.x = 5\n    c = h with {k: 2}\n    h.inner.x = 0\n    g = c.inner\n    return 10 / g.x\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, nested)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("copy of an entity holding an entity: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	readonly := aliasPrelude + "\ndef f(h: Holder) -> int:\n    c = h with {k: 2}\n    c.inner.x = 0\n    return 0\n"
+	if failed := strings.Join(failedVCs(verifySrc(t, readonly)), "\n"); !strings.Contains(failed, "readonly_c") {
+		t.Errorf("copy of a read-only entity holding an entity: expected a failed readonly_c, failed VCs:\n%s", failed)
+	}
+}
