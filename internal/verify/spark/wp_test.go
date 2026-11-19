@@ -2916,6 +2916,28 @@ def f() -> int:
     pool.shutdown()
     return x
 `, "match_exhaustive_adt"},
+		{"bool patterns do not cover a string", `
+def f(s: str) -> int:
+    match s:
+        True -> return 1
+        False -> return 2
+    return 3
+`, "match_exhaustive"},
+		{"bool patterns do not cover an int inside a variant", `
+def f(o: Option[int]) -> int:
+    x = match o:
+        Some(True) -> 1
+        Some(False) -> 2
+        None -> 3
+    return x
+`, "match_exhaustive_adt"},
+		{"variant patterns do not cover a bool", `
+def f(b: bool) -> int:
+    x = match b:
+        Some(_) -> 1
+        None -> 2
+    return x
+`, "match_exhaustive"},
 		{"recursive type, covered", `
 type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
 

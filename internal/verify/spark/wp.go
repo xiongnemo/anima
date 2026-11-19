@@ -2457,7 +2457,7 @@ func extractMatchArmsFromExpr(arms []ast.MatchExprArm) []matchArmDesc {
 func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env *symEnv, scope string, span ast.Span) {
 	subjTy := v.info.ExprTypes[subj]
 	if subjTy == nil {
-		return
+		subjTy = sema.UnknownType{}
 	}
 	switch t := subjTy.(type) {
 	case *sema.IntType:
@@ -2492,19 +2492,21 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 		// as the result of a future, which the patterns then name.
 		var rows [][]ast.Pattern
 		vc, what := "match_exhaustive_default", subjTy.String()
+		_, unknown := subjTy.(sema.UnknownType)
 		for _, arm := range arms {
+			if arm.guard == nil { // a guarded arm may not run
+				rows = append(rows, []ast.Pattern{arm.pat})
+			}
+			if !unknown || vc != "match_exhaustive_default" {
+				continue
+			}
 			switch p := arm.pat.(type) {
 			case *ast.VariantPat:
-				if adt := v.info.Variants[p.Name]; adt != nil && vc == "match_exhaustive_default" {
+				if adt := v.info.Variants[p.Name]; adt != nil {
 					vc, what = "match_exhaustive_adt", adt.Name
 				}
 			case *ast.BoolPat:
-				if vc == "match_exhaustive_default" {
-					vc, what = "match_exhaustive_bool", "bool"
-				}
-			}
-			if arm.guard == nil { // a guarded arm may not run
-				rows = append(rows, []ast.Pattern{arm.pat})
+				vc, what = "match_exhaustive_bool", "bool"
 			}
 		}
 		switch t := subjTy.(type) {
@@ -2550,9 +2552,15 @@ func (v *verifier) unmatched(rows [][]ast.Pattern, types []sema.Type) ([]string,
 	}
 	adt, isADT := types[0].(*sema.ADTType)
 	_, isBool := types[0].(sema.BoolType)
-	if !isADT && !isBool && split {
+	typeKnown := types[0] != nil
+	switch types[0].(type) {
+	case sema.UnknownType, sema.TypeVar:
+		typeKnown = false
+	}
+	if !typeKnown && split {
 		// A type sema does not know, such as the result of a future or a
-		// field that is a type parameter: the patterns name the type.
+		// field that is a type parameter: the patterns name the type. A
+		// pattern of another type than the one sema knows matches nothing.
 		for _, r := range rows {
 			if vp, ok := r[0].(*ast.VariantPat); ok && v.info.Variants[vp.Name] != nil {
 				adt, isADT = v.info.Variants[vp.Name], true
