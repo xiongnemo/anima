@@ -227,12 +227,19 @@ func mutRoot(e ast.Expr) *ast.Ident {
 }
 
 // havocMutArg forgets what env knows about a mut argument, keeping its type.
-func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv) {
+// An entity's invariant is only kept when returned says that a function or
+// workflow of this program has just returned it: each proves the invariants
+// of its mut entities on the way out. Elsewhere the call may not have run,
+// and the entity may be in the middle of an update by the caller.
+func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
+	saved := v.noInvariants
+	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {
 		v.bindFresh(env, path, v.info.ExprTypes[a.Value])
 	} else if root := mutRoot(a.Value); root != nil {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}
+	v.noInvariants = saved
 }
 
 // havocMutArgs forgets every variable passed as mut anywhere under node,
@@ -242,7 +249,7 @@ func (v *verifier) havocMutArgs(node any, env *symEnv) {
 		args, _ := callArgs(e)
 		for _, a := range args {
 			if a.Mut {
-				v.havocMutArg(a, env)
+				v.havocMutArg(a, env, false)
 			}
 		}
 		return true
@@ -392,7 +399,7 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 	changed := false
 	for _, a := range args {
 		if a.Mut {
-			v.havocMutArg(a, env)
+			v.havocMutArg(a, env, true)
 			changed = true
 		}
 	}

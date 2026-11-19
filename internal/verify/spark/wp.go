@@ -259,6 +259,8 @@ type verifier struct {
 	curRetType sema.Type
 	fstrSpan   *ast.Span
 	strParams  map[string]bool
+	// noInvariants makes bindVarType bind an entity without assuming its invariants.
+	noInvariants bool
 	// bindingEnts holds the entity types bindVarType is currently expanding.
 	bindingEnts map[*sema.EntityType]bool
 }
@@ -373,6 +375,9 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 			v.bindVarType(env, fPath, f.Type)
 		}
 		// Assume entity invariants at entry
+		if v.noInvariants {
+			return
+		}
 		for _, inv := range t.Invariants {
 			b := v.evalBoolWithPrefix(inv, env, name+".")
 			env.assume(b)
@@ -1157,7 +1162,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			if !modelled {
 				for _, a := range e.Args {
 					if a.Mut {
-						v.havocMutArg(a, env)
+						v.havocMutArg(a, env, false)
 					}
 				}
 			}
@@ -1292,7 +1297,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 		for _, a := range e.Args {
 			if a.Mut {
-				v.havocMutArg(a, env)
+				v.havocMutArg(a, env, v.info.Workflows[e.Name] != nil)
 			}
 		}
 	case *ast.MatchExpr:

@@ -1067,3 +1067,55 @@ def g(mut s: S) -> int:
 		t.Errorf("a pipeline stage may pass an outer variable as mut, failed VCs:\n%s", stage)
 	}
 }
+
+// An entity's invariant is only known after a call that certainly ran.
+func TestSPARKInvariantNotAssumedWhenCallMayNotRun(t *testing.T) {
+	prelude := `
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+def keep(mut a: A) -> bool:
+    return True
+`
+	cases := map[string]string{
+		"short-circuit": `
+def g(mut a: A, c: bool) -> int:
+    a.x = 10
+    ok = c and keep(mut a)
+    z = 100 / (11 - a.x - a.y)
+    a.x = 0
+    return z
+`,
+		"loop": `
+def g(mut a: A, c: bool) -> int:
+    i: int = 0
+    z: int = 0
+    while i < 2:
+        invariant: i >= 0
+        decreases: 2 - i
+        z = 100 / (11 - a.x - a.y)
+        ok = keep(mut a)
+        a.x = 10
+        i += 1
+    a.x = 0
+    return z
+`,
+	}
+	for name, src := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, prelude+src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	// After a call that ran, the callee has re-established it.
+	ok := `
+def g(mut a: A) -> int:
+    done = keep(mut a)
+    return 100 / (11 - a.x - a.y)
+`
+	if failed := failedVCs(verifySrc(t, prelude+ok)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
