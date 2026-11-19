@@ -42,6 +42,10 @@ CGO_ENABLED=0 go build -o anima ./cmd/anima
 ./anima studio examples/escrow_service.anm
 ```
 
+## Documentation
+
+- [Design Philosophy, Core Motivation & Handover (设计哲学、核心动机与项目交接白皮书)](docs/DESIGN_AND_MOTIVATION.md)
+
 ## Standard Library (8 Verified Modules)
 
 - `std.fp` & `prelude` — Total-terminating pipelines (`|>`, `map`, `filter`, `fold`, `filter_ok`, `unwrap_or`) with length/sum refinement inference
