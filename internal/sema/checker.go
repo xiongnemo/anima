@@ -1190,8 +1190,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if pt, ok := c.info.Ports[e.Name]; ok {
 			return pt, nil
 		}
-		if fi, ok := c.info.Funcs[e.Name]; ok {
-			return fi.Type, nil
+		if _, ok := c.info.Funcs[e.Name]; ok {
+			// Neither backend has a value for a function that is not called.
+			return nil, fmt.Errorf("%s: function %s is not a value: call it, or write a lambda such as `(v) => %s(v)`", e.Span, e.Name, e.Name)
 		}
 		if adt, ok := c.info.Variants[e.Name]; ok {
 			return adt, nil

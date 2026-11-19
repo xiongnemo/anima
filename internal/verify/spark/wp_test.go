@@ -884,12 +884,6 @@ func TestSPARKMutCallForgetsCallerFacts(t *testing.T) {
             z = 10 / s.n
             y = clear(mut s)
     return 0`,
-		"function value": `
-    g = clear
-    if s.n != 0:
-        y = g(mut s)
-        return 10 / s.n
-    return 0`,
 		"old value in ensures": `
     if s.n == 3:
         y = bump(mut s)

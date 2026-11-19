@@ -290,7 +290,8 @@ func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
 	}
 }
 
-// The element-alias rule also holds for a call through a function value.
+// A function is not a value, so no call can go around the element-alias
+// rule through one.
 func TestSemaRejectsElementAliasThroughFunctionValue(t *testing.T) {
 	src := `
 entity Row:
@@ -309,8 +310,8 @@ def f(mut rows: list[Row]) -> int:
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "anti-aliasing") {
-		t.Errorf("expected an anti-aliasing error, got %v", err)
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "function bump is not a value") {
+		t.Errorf("expected bump to be rejected as a value, got %v", err)
 	}
 }
 
