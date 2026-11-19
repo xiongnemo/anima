@@ -1297,12 +1297,17 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		for _, f := range e.Fields {
-			if _, err := c.checkExpr(f.Value, sc); err != nil {
+			vt, err := c.checkExpr(f.Value, sc)
+			if err != nil {
 				return nil, err
 			}
 			if et, ok := baseTy.(*EntityType); ok {
-				if _, exists := et.FieldMap[f.Name]; !exists {
+				ft, exists := et.FieldMap[f.Name]
+				if !exists {
 					return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
+				}
+				if !c.assignable(ft, vt, f.Value) {
+					return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
 				}
 			}
 		}
