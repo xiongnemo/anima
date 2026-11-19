@@ -192,12 +192,14 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 			src = t.Inner
 		}
-		if _, ok := src.(*ast.IndexExpr); ok {
-			names = append(names, x.Name)
-		} else if p, ok := mutArgPath(src); ok {
+		if p, ok := mutArgPath(src); ok {
 			names = append(names, x.Name, pathRoot(p))
-		} else {
+		} else if v.isFreshValue(src) {
 			fresh = x.Name
+		} else {
+			// An element of a list, or what a call hands back, which may
+			// be one of its arguments.
+			names = append(names, x.Name)
 		}
 	case *ast.IndexAssignStmt:
 		stored(x.Value)
@@ -212,13 +214,97 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			stored(en.Value)
 		}
 	case *ast.CallExpr:
-		if id, ok := x.Callee.(*ast.Ident); ok && (v.info.Entities[id.Name] != nil || v.isVariantConstructor(x)) {
+		keeps := false
+		switch c := x.Callee.(type) {
+		case *ast.Ident:
+			if fi := v.info.Funcs[c.Name]; fi != nil {
+				keeps = mayKeepArgument(fi.Type.Params, fi.Type.Return)
+			} else {
+				keeps = v.info.Entities[c.Name] != nil || v.isVariantConstructor(x)
+			}
+		default:
+			// A method: a channel keeps what is sent, a pool what is submitted.
+			keeps = true
+		}
+		if keeps {
 			for _, a := range x.Args {
 				stored(a.Value)
 			}
 		}
+	case *ast.RunWorkflowExpr:
+		if wi := v.info.Workflows[x.Name]; wi != nil && mayKeepArgument(wi.Params, wi.Return) {
+			for _, a := range x.Args {
+				stored(a.Value)
+			}
+		}
+	case *ast.PipeExpr:
+		if c := v.pipedCall(x); c != nil {
+			return v.sharingOf(c)
+		}
 	}
 	return names, fresh
+}
+
+// mayKeepArgument reports whether a function with these parameters and
+// result can leave one of its arguments reachable after it returns: inside
+// a mut argument, through a handle (a channel, a pool), or as its result.
+func mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) bool {
+	if ret != nil && !isScalar(ret) {
+		return true
+	}
+	for _, p := range params {
+		if p.Mut {
+			return true
+		}
+		switch p.Type.(type) {
+		case *sema.HandleType, *sema.FuncType:
+			return true
+		}
+	}
+	return false
+}
+
+// isFreshValue reports whether e evaluates to a value nothing else can
+// reach: a literal, a new entity, or the result of a call that was given
+// nothing it could hand back.
+func (v *verifier) isFreshValue(e ast.Expr) bool {
+	scalarArgs := func(args []ast.CallArg) bool {
+		for _, a := range args {
+			if !isScalar(v.info.ExprTypes[a.Value]) {
+				return false
+			}
+		}
+		return true
+	}
+	switch x := e.(type) {
+	case *ast.ListLit, *ast.MapLit, *ast.WithExpr, *ast.LambdaExpr:
+		return true
+	case *ast.TryExpr:
+		return v.isFreshValue(x.Inner)
+	case *ast.MatchExpr:
+		for _, arm := range x.Arms {
+			if !v.isFreshValue(arm.Value) {
+				return false
+			}
+		}
+		return true
+	case *ast.RunWorkflowExpr:
+		return scalarArgs(x.Args)
+	case *ast.PipeExpr:
+		if c := v.pipedCall(x); c != nil {
+			return v.isFreshValue(c)
+		}
+	case *ast.CallExpr:
+		id, ok := x.Callee.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		if v.info.Entities[id.Name] != nil || v.isVariantConstructor(x) {
+			return true
+		}
+		return scalarArgs(x.Args)
+	}
+	return false
 }
 
 // sharedIn lists the variables that the code under node can make shared.
@@ -227,7 +313,14 @@ func (v *verifier) sharedIn(node any) []string {
 	visitNodesUntil(reflect.ValueOf(node), func(n any) bool {
 		if lam, ok := n.(*ast.LambdaExpr); ok {
 			// A lambda's parameter is not the outer variable of that name.
-			for _, name := range v.sharedIn(lam.Body) {
+			inner := v.sharedIn(lam.Body)
+			// What the lambda yields ends up where its caller puts it.
+			if _, ok := v.info.ExprTypes[lam.Body].(*sema.EntityType); ok {
+				if p, ok := mutArgPath(lam.Body); ok {
+					inner = append(inner, pathRoot(p))
+				}
+			}
+			for _, name := range inner {
 				if !slices.Contains(lam.Params, name) {
 					out = append(out, name)
 				}
