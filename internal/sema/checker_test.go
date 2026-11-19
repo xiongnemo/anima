@@ -601,6 +601,94 @@ def g() -> int:
 	}
 }
 
+// What a program calls, reads a member of, or matches against has to be
+// there at run time: sema is the only check of it.
+func TestSemaCallsMembersAndPatternsExist(t *testing.T) {
+	prelude := `
+import std.concurrent as conc
+
+type Shape = Circle(r: int, k: int) | Dot
+type Other = Left(n: int) | Right
+
+entity Box:
+    n: int[0..9]
+
+def first(n: int) -> int:
+    return n
+
+def work(n: int) -> Result[bool, str]:
+    return Ok(n > 0)
+
+def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Option[int], bx: Box) -> int:
+`
+	cases := []struct {
+		body string
+		want string // "" when the body is accepted
+	}{
+		// A function is called, not held.
+		{"g = first\n    return 0", "function first is not a value"},
+		{"ys = [first]\n    return 0", "function first is not a value"},
+		{"ys = xs |> map(first)\n    return 0", "function first is not a value"},
+		{"ys = xs |> filter(first)\n    return 0", "function first is not a value"},
+		{"t = xs |> fold(0, first)\n    return 0", "function first is not a value"},
+		{"ys = xs |> filter(5)\n    return 0", "filter takes a function"},
+		{"return first(n)", ""},
+		{"return n |> first", ""},
+		{"ys = xs |> map((v) => first(v))\n    return 0", ""},
+		{"g = (v) => first(v)\n    return g(1)", ""},
+		{"g = (v) => v > 1\n    ys = xs |> filter(g)\n    return 0", ""},
+		{"first = 3\n    return first", ""},
+		// Only a function is called.
+		{"return n(1)", "cannot be called"},
+		{"return s(1)", "cannot be called"},
+		{"return bx.n(1)", "cannot be called"},
+		{"return sh()", "cannot be called"},
+		// Members.
+		{"x = s.upper()\n    return 0", `has no member "upper"`},
+		{"x = xs.nope()\n    return 0", `has no member "nope"`},
+		{"x = m.len()\n    return 0", `has no member "len"`},
+		{"x = n.foo\n    return 0", `has no member "foo"`},
+		{"x = b.foo\n    return 0", `has no member "foo"`},
+		{"x = o.is_some()\n    return 0", "match on it to reach what it holds"},
+		{"x = first(n).foo\n    return 0", `has no member "foo"`},
+		{"x = bx.missing\n    return 0", `has no field "missing"`},
+		{"return xs.len() + s.len() + len(m) + bx.n", ""},
+		// A variant is made with all of its fields.
+		{"x = Circle(5)\n    return 0", "Circle has 2 field(s), got 1"},
+		{"x = Circle()\n    return 0", "Circle has 2 field(s), got 0"},
+		{"x = Circle(5, 6)\n    y = Dot\n    return 0", ""},
+		// A pattern names every field and has the type of its subject.
+		{"match sh:\n        Circle(r) -> return 1\n        _ -> return 0", "variant Circle has 2 field(s), pattern has 1"},
+		{"match sh:\n        Circle -> return 1\n        _ -> return 0", "variant Circle has 2 field(s), pattern has 0"},
+		{"match sh:\n        Left(v) -> return 1\n        _ -> return 0", "variant Left of Other cannot match"},
+		{"match sh:\n        1 -> return 1\n        _ -> return 0", "an int pattern cannot match"},
+		{"match s:\n        True -> return 1\n        _ -> return 0", "a bool pattern cannot match"},
+		{"match s:\n        1..5 -> return 1\n        _ -> return 0", "an int range pattern cannot match"},
+		{"match n:\n        \"a\" -> return 1\n        _ -> return 0", "a string pattern cannot match"},
+		{"match b:\n        Some(v) -> return 1\n        _ -> return 0", "a variant pattern cannot match"},
+		{"match o:\n        Some(True) -> return 1\n        _ -> return 0", "a bool pattern cannot match"},
+		{"match sh:\n        Circle(1, \"a\") -> return 1\n        _ -> return 0", "a string pattern cannot match"},
+		{"match sh:\n        Circle(1, k) -> return k\n        Circle(_, _) -> return 2\n        Dot -> return 0", ""},
+		{"match o:\n        Some(1..5) -> return 1\n        Some(v) -> return v\n        None -> return 0", ""},
+		{"match s:\n        \"a\" -> return 1\n        _ -> return 0", ""},
+		// The result of a future has no type for sema: its patterns say.
+		{"pool = conc.ThreadPool(2, 4)\n    fut = pool.submit(() => work(3))\n    r = fut.await()\n    match r:\n        Ok(True) -> print(1)\n        Ok(False) -> print(2)\n        Err(e) -> print(e)\n    pool.shutdown()\n    return 0", ""},
+	}
+	for _, tc := range cases {
+		prog, err := parser.Parse("t.anm", prelude+"    "+tc.body+"\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+}
+
 // The backends give a workflow its arguments by position, so a keyword
 // argument has to name the parameter at its place.
 func TestSemaWorkflowArgumentsInOrder(t *testing.T) {

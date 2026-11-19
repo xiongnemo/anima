@@ -1,0 +1,6 @@
+# A string has no method `upper`: the VM stopped on the call and the
+# native backend printed `()`.
+def main() -> int:
+    s = "abc"
+    print(s.upper())
+    return 0

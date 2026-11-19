@@ -1,0 +1,10 @@
+# A function that is not called is not a value: neither backend has one.
+# The VM gave an empty list here and the native build failed.
+def double(n: int[0..100]) -> int:
+    return n * 2
+
+def main() -> int:
+    xs: list[int[0..100]] = [1, 2]
+    ys = xs |> map(double)
+    print(len(ys))
+    return 0
