@@ -464,7 +464,9 @@ func (v *verifier) checkWrittenObject(obj ast.Expr, field string, scope string, 
 
 // proveElementWrite is called for a field write on an object that has no
 // name (rows[i].x = v, rows[i].x += v). The object stays inside its
-// container, so its invariants must hold with this one field known.
+// container, so its invariants must hold again right away. They held before
+// the write, as they do for everything a container holds; of the object's
+// other fields nothing else is known.
 func (v *verifier) proveElementWrite(obj ast.Expr, field string, term smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
 	et, ok := v.info.ExprTypes[obj].(*sema.EntityType)
 	if !ok || !hasInvariants(et, nil) {
@@ -472,7 +474,7 @@ func (v *verifier) proveElementWrite(obj ast.Expr, field string, term smt.Linear
 	}
 	probe := env.clone()
 	saved := v.noInvariants
-	v.noInvariants = true
+	v.noInvariants = false
 	v.bindFresh(probe, entityProbe, et)
 	v.noInvariants = saved
 	probe.intTerms[entityProbe+"."+field] = term
