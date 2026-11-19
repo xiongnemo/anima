@@ -501,6 +501,7 @@ func (v *verifier) verifyFunc(fn *ast.FuncDecl) {
 	v.curEnsures = fn.Ensures
 	v.curRetType = fi.Type.Return
 	v.curMutEnts = nil
+	v.checkParamsNotRebound(fi.Type.Params, fn.Body, scope, fn.Span)
 
 	for _, p := range fi.Type.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -563,6 +564,7 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 	v.curEnsures = nil
 	v.curRetType = wi.Return
 	v.curMutEnts = nil
+	v.checkParamsNotRebound(wi.Params, wf.Nodes, scope, wf.Span)
 
 	for _, p := range wi.Params {
 		v.bindVarType(env, p.Name, p.Type)
@@ -605,6 +607,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			continue
 		}
 		v.checkMutCalls([]ast.Expr{br.Guard}, scope, cn.Span)
+		v.checkMutCaptures([]ast.Expr{br.Guard}, scope, cn.Span)
 		v.checkArith(br.Guard, env, scope)
 		v.evalSideEffects(br.Guard, env, scope)
 		g := v.evalBool(br.Guard, env, scope)
@@ -642,6 +645,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	groups := stmtExprGroups(stmt)
 	for _, g := range groups {
 		v.checkMutCalls(g, scope, stmt.GetSpan())
+		v.checkMutCaptures(g, scope, stmt.GetSpan())
 	}
 	v.havocLambdaMutArgs(groups, env)
 	switch s := stmt.(type) {
@@ -1317,6 +1321,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Object, env, scope)
 	case *ast.TryExpr:
 		v.evalSideEffects(e.Inner, env, scope)
+		v.checkTryExit(env, scope, e.Span)
 	case *ast.RangeExpr:
 		v.evalSideEffects(e.Lo, env, scope)
 		v.evalSideEffects(e.Hi, env, scope)

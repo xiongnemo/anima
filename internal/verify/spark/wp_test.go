@@ -1014,3 +1014,56 @@ func TestSPARKCallRequiresCheckedInEveryPosition(t *testing.T) {
 		}
 	}
 }
+
+// What a caller assumes after a call has to hold on every return, and to be
+// about the caller's own variable.
+func TestSPARKMutCallContractsHoldForTheCaller(t *testing.T) {
+	cases := []struct{ name, src, wantFailed string }{
+		{"early return through ?", `
+def fail() -> Result[int, str]:
+    return Err("no")
+
+def e(mut s: S) -> Result[int, str]:
+    ensures: s.n == 5
+    s.n = 0
+    x = fail()?
+    s.n = 5
+    return Ok(1)
+`, "e.ensures_1"},
+		{"mut parameter rebound", `
+def reb(mut s: S) -> int[0..0]:
+    ensures: s.n == 5
+    s = S(n=5)
+    return 0
+`, "def:reb.mut_s_not_rebound"},
+		{"ensures about a parameter the callee reassigns", `
+def setk(mut s: S, k: int[0..9]) -> int[0..0]:
+    ensures: s.n == k
+    k = 3
+    s.n = 3
+    return 0
+
+def g(mut s: S) -> int:
+    y = setk(mut s, 0)
+    return 10 / (s.n - 3)
+`, "def:g.div_nonzero"},
+		{"lambda kept for later", `
+def g(mut s: S) -> int:
+    later = () => clear(mut s)
+    if s.n != 0:
+        y = later()
+        return 10 / s.n
+    return 0
+`, "def:g.mut_capture"},
+	}
+	for _, tc := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, mutCallPrelude+tc.src)), "\n")
+		if !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
+	}
+	stage := mutCallVCs(t, "    ys = xs |> map(x => five(mut s))\n    return 10 / (s.n + 1)")
+	if stage != "" {
+		t.Errorf("a pipeline stage may pass an outer variable as mut, failed VCs:\n%s", stage)
+	}
+}

@@ -17,7 +17,12 @@ import (
 //     the same statement (checkMutCalls). The order in which the statement
 //     reads the variable and the call changes it then never matters.
 //   - After the call the variable holds an arbitrary value of its declared
-//     type, of which the callee's `ensures` clauses are assumed.
+//     type, of which the callee's `ensures` clauses are assumed. For that to
+//     be true of every return, a `?` proves them too (checkTryExit), and a
+//     mut parameter is never rebound to another value (checkParamsNotRebound).
+//   - A lambda only passes a variable of the enclosing function as mut when
+//     it is a pipeline stage, which runs before the statement is over
+//     (checkMutCaptures).
 
 // visitExprs calls fn on every expression under n, outermost first. When fn
 // returns false the expression's own children are skipped.
@@ -45,6 +50,140 @@ func visitExprs(n reflect.Value, fn func(ast.Expr) bool) {
 		for i := 0; i < n.NumField(); i++ {
 			visitExprs(n.Field(i), fn)
 		}
+	}
+}
+
+// visitNodes calls fn on every syntax node under n: each pointer to a struct.
+func visitNodes(n reflect.Value, fn func(any)) {
+	switch n.Kind() {
+	case reflect.Interface:
+		if !n.IsNil() {
+			visitNodes(n.Elem(), fn)
+		}
+	case reflect.Pointer:
+		if n.IsNil() {
+			return
+		}
+		if n.Elem().Kind() == reflect.Struct && n.CanInterface() {
+			fn(n.Interface())
+		}
+		visitNodes(n.Elem(), fn)
+	case reflect.Slice:
+		for i := 0; i < n.Len(); i++ {
+			visitNodes(n.Index(i), fn)
+		}
+	case reflect.Struct:
+		for i := 0; i < n.NumField(); i++ {
+			visitNodes(n.Field(i), fn)
+		}
+	}
+}
+
+// reboundNames lists the names that code under node binds to a new value:
+// assignments, loop variables and pattern variables.
+func reboundNames(node any) map[string]bool {
+	names := map[string]bool{}
+	visitNodes(reflect.ValueOf(node), func(n any) {
+		switch x := n.(type) {
+		case *ast.LetAssignStmt:
+			names[x.Name] = true
+		case *ast.CompoundAssignStmt:
+			if id, ok := x.Target.(*ast.Ident); ok {
+				names[id.Name] = true
+			}
+		case *ast.ForStmt:
+			names[x.Var] = true
+		case *ast.VarPat:
+			names[x.Name] = true
+		}
+	})
+	return names
+}
+
+// checkParamsNotRebound requires that body, the code of a function or
+// workflow, never rebinds a mut parameter: the caller would keep the old
+// value while the contracts speak about the new one.
+func (v *verifier) checkParamsNotRebound(params []sema.FuncParamInfo, body any, scope string, span ast.Span) {
+	rebound := reboundNames(body)
+	for _, p := range params {
+		if !p.Mut {
+			continue
+		}
+		name := fmt.Sprintf("%s.mut_%s_not_rebound", scope, p.Name)
+		formula := "a mut parameter always names the caller's value"
+		if rebound[p.Name] {
+			v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
+				"mut parameter %q is assigned a new value, which the caller never sees; change its fields or elements instead", p.Name), nil)
+		} else {
+			v.record(name, scope, span, formula, VCProved, p.Name, nil)
+		}
+	}
+}
+
+// checkTryExit proves what a caller may rely on when a `?` returns from the
+// current function: the invariants of its mut entities and the ensures
+// clauses that do not speak about the result.
+func (v *verifier) checkTryExit(env *symEnv, scope string, span ast.Span) {
+	for _, me := range v.curMutEnts {
+		for _, inv := range me.ent.Invariants {
+			b := v.evalBoolWithPrefix(inv, env, me.varName+".")
+			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, me.varName), scope, span, env, b)
+		}
+	}
+	for idx, ens := range v.curEnsures {
+		if mentionsOutside(reflect.ValueOf(ens), "result", nil) {
+			continue
+		}
+		v.prove(fmt.Sprintf("%s.ensures_%d", v.curFuncName, idx+1), scope, span, env, v.evalBool(ens, env, scope))
+	}
+}
+
+// checkMutCaptures requires that a lambda in exprs which passes a variable
+// of the enclosing function as mut is a pipeline stage. Any other lambda may
+// run later, when nothing tells the kernel that the variable changed.
+func (v *verifier) checkMutCaptures(exprs []ast.Expr, scope string, span ast.Span) {
+	stage := map[*ast.LambdaExpr]bool{}
+	for _, x := range exprs {
+		visitExprs(reflect.ValueOf(x), func(e ast.Expr) bool {
+			switch n := e.(type) {
+			case *ast.PipeExpr:
+				if call, ok := n.Right.(*ast.CallExpr); ok {
+					for _, a := range call.Args {
+						if lam, ok := a.Value.(*ast.LambdaExpr); ok {
+							stage[lam] = true
+						}
+					}
+				}
+			case *ast.LambdaExpr:
+				if stage[n] {
+					return true
+				}
+				own := map[string]bool{}
+				visitNodes(reflect.ValueOf(n), func(sub any) {
+					if l, ok := sub.(*ast.LambdaExpr); ok {
+						for _, p := range l.Params {
+							own[p] = true
+						}
+					}
+				})
+				captured := ""
+				visitExprs(reflect.ValueOf(n.Body), func(sub ast.Expr) bool {
+					args, _ := callArgs(sub)
+					for _, a := range args {
+						if root := mutRoot(a.Value); a.Mut && root != nil && !own[root.Name] && captured == "" {
+							captured = root.Name
+						}
+					}
+					return true
+				})
+				if captured != "" {
+					v.record(scope+".mut_capture", scope, span, "a lambda that changes an outer variable is a pipeline stage", VCFailed,
+						fmt.Sprintf("this lambda passes the outer variable %q as mut and may run later; only a pipeline stage (xs |> map(...)) may do that", captured), nil)
+				}
+				return false
+			}
+			return true
+		})
 	}
 }
 
@@ -260,8 +399,11 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 	if !changed || fi.Decl == nil || len(fi.Decl.Ensures) == 0 {
 		return
 	}
-	// post is the state after the call as the callee names it.
+	// post is the state after the call as the callee names it. A parameter
+	// the callee rebinds no longer names the argument when it returns, so
+	// clauses about it are not used.
 	post := env.clone()
+	rebound := reboundNames(fi.Decl.Body)
 	params := map[string]bool{}
 	ints := map[string]smt.LinearTerm{}
 	bools := map[string]smt.BoolExpr{}
@@ -269,6 +411,9 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 	elems := map[string]smt.Interval{}
 	for i, p := range fi.Type.Params {
 		params[p.Name] = true
+		if rebound[p.Name] {
+			continue
+		}
 		from, src := p.Name, callEnv
 		if i < len(args) && args[i].Mut {
 			path, ok := mutArgPath(args[i].Value)
