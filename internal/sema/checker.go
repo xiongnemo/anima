@@ -2,6 +2,7 @@ package sema
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -1976,7 +1977,7 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 	case "std.time":
 		switch member {
 		case "now_ms":
-			return &FuncType{Return: NewIntRange(0, DefaultMaxInt, "")}, nil
+			return &FuncType{Return: NewIntRange(0, math.MaxInt64, "")}, nil
 		case "sleep_ms":
 			return &FuncType{Return: VoidType{}}, nil
 		}
@@ -2071,7 +2072,7 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 		case "read_u16_be":
 			return &FuncType{Return: NewIntRange(0, 65535, "")}, nil
 		case "read_u32_be":
-			return &FuncType{Return: NewIntRange(0, DefaultMaxInt, "")}, nil
+			return &FuncType{Return: NewIntRange(0, math.MaxUint32, "")}, nil
 		case "slice":
 			return &FuncType{Return: ht}, nil
 		}
