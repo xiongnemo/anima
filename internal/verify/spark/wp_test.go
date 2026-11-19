@@ -2426,3 +2426,201 @@ def f(mut o: Outer) -> Option[int]:
 		}
 	}
 }
+
+// The range of the elements of a list, of the values of a map and of the
+// fields of a variant is proved where they are made or written.
+func TestSPARKElementRanges(t *testing.T) {
+	rejected := map[string]struct{ src, vc string }{
+		"r11/a1": {`
+def main() -> int:
+    xs = [5, 0]
+    print(10 / xs[1])
+    return 0
+`, "div_nonzero"},
+		"r11/a2": {`
+def main() -> int:
+    m = {"a": 5, "b": 0}
+    print(10 / m["b"])
+    return 0
+`, "div_nonzero"},
+		"r11/a4": {`
+def main() -> int:
+    xs = [5, 6]
+    xs[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11/a5": {`
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "elem_assign_bounds"},
+		"r11/a9": {`
+def main() -> int:
+    xs: list[int[1..9]] = [0, 6]
+    print(10 / xs[0])
+    return 0
+`, "list_elem_bounds"},
+		"r11/a11": {`
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 1}
+    m["a"] = 0
+    print(10 / m["a"])
+    return 0
+`, "elem_assign_bounds"},
+		"r11/a13": {`
+def main() -> int:
+    xs = [5, 6]
+    for i in 0..2:
+        xs[i] = xs[i] - 5
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n6": {`
+def get(c: bool) -> Option[int[1..9]]:
+    x = 0
+    if c:
+        return Some(x)
+    return None
+
+def main() -> int:
+    match get(True):
+        Some(v) -> print(10 / v)
+        None -> print(0)
+    return 0
+`, "variant_Some_range"},
+		"r11b/n17": {`
+type Shape = Circle(r: int[1..9]) | Dot
+
+def main() -> int:
+    s = Circle(0)
+    match s:
+        Circle(r) -> print(10 / r)
+        Dot -> print(0)
+    return 0
+`, "variant_Circle_range"},
+		"r11b/n13": {`
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 0}
+    print(10 / m["a"])
+    return 0
+`, "map_value_bounds"},
+		"r11b/n24": {`
+def main() -> int:
+    y: int[1..9] = 0
+    ys = [1] |> map(v => y)
+    print(10 / ys[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n31": {`
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[1..9]] = xs |> map(x => x - 5)
+    zs = xs |> map(x => x - 5)
+    for v in zs:
+        print(10 / v)
+    return 0
+`, "list_elem_bounds"},
+		"r11b/h2": {`
+def f(xs: list[int[1..9]]) -> int:
+    s = xs |> fold(0, (a, v) => 0)
+    if len(xs) == 2:
+        return 10 / s
+    return 0
+
+def main() -> int:
+    xs: list[int[1..9]] = [1, 1]
+    print(f(xs))
+    return 0
+`, "div_nonzero"},
+		"r11b/n1": {`
+def main() -> int:
+    xs = [5, 6]
+    ys = xs
+    ys[0] = 0
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+		"r11b/n2": {`
+def zero(mut ys: list[int]) -> int:
+    ys[0] = 0
+    return 0
+
+def main() -> int:
+    xs = [5, 6]
+    r = zero(mut xs)
+    print(10 / xs[0])
+    return 0
+`, "div_nonzero"},
+	}
+	for name, tc := range rejected {
+		failed := failedVCs(verifySrc(t, tc.src))
+		found := false
+		for _, f := range failed {
+			if strings.Contains(f, tc.vc) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected a failed %s VC, failed VCs: %v", name, tc.vc, failed)
+		}
+	}
+	proved := map[string]string{
+		"r11b/p1": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 7
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/p2": `
+def main() -> int:
+    xs = [5, 6]
+    print(10 / xs[0])
+    for v in xs:
+        print(10 / v)
+    return 0
+`,
+		"r11b/p3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    print(f([5, 6]))
+    xs: list[int[1..9]] = [3, 4]
+    print(f(xs))
+    return 0
+`,
+		"r11b/p5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = mk()
+    if len(xs) > 1:
+        print(10 / xs[1])
+    m: map[str, int[1..9]] = {"a": 1}
+    m["b"] = 2
+    print(10 / m["a"])
+    return 0
+`,
+		"r11b/p6": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[2..10]] = xs |> map(x => x + 1)
+    zs = xs |> map(x => x - 5)
+    for v in ys:
+        print(10 / v)
+    return 0
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}

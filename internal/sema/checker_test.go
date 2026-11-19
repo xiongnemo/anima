@@ -313,3 +313,172 @@ def f(mut rows: list[Row]) -> int:
 		t.Errorf("expected an anti-aliasing error, got %v", err)
 	}
 }
+
+// The element range of a list or map is part of its type, and a variable
+// keeps the type of its lists, maps and variants.
+func TestSemaElementRanges(t *testing.T) {
+	rejected := map[string]string{
+		"r11/a3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    xs: list[int] = [0, 6]
+    print(f(xs))
+    return 0
+`,
+		"r11/a7": `
+def f() -> list[int[1..9]]:
+    xs: list[int] = [0, 6]
+    return xs
+
+def main() -> int:
+    ys = f()
+    if len(ys) > 0:
+        print(10 / ys[0])
+    return 0
+`,
+		"r11/a8": `
+entity B:
+    vals: list[int[1..9]]
+
+def main() -> int:
+    xs: list[int] = [0, 6]
+    b = B(vals=xs)
+    if len(b.vals) > 0:
+        print(10 / b.vals[0])
+    return 0
+`,
+		"r11/a10": `
+def f(m: map[str, int[1..9]]) -> int:
+    return 10 / m["a"]
+
+def main() -> int:
+    m: map[str, int] = {"a": 0}
+    print(f(m))
+    return 0
+`,
+		"r11b/n5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = [0, 0]
+    if len(xs) > 5:
+        xs = mk()
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/g5": `
+entity Box:
+    vals: list[int[1..9]]
+    n: int
+
+def main() -> int:
+    b = Box(vals=[1, 2], n=1)
+    ys: list[int] = [0]
+    c = b with {vals: ys}
+    print(10 / c.vals[0])
+    return 0
+`,
+		"r11b/k2": `
+def bump(mut ys: list[int[1..9]]) -> int:
+    ys[0] = 9
+    return 0
+
+def main() -> int:
+    xs = [0, 1]
+    r = bump(mut xs)
+    return 0
+`,
+		"r11b/n18": `
+def f(o: Option[int[1..9]]) -> int:
+    match o:
+        Some(v) -> return 10 / v
+        None -> return 0
+
+def main() -> int:
+    print(f(Some(0)))
+    x = 0
+    o = Some(x)
+    print(f(o))
+    return 0
+`,
+	}
+	for name, src := range rejected {
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil {
+			t.Errorf("%s: expected a type error", name)
+		}
+	}
+	accepted := map[string]string{
+		"r11b/p1": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    xs[0] = 7
+    print(10 / xs[0])
+    return 0
+`,
+		"r11b/p3": `
+def f(ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return 0
+
+def main() -> int:
+    print(f([5, 6]))
+    xs: list[int[1..9]] = [3, 4]
+    print(f(xs))
+    return 0
+`,
+		"r11b/p5": `
+def mk() -> list[int[1..9]]:
+    return [1, 2, 3]
+
+def main() -> int:
+    xs = mk()
+    if len(xs) > 1:
+        print(10 / xs[1])
+    m: map[str, int[1..9]] = {"a": 1}
+    m["b"] = 2
+    print(10 / m["a"])
+    return 0
+`,
+		"r11b/p6": `
+def main() -> int:
+    xs: list[int[1..9]] = [5, 6]
+    ys: list[int[2..10]] = xs |> map(x => x + 1)
+    zs = xs |> map(x => x - 5)
+    for v in ys:
+        print(10 / v)
+    return 0
+`,
+		"narrower variant, same list, counter": `
+def f(o: Option[int]) -> int:
+    return 0
+
+def main() -> int:
+    o: Option[int[1..9]] = Some(1)
+    print(f(o))
+    xs: list[int[1..9]] = [1]
+    xs = [2]
+    i = 0
+    i += 1
+    return 0
+`,
+	}
+	for name, src := range accepted {
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
+}
