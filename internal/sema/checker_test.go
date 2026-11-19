@@ -482,3 +482,52 @@ def main() -> int:
 		}
 	}
 }
+
+// The arguments of a call are checked against the parameters they are
+// bound to: a keyword argument by its name, a piped value first.
+func TestSemaCallArgumentsBindToTheirParameters(t *testing.T) {
+	prelude := `
+def divide(a: int[0..9], b: int[0..9]) -> int:
+    requires: a != 0
+    return b / a
+
+def pick(s: str, xs: list[int[1..9]], ys: list[int[10..20]]) -> int:
+    return 0
+
+def g() -> int:
+    zs: list[int] = [0]
+`
+	rejected := map[string]string{
+		"unknown keyword":               "divide(typo=0, 1)",
+		"too many piped arguments":      "0 |> divide(b=1, a=0)",
+		"too few piped arguments":       "2 |> divide",
+		"piped value of another type":   `zs |> pick(xs=[1], s="a")`,
+		"piped list of another range":   `"a" |> pick(zs, [10])`,
+		"keyword list of another range": `pick(ys=[10], xs=zs, s="a")`,
+		"keyword of another type":       `pick(ys=[10], xs=[1], s=1)`,
+	}
+	for name, call := range rejected {
+		prog, err := parser.Parse("t.anm", prelude+"    y = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil {
+			t.Errorf("%s: expected a type error", name)
+		}
+	}
+	accepted := map[string]string{
+		"reordered keywords":        `pick(ys=[10], xs=[1], s="a")`,
+		"piped, then keywords":      `"a" |> pick(ys=[10], xs=[1])`,
+		"piped, then by position":   `"a" |> pick([1], [10])`,
+		"keyword, then by position": `divide(a=2, 0)`,
+	}
+	for name, call := range accepted {
+		prog, err := parser.Parse("t.anm", prelude+"    y = "+call+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse failed: %v", name, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
+}

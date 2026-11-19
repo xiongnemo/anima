@@ -1447,14 +1447,18 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			if wi.Params[i].Mut && !arg.Mut {
+			pi, ok := boundParam(wi.Params, arg, i)
+			if !ok {
+				return nil, fmt.Errorf("%s: workflow %s has no parameter %q", arg.Span, e.Name, arg.Name)
+			}
+			if wi.Params[pi].Mut && !arg.Mut {
 				return nil, fmt.Errorf("%s: argument %d to workflow %s must be marked 'mut'", arg.Span, i+1, e.Name)
 			}
 			if arg.Own {
 				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
 			}
-			if !c.assignable(wi.Params[i].Type, at, arg.Value) {
-				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
+			if !c.assignable(wi.Params[pi].Type, at, arg.Value) {
+				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[pi].Type, at)
 			}
 		}
 		if err := c.checkCallAliasing(e.Args, true); err != nil {
@@ -1606,43 +1610,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 
 		// User function call
 		if fi, ok := c.info.Funcs[id.Name]; ok {
-			if len(e.Args) != len(fi.Type.Params) {
-				return nil, fmt.Errorf("%s: function %s expects %d args, got %d", e.Span, id.Name, len(fi.Type.Params), len(e.Args))
-			}
-			for i, a := range e.Args {
-				at, err := c.checkExpr(a.Value, sc)
-				if err != nil {
-					return nil, err
-				}
-				if fi.Type.Params[i].Mut {
-					if !a.Mut {
-						return nil, fmt.Errorf("%s: argument %d to %s requires 'mut'", a.Span, i+1, id.Name)
-					}
-					if root, ok := rootVarPath(a.Value); ok {
-						if err := c.ensureMutableTarget(root, sc, a.Span); err != nil {
-							return nil, err
-						}
-					} else {
-						return nil, fmt.Errorf("%s: 'mut' argument must be a variable or field", a.Span)
-					}
-				} else if a.Mut {
-					return nil, fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, i+1, id.Name)
-				}
-				if fi.Type.Params[i].Own {
-					if !a.Own {
-						return nil, fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, id.Name)
-					}
-					if _, ok := a.Value.(*ast.Ident); !ok {
-						return nil, fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
-					}
-				} else if a.Own {
-					return nil, fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, i+1, id.Name)
-				}
-				if !c.assignable(fi.Type.Params[i].Type, at, a.Value) {
-					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
-				}
-			}
-			if err := c.checkCallAliasing(e.Args, true); err != nil {
+			if err := c.checkFuncArgs(id.Name, fi, e.Args, sc, e.Span); err != nil {
 				return nil, err
 			}
 			if c.curFuncInfo != nil {
@@ -1850,17 +1818,18 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	// Determine function name and arguments on RHS
 	var fnName string
 	var callArgs []ast.CallArg
+	direct := false // the stage names a function: `x |> f` or `x |> f(a)`
 	switch rhs := e.Right.(type) {
 	case *ast.CallExpr:
 		callArgs = rhs.Args
 		switch cal := rhs.Callee.(type) {
 		case *ast.Ident:
-			fnName = cal.Name
+			fnName, direct = cal.Name, true
 		case *ast.FieldExpr:
 			fnName = cal.Field
 		}
 	case *ast.Ident:
-		fnName = rhs.Name
+		fnName, direct = rhs.Name, true
 	}
 
 	var elemTy Type = UnknownType{}
@@ -2007,10 +1976,17 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 
 	// Generic pipe: `x |> f(a)` -> call f(x, a)
 	if fi, ok := c.info.Funcs[fnName]; ok {
-		for _, a := range callArgs {
-			if _, err := c.checkExpr(a.Value, sc); err != nil {
-				return nil, err
+		if !direct {
+			for _, a := range callArgs {
+				if _, err := c.checkExpr(a.Value, sc); err != nil {
+					return nil, err
+				}
 			}
+			return fi.Type.Return, nil
+		}
+		args := append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+		if err := c.checkFuncArgs(fnName, fi, args, sc, e.Span); err != nil {
+			return nil, err
 		}
 		return fi.Type.Return, nil
 	}

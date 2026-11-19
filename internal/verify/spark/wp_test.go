@@ -1203,9 +1203,7 @@ def divide(a: int[0..9], b: int[0..9]) -> int:
 		{"by position, then keyword", "divide(2, b=0)", ""},
 		{"zero divisor by position after a keyword", "divide(b=1, 0)", "call_divide_args"},
 		{"parameter given twice", "divide(4, a=6)", "call_divide_args"},
-		{"unknown keyword", "divide(typo=0, 1)", "call_divide_args"},
 		{"piped value with a keyword for the rest", "2 |> divide(b=1)", ""},
-		{"piped value and keyword for the same parameter", "0 |> divide(b=1, a=0)", "call_divide_args"},
 	}
 	for _, tc := range cases {
 		src := prelude + "\ndef g() -> int:\n    y = " + tc.call + "\n    return 0\n"
@@ -2431,6 +2429,36 @@ def f(mut o: Outer) -> Option[int]:
 // fields of a variant is proved where they are made or written.
 func TestSPARKElementRanges(t *testing.T) {
 	rejected := map[string]struct{ src, vc string }{
+		"literal for a keyword argument": {`
+def f(a: list[int[1..9]], b: list[int[0..20]]) -> int:
+    if len(a) > 0:
+        return 100 / a[0]
+    return 0
+
+def main() -> int:
+    print(f(b=[5], a=[0]))
+    return 0
+`, "list_elem_bounds"},
+		"piped literal": {`
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    print([0] |> first)
+    return 0
+`, "list_elem_bounds"},
+		"literal after a piped value": {`
+def add(a: int[1..9], ys: list[int[1..9]]) -> int:
+    if len(ys) > 0:
+        return 10 / ys[0]
+    return a
+
+def main() -> int:
+    print(5 |> add([0]))
+    return 0
+`, "list_elem_bounds"},
 		"r11/a1": {`
 def main() -> int:
     xs = [5, 0]
@@ -2568,6 +2596,16 @@ def main() -> int:
 		}
 	}
 	proved := map[string]string{
+		"literals for reordered keyword arguments": `
+def f(a: list[int[1..9]], b: list[int[10..20]]) -> int:
+    if len(a) > 0:
+        return 100 / (a[0] - 10)
+    return 0
+
+def main() -> int:
+    print(f(b=[15], a=[5]))
+    return 0
+`,
 		"r11b/p1": `
 def main() -> int:
     xs: list[int[1..9]] = [5, 6]
