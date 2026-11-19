@@ -723,13 +723,17 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 			lC, lC, iC, iC, lC, lC, iC, vC)
 
 	case *ast.IfStmt:
+		// An elif condition may emit statements, so it is nested in the
+		// else block of the branch before it.
+		nested := 0
 		for idx, br := range s.Branches {
-			condC := g.emitExpr(br.Cond)
-			kw := "if"
 			if idx > 0 {
-				kw = "} else if"
+				g.line("} else {")
+				g.indent++
+				nested++
 			}
-			g.line("%s (v_truthy(%s)) {", kw, condC)
+			condC := g.emitExpr(br.Cond)
+			g.line("if (v_truthy(%s)) {", condC)
 			g.indent++
 			for _, bs := range br.Body {
 				if err := g.emitStmt(bs); err != nil {
@@ -749,6 +753,10 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 			g.indent--
 		}
 		g.line("}")
+		for ; nested > 0; nested-- {
+			g.indent--
+			g.line("}")
+		}
 
 	case *ast.WhileStmt:
 		g.line("while (1) {")
@@ -801,49 +809,16 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		}
 
 	case *ast.MatchStmt:
-		subjC := g.emitExpr(s.Subject)
-		subjTmp := g.freshTmp("subj")
-		g.line("AnimaVal %s = %s;", subjTmp, subjC)
-		for idx, arm := range s.Arms {
-			condC := g.emitPatternCond(arm.Pattern, subjTmp)
-			if arm.Guard != nil {
-				// Bind pattern var first inside block if needed
-				if idx == 0 {
-					g.line("if (%s) {", condC)
-				} else {
-					g.line("else if (%s) {", condC)
-				}
-				g.indent++
-				g.emitPatternBinds(arm.Pattern, subjTmp)
-				guardC := g.emitExpr(arm.Guard)
-				g.line("if (v_truthy(%s)) {", guardC)
-				g.indent++
-				for _, bs := range arm.Body {
+		return g.emitMatchArms(s.Subject, len(s.Arms),
+			func(i int) (ast.Pattern, ast.Expr) { return s.Arms[i].Pattern, s.Arms[i].Guard },
+			func(i int) error {
+				for _, bs := range s.Arms[i].Body {
 					if err := g.emitStmt(bs); err != nil {
 						return err
 					}
 				}
-				g.indent--
-				g.line("}")
-				g.indent--
-				g.line("}")
-			} else {
-				if idx == 0 {
-					g.line("if (%s) {", condC)
-				} else {
-					g.line("else if (%s) {", condC)
-				}
-				g.indent++
-				g.emitPatternBinds(arm.Pattern, subjTmp)
-				for _, bs := range arm.Body {
-					if err := g.emitStmt(bs); err != nil {
-						return err
-					}
-				}
-				g.indent--
-				g.line("}")
-			}
-		}
+				return nil
+			})
 
 	case *ast.ReturnStmt:
 		if s.Value == nil {
@@ -869,25 +844,46 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 	return nil
 }
 
-func (g *cgen) emitMatchExprAssign(me *ast.MatchExpr, dest string) error {
-	subjC := g.emitExpr(me.Subject)
+// emitMatchArms tries the arms in order and runs body for the first whose
+// pattern matches and whose guard holds; a failed guard falls through to the
+// next arm.
+func (g *cgen) emitMatchArms(subject ast.Expr, n int, arm func(i int) (ast.Pattern, ast.Expr), body func(i int) error) error {
+	subjC := g.emitExpr(subject)
 	subjTmp := g.freshTmp("msubj")
+	done := g.freshTmp("mdone")
 	g.line("AnimaVal %s = %s;", subjTmp, subjC)
-	for idx, arm := range me.Arms {
-		condC := g.emitPatternCond(arm.Pattern, subjTmp)
-		kw := "if"
-		if idx > 0 {
-			kw = "else if"
-		}
-		g.line("%s (%s) {", kw, condC)
+	g.line("bool %s = false;", done)
+	for i := 0; i < n; i++ {
+		pat, guard := arm(i)
+		g.line("if (!%s && %s) {", done, g.emitPatternCond(pat, subjTmp))
 		g.indent++
-		g.emitPatternBinds(arm.Pattern, subjTmp)
-		valC := g.emitExpr(arm.Value)
-		g.line("%s = %s;", dest, valC)
+		g.emitPatternBinds(pat, subjTmp)
+		if guard != nil {
+			guardC := g.emitExpr(guard)
+			g.line("if (v_truthy(%s)) {", guardC)
+			g.indent++
+		}
+		g.line("%s = true;", done)
+		if err := body(i); err != nil {
+			return err
+		}
+		if guard != nil {
+			g.indent--
+			g.line("}")
+		}
 		g.indent--
 		g.line("}")
 	}
 	return nil
+}
+
+func (g *cgen) emitMatchExprAssign(me *ast.MatchExpr, dest string) error {
+	return g.emitMatchArms(me.Subject, len(me.Arms),
+		func(i int) (ast.Pattern, ast.Expr) { return me.Arms[i].Pattern, me.Arms[i].Guard },
+		func(i int) error {
+			g.line("%s = %s;", dest, g.emitExpr(me.Arms[i].Value))
+			return nil
+		})
 }
 
 func (g *cgen) emitPatternCond(pat ast.Pattern, subj string) string {
@@ -927,7 +923,20 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 	}
 }
 
+// emitExpr returns a C expression for expr. A call is evaluated into a
+// temporary right here, so calls run once and in source order: C leaves the
+// evaluation order of operands and arguments unspecified.
 func (g *cgen) emitExpr(expr ast.Expr) string {
+	c := g.emitExprInline(expr)
+	if _, isCall := expr.(*ast.CallExpr); isCall {
+		tmp := g.freshTmp("call")
+		g.line("AnimaVal %s = %s;", tmp, c)
+		return tmp
+	}
+	return c
+}
+
+func (g *cgen) emitExprInline(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.IntLit:
 		return fmt.Sprintf("v_int(%dLL)", e.Value)
@@ -976,6 +985,28 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 		}
 	case *ast.BinaryExpr:
 		l := g.emitExpr(e.Left)
+		switch e.Op {
+		case "and", "or", "implies":
+			// The right operand may emit statements; run them only when it
+			// is evaluated.
+			res := g.freshTmp("sc")
+			if e.Op == "and" {
+				g.line("AnimaVal %s = v_bool(false);", res)
+				g.line("if (v_truthy(%s)) {", l)
+			} else if e.Op == "or" {
+				g.line("AnimaVal %s = v_bool(true);", res)
+				g.line("if (!v_truthy(%s)) {", l)
+			} else {
+				g.line("AnimaVal %s = v_bool(true);", res)
+				g.line("if (v_truthy(%s)) {", l)
+			}
+			g.indent++
+			r := g.emitExpr(e.Right)
+			g.line("%s = v_bool(v_truthy(%s));", res, r)
+			g.indent--
+			g.line("}")
+			return res
+		}
 		r := g.emitExpr(e.Right)
 		switch e.Op {
 		case "+":
@@ -1003,12 +1034,6 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 			return fmt.Sprintf("v_bool((%s).u.i > (%s).u.i)", l, r)
 		case ">=":
 			return fmt.Sprintf("v_bool((%s).u.i >= (%s).u.i)", l, r)
-		case "and":
-			return fmt.Sprintf("v_bool(v_truthy(%s) && v_truthy(%s))", l, r)
-		case "or":
-			return fmt.Sprintf("v_bool(v_truthy(%s) || v_truthy(%s))", l, r)
-		case "implies":
-			return fmt.Sprintf("v_bool(!v_truthy(%s) || v_truthy(%s))", l, r)
 		}
 	case *ast.ListLit:
 		if len(e.Elems) == 0 {
@@ -1075,6 +1100,13 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 			args = append(args, g.emitExpr(a.Value))
 		}
 		return fmt.Sprintf("__wf_%s(%s)", e.Name, strings.Join(args, ", "))
+	case *ast.MatchExpr:
+		tmp := g.freshTmp("mexpr")
+		g.line("AnimaVal %s = v_none();", tmp)
+		if err := g.emitMatchExprAssign(e, tmp); err != nil {
+			return "v_void()"
+		}
+		return tmp
 	case *ast.CallExpr:
 		return g.emitCallExpr(e)
 	}

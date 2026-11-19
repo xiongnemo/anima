@@ -217,30 +217,135 @@ def main() -> int:
 	}
 }
 
-// A connection moved into a worker must stay open when the function that
-// moved it later returns early through `?`.
-func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
+// runOnBothBackends verifies src, runs it on the VM and as a native binary,
+// and requires both to print want.
+func runOnBothBackends(t *testing.T, name, src, want string) {
+	t.Helper()
 	tmp := t.TempDir()
 	animaBin := buildCLI(t, tmp)
-	src := filepath.Join(tmp, "moved_then_try.anm")
-	if err := os.WriteFile(src, []byte(movedThenTrySrc), 0o644); err != nil {
+	path := filepath.Join(tmp, name+".anm")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	want := "dispatch failed: boom\nreply=late\n"
-
-	vmOut, err := exec.Command(animaBin, "run", src).CombinedOutput()
+	vmOut, err := exec.Command(animaBin, "run", path).CombinedOutput()
 	if err != nil || string(vmOut) != want {
-		t.Fatalf("VM: err=%v, output:\n%s", err, vmOut)
+		t.Fatalf("VM: err=%v, output:\n%s\nwant:\n%s", err, vmOut, want)
 	}
-	nativeBin := filepath.Join(tmp, "moved_then_try")
-	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, src).CombinedOutput(); err != nil {
+	nativeBin := filepath.Join(tmp, name)
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
 		t.Fatalf("anima build failed: %v\n%s", err, out)
 	}
 	natOut, err := exec.Command(nativeBin).CombinedOutput()
 	if err != nil || string(natOut) != want {
-		t.Fatalf("native: err=%v, output:\n%s", err, natOut)
+		t.Fatalf("native: err=%v, output:\n%s\nwant:\n%s", err, natOut, want)
 	}
 }
+
+// A connection moved into a worker must stay open when the function that
+// moved it later returns early through `?`.
+func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
+	runOnBothBackends(t, "moved_then_try", movedThenTrySrc, "dispatch failed: boom\nreply=late\n")
+}
+
+// The native backend must evaluate calls once and in source order, skip the
+// right operand of a short-circuit operator, fall through a failed match
+// guard, and lower a match expression wherever it appears.
+func TestE2EEvaluationOrderParity(t *testing.T) {
+	runOnBothBackends(t, "evaluation_order", evaluationOrderSrc, evaluationOrderWant)
+}
+
+const evaluationOrderSrc = `def a() -> int[1..1]:
+    print("a")
+    return 1
+
+def b() -> int[2..2]:
+    print("b")
+    return 2
+
+def add(x: int[0..5], y: int[0..5]) -> int[0..10]:
+    return x + y
+
+def yes(tag: str) -> bool:
+    print(tag)
+    return True
+
+def fail(tag: str) -> Result[bool, str]:
+    print(tag)
+    return Err(tag)
+
+def guarded(skip: bool) -> Result[bool, str]:
+    ok = skip or fail("or-rhs-try")?
+    return Ok(ok)
+
+def pick(n: int[0..9]) -> int[0..9]:
+    match n:
+        k if k > 5 -> return 1
+        _ -> return 0
+    return 9
+
+def pick_expr(n: int[0..9]) -> int[0..9]:
+    r = match n:
+        k if k > 5 -> 1
+        _ -> 0
+    return r
+
+def ladder(n: int[0..9]) -> str:
+    if n > 5 and yes("first"):
+        return "big"
+    elif n > 2 and yes("second"):
+        return "mid"
+    elif yes("third"):
+        return "small"
+    return "none"
+
+entity Box:
+    v: int[0..10]
+
+def main() -> int:
+    s = add(a(), b())
+    d = a() - b()
+    m = min(a(), b())
+    t = False and yes("and-rhs")
+    u = True or yes("or-rhs")
+    v = False implies yes("implies-rhs")
+    print(f"s={s} d={d} m={m} t={t} u={u} v={v}")
+    print(f"pick={pick(3)}{pick(7)} pick_expr={pick_expr(3)}{pick_expr(7)}")
+    print(f"ladder={ladder(7)},{ladder(4)},{ladder(1)}")
+    match guarded(True):
+        Ok(x) -> print(f"guarded skip ok={x}")
+        Err(e) -> print(f"guarded skip err={e}")
+    match guarded(False):
+        Ok(x) -> print(f"guarded ok={x}")
+        Err(e) -> print(f"guarded err={e}")
+    box = Box(v=0)
+    box.v = match s:
+        3 -> 7
+        _ -> 8
+    xs = [0, 0]
+    xs[1] = match d:
+        0 -> 3
+        _ -> 4
+    print(f"box={box.v} xs1={xs[1]}")
+    return 0
+`
+
+const evaluationOrderWant = `a
+b
+a
+b
+a
+b
+s=3 d=-1 m=1 t=False u=True v=True
+pick=01 pick_expr=01
+first
+second
+third
+ladder=big,mid,small
+guarded skip ok=True
+or-rhs-try
+guarded err=or-rhs-try
+box=7 xs1=4
+`
 
 const movedThenTrySrc = `import std.socket as sock
 import std.concurrent as conc
