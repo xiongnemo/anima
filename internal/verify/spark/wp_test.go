@@ -782,3 +782,23 @@ def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
 		}
 	}
 }
+
+// A guard is not trusted across a call that may change what it tested.
+func TestSPARKGuardNotKeptAcrossMutCall(t *testing.T) {
+	src := `
+entity S:
+    n: int[0..9]
+
+def clear(mut s: S) -> bool:
+    s.n = 0
+    return True
+
+def f(mut s: S) -> bool:
+    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1
+    return ok
+`
+	failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+	if !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+}

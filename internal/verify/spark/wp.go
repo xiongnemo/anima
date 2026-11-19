@@ -7,6 +7,7 @@ import (
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
 	"github.com/xiongnemo/anima/internal/verify/smt"
+	"reflect"
 )
 
 type VCStatus string
@@ -1064,11 +1065,15 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		case "and", "implies", "or":
 			// The right operand only runs when the left one does not decide the result.
 			rEnv := env.clone()
-			left := v.evalBool(e.Left, rEnv, scope)
-			if e.Op == "or" {
-				left = smt.Not(left)
+			// A call with a mut argument in either operand may change what
+			// the left operand tested, so the guard is not kept then.
+			if !passesMutArg(reflect.ValueOf(e)) {
+				left := v.evalBool(e.Left, rEnv, scope)
+				if e.Op == "or" {
+					left = smt.Not(left)
+				}
+				rEnv.assume(left)
 			}
-			rEnv.assume(left)
 			v.evalSideEffects(e.Right, rEnv, scope)
 			return
 		}
@@ -1214,6 +1219,31 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
 	}
+}
+
+// passesMutArg reports whether the syntax tree under n holds a call argument
+// marked mut. It walks by reflection so that no node kind can be missed.
+func passesMutArg(n reflect.Value) bool {
+	switch n.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return !n.IsNil() && passesMutArg(n.Elem())
+	case reflect.Slice:
+		for i := 0; i < n.Len(); i++ {
+			if passesMutArg(n.Index(i)) {
+				return true
+			}
+		}
+	case reflect.Struct:
+		if arg, ok := n.Interface().(ast.CallArg); ok && arg.Mut {
+			return true
+		}
+		for i := 0; i < n.NumField(); i++ {
+			if passesMutArg(n.Field(i)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkArith proves that no integer operation the runtime performs while evaluating expr
