@@ -245,6 +245,11 @@ func (v *verifier) prove(name, scope string, span ast.Span, env *symEnv, goal sm
 			v.record(name, scope, span, goal.String(), VCProved, "tautology", nil)
 			return
 		}
+		// A false goal still holds on a path that is never taken, as any other goal does.
+		if smt.CheckSat(smt.And(smt.Int64Pins(), env.pathCond())).Status == smt.StatusUnsat {
+			v.record(name, scope, span, goal.String(), VCProved, "unreachable", nil)
+			return
+		}
 		v.record(name, scope, span, goal.String(), VCFailed, "condition is statically false", nil)
 		return
 	}
