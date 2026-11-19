@@ -1713,6 +1713,12 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	if ft, ok := calleeTy.(*FuncType); ok {
 		return ft.Return, nil
 	}
+	// A value of a type that is known and is not a function cannot be
+	// called: the VM stops on it and the native backend gives `()`.
+	switch calleeTy.Kind() {
+	case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
+		return nil, fmt.Errorf("%s: a value of type %s cannot be called", e.Span, calleeTy)
+	}
 	return UnknownType{}, nil
 }
 
