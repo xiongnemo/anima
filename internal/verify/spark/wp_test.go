@@ -2970,6 +2970,17 @@ def f(mut xs: list[int], o: Option[list[int]]) -> int:
             return 10 / 0
     return 0
 `,
+		"boolean handed back by a call": `
+def flip(b: bool) -> bool:
+    ensures: result != b
+    return not b
+
+def f(b: bool) -> int:
+    c = flip(b)
+    if c != b:
+        return 10 / 0
+    return 0
+`,
 		"two lists that are not the same list": `
 def f(xs: list[int], ys: list[int]) -> int:
     if xs == ys:
@@ -2981,6 +2992,14 @@ def f(xs: list[int], ys: list[int]) -> int:
 		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
 			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
 		}
+	}
+	wrong := `
+def bad(b: bool) -> bool:
+    ensures: result == b
+    return not b
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, wrong)), "\n"); !strings.Contains(failed, "bad.ensures_1") {
+		t.Errorf("boolean result that is not what ensures says: expected a failed bad.ensures_1, failed VCs:\n%s", failed)
 	}
 	proved := map[string]string{
 		"boolean equal to a constant": `
@@ -3020,6 +3039,30 @@ def f(n: int, k: int) -> int:
     if n == k:
         return 10 / (n - k + 1)
     return 0
+`,
+		"boolean result in an ensures clause": `
+def same(b: bool) -> bool:
+    ensures: result == b
+    return b
+
+def flip(b: bool) -> bool:
+    ensures: result != b
+    return not b
+
+def pos(n: int) -> bool:
+    ensures: result == (n > 0)
+    return n > 0
+`,
+		"boolean in a requires clause": `
+def g(b: bool, c: bool) -> int:
+    requires: b == c
+    if b:
+        if not c:
+            return 10 / 0
+    return 0
+
+def f() -> int:
+    return g(True, True)
 `,
 	}
 	for name, src := range proved {

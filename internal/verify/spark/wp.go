@@ -1033,6 +1033,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if rTerm := v.tryEvalInt(s.Value, env); rTerm != nil {
 				env.intTerms["result"] = *rTerm
 			}
+			// A boolean result is read as a boolean by an ensures clause
+			// that compares it (evalEquality).
+			if t := v.info.ExprTypes[s.Value]; t != nil && t.Kind() == sema.KindBool {
+				env.boolTerms["result"] = v.evalBool(s.Value, env, scope)
+			} else {
+				delete(env.boolTerms, "result")
+			}
 		}
 		v.checkFunctionExitContracts(env, scope, s.Span, s.Value)
 		return true
