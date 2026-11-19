@@ -2022,3 +2022,84 @@ def f(mut rows: list[A]) -> int:
 		t.Errorf("boolean field written true: expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// Review round 5 of the aliasing work: lengths in invariants, and fields of
+// an unnamed element that are entities or lists.
+func TestSPARKInvariantsOverLengthsAndElementFields(t *testing.T) {
+	accepted := map[string]string{
+		"untouched string length": `
+entity A:
+    text: str
+    n: int[0..10]
+    invariant: len(text) > 0
+
+def f(mut a: A) -> int:
+    a.n = 1
+    return 0
+`,
+		"second name keeps list length": `
+entity A:
+    items: list[int]
+    n: int[0..10]
+    invariant: len(items) > 0
+
+def f(a: A) -> A:
+    c = a
+    return c
+`,
+		"entity and list written to an element": `
+entity I:
+    x: int[0..10]
+    invariant: x >= 1
+
+entity O:
+    inner: I
+    items: list[int]
+    n: int[0..10]
+    invariant: len(items) > 0
+
+def f(mut rows: list[O]) -> int:
+    if len(rows) > 0:
+        rows[0].inner = I(x=2)
+        rows[0].items = [1, 2]
+    return 0
+`,
+		"boolean computed from a length": `
+entity A:
+    ready: bool
+    text: str
+    invariant: ready
+
+def f(mut rows: list[A], t: str) -> int:
+    if len(rows) > 0:
+        rows[0].ready = not (len(t) < 0)
+    return 0
+`,
+	}
+	for name, src := range accepted {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+	emptied := `
+entity A:
+    text: str
+    n: int[0..10]
+    invariant: len(text) > 0
+
+def f(mut a: A) -> int:
+    a.text = ""
+    return 0
+
+def g(mut rows: list[A]) -> int:
+    if len(rows) > 0:
+        rows[0].text = ""
+    return 0
+`
+	failed := strings.Join(failedVCs(verifySrc(t, emptied)), "\n")
+	for _, vc := range []string{"f.mut_a_invariant", "g.entity_element_invariant_1"} {
+		if !strings.Contains(failed, vc) {
+			t.Errorf("string field emptied: expected a failed %s, failed VCs:\n%s", vc, failed)
+		}
+	}
+}
