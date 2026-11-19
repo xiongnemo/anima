@@ -465,7 +465,64 @@ static AnimaVal anima_print(AnimaVal v) {
     return v_void();
 }
 
+// print(a, b, ...) writes its arguments on one line with a space between.
+static AnimaVal anima_print_n(int argc, AnimaVal *argv) {
+    for (int i = 0; i < argc; i++) {
+        char *s = v_to_cstr(argv[i]);
+        printf(i > 0 ? " %s" : "%s", s);
+        free(s);
+    }
+    printf("\n");
+    fflush(stdout);
+    return v_void();
+}
+
 // ─── std.fp combinators ───
+
+static AnimaVal fp_any(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (v_truthy(v_call_clos(fn, 1, &arg))) return v_bool(true);
+        }
+    }
+    return v_bool(false);
+}
+
+static AnimaVal fp_all(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (!v_truthy(v_call_clos(fn, 1, &arg))) return v_bool(false);
+        }
+    }
+    return v_bool(true);
+}
+
+static AnimaVal fp_find(AnimaVal listv, AnimaVal fn) {
+    if (listv.kind == VAL_LIST && listv.u.list && fn.kind == VAL_CLOSURE) {
+        for (size_t i = 0; i < listv.u.list->len; i++) {
+            AnimaVal arg = listv.u.list->items[i];
+            if (v_truthy(v_call_clos(fn, 1, &arg))) return v_some(arg);
+        }
+    }
+    return v_none();
+}
+
+// The elements of a list from index lo up to hi, in a list of their own.
+static AnimaVal fp_slice(AnimaVal listv, int64_t lo, int64_t hi) {
+    AnimaVal out = v_list_new(0, NULL);
+    if (listv.kind != VAL_LIST || !listv.u.list) return out;
+    int64_t len = (int64_t)listv.u.list->len;
+    if (lo < 0) lo = 0;
+    if (hi > len) hi = len;
+    for (int64_t i = lo; i < hi; i++) v_list_push(out, listv.u.list->items[i]);
+    return out;
+}
+
+static AnimaVal fp_take(AnimaVal listv, AnimaVal n) { return fp_slice(listv, 0, n.u.i); }
+
+static AnimaVal fp_drop(AnimaVal listv, AnimaVal n) { return fp_slice(listv, n.u.i, INT64_MAX); }
 static AnimaVal fp_filter(AnimaVal listv, AnimaVal fn) {
     AnimaVal out = v_list_new(0, NULL);
     if (listv.kind == VAL_LIST && listv.u.list) {
