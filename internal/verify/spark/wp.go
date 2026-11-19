@@ -2470,6 +2470,17 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 			}
 		}
 	}
+	if _, unknown := subjTy.(sema.UnknownType); unknown {
+		// e.g. the result of a future: take the ADT from the variant patterns.
+		for _, arm := range arms {
+			if vp, ok := arm.pat.(*ast.VariantPat); ok {
+				if adt := v.info.Variants[vp.Name]; adt != nil {
+					subjTy = adt
+					break
+				}
+			}
+		}
+	}
 	switch t := subjTy.(type) {
 	case *sema.IntType:
 		st := v.evalInt(subj, env, scope, false)
@@ -2577,6 +2588,16 @@ func (v *verifier) unmatched(rows [][]ast.Pattern, types []sema.Type) ([]string,
 	}
 	adt, isADT := types[0].(*sema.ADTType)
 	_, isBool := types[0].(sema.BoolType)
+	if !isADT && !isBool && split {
+		// A type sema does not know, such as the result of a future or a
+		// field that is a type parameter: the patterns name the type.
+		for _, r := range rows {
+			if vp, ok := r[0].(*ast.VariantPat); ok && v.info.Variants[vp.Name] != nil {
+				adt, isADT = v.info.Variants[vp.Name], true
+				break
+			}
+		}
+	}
 	switch {
 	case split && isADT:
 		for _, vr := range adt.Variants {

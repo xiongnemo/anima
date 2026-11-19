@@ -2808,6 +2808,47 @@ def f(r: Result[Option[int], str]) -> int:
         Err(_) -> return -2
     return 0
 `, "match_exhaustive_adt"},
+		{"result of a future, nested patterns cover", `
+import std.concurrent as conc
+
+def work(n: int) -> Result[Option[int], str]:
+    if n > 0:
+        return Ok(Some(n))
+    return Err("neg")
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Ok(Some(3)) -> x = 1
+        Ok(Some(_)) -> x = 2
+        Ok(None) -> x = 3
+        Err(e) -> x = 4
+    pool.shutdown()
+    return x
+`, ""},
+		{"result of a future, a nested variant is missing", `
+import std.concurrent as conc
+
+def work(n: int) -> Result[Option[int], str]:
+    if n > 0:
+        return Ok(Some(n))
+    return Err("neg")
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Ok(Some(3)) -> x = 1
+        Ok(Some(_)) -> x = 2
+        Err(e) -> x = 4
+    pool.shutdown()
+    return x
+`, "match_exhaustive_adt"},
 		{"recursive type, covered", `
 type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
 
