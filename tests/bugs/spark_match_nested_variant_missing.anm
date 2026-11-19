@@ -1,0 +1,11 @@
+# `Some(Some(5))` matches no arm: the nested patterns leave a value out.
+def f(o: Option[Option[int]]) -> int:
+    match o:
+        Some(Some(1)) -> return 1
+        Some(None) -> return 3
+        None -> return 4
+    return 5
+
+def main() -> int:
+    print(f(Some(Some(5))))
+    return 0

@@ -602,6 +602,7 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
     char *buf = malloc((size_t)max_b + 1);
     ssize_t n = recv(hv.u.hdl->fd, buf, (size_t)max_b, 0);
     if (n < 0) { int e = errno; free(buf); return v_err(strerror(e)); }
+    if (n == 0) { free(buf); return v_err("EOF"); }
     buf[n] = '\0';
     AnimaVal r = v_ok(v_str(buf));
     free(buf);

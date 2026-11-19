@@ -1321,12 +1321,13 @@ func TestSPARKStateAfterIfAndMatch(t *testing.T) {
         if n > 3:
             x = 4
     return 10 / x`,
-		"match that may run no arm keeps a safe value": `
+		"match whose catch-all keeps the value": `
     t = name_of(n)
     x = 1
     match t:
         "a" -> x = 2
         "b" -> x = 3
+        _ -> x = 1
     return 10 / x`,
 		"guarded arm with a catch-all": `
     x = 1
@@ -2701,6 +2702,270 @@ def wait(t: int) -> int:
 	for name, src := range proved {
 		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
 			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
+// A literal nested in a variant pattern matches only that value, so it does
+// not cover the variant; a match on a string needs a catch-all arm.
+func TestSPARKMatchExhaustivenessWithNestedAndStringPatterns(t *testing.T) {
+	cases := []struct {
+		name, src, wantFailed string
+	}{
+		{"nested literal does not cover Ok", `
+def f(r: Result[int, str]) -> int:
+    match r:
+        Ok(0) -> return 0
+        Err(e) -> return 1
+    return 2
+`, "match_exhaustive_adt"},
+		{"nested literal plus a binding arm covers Ok", `
+def f(r: Result[int, str]) -> int:
+    match r:
+        Ok(0) -> return 0
+        Ok(n) -> return 1
+        Err(e) -> return 2
+    return 3
+`, ""},
+		{"nested literal in Some", `
+def f(o: Option[int]) -> int:
+    match o:
+        Some(5) -> return 0
+        None -> return 1
+    return 2
+`, "match_exhaustive_adt"},
+		{"string match without a catch-all", `
+def f(cmd: str) -> int:
+    match cmd:
+        "get" -> return 0
+        "set" -> return 1
+    return 2
+`, "match_exhaustive_default"},
+		{"string match with a catch-all", `
+def f(cmd: str) -> int:
+    match cmd:
+        "get" -> return 0
+        _ -> return 1
+    return 2
+`, ""},
+		{"guarded catch-all is not a catch-all", `
+def f(cmd: str, n: int) -> int:
+    match cmd:
+        "get" -> return 0
+        other if n > 0 -> return 1
+    return 2
+`, "match_exhaustive_default"},
+		{"nested variants cover between them", `
+def f(o: Option[Option[int]]) -> int:
+    match o:
+        Some(Some(1)) -> return 1
+        Some(Some(v)) -> return 2
+        Some(None) -> return 3
+        None -> return 4
+`, ""},
+		{"a nested variant is missing", `
+def f(o: Option[Option[int]]) -> int:
+    match o:
+        Some(Some(1)) -> return 1
+        Some(None) -> return 3
+        None -> return 4
+    return 5
+`, "match_exhaustive_adt"},
+		{"two fields cover between them", `
+type Tree = Leaf(v: int) | Node(l: Option[int], r: Option[int])
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(0) -> return 0
+        Leaf(v) -> return 1
+        Node(Some(a), Some(b)) -> return 2
+        Node(Some(a), None) -> return 3
+        Node(None, _) -> return 4
+`, ""},
+		{"one combination of two fields is missing", `
+type Cmd = Get(key: str) | Set(key: str, on: bool) | Quit
+
+def f(c: Cmd) -> int:
+    match c:
+        Get(k) -> return 2
+        Set(_, False) -> return 4
+        Set("a", True) -> return 3
+        Quit -> return 6
+    return 7
+`, "match_exhaustive_adt"},
+		{"nested bools cover between them", `
+def f(a: Option[bool]) -> int:
+    match a:
+        Some(True) -> return 1
+        Some(False) -> return 2
+        None -> return 3
+`, ""},
+		{"a guarded nested arm does not cover", `
+def f(r: Result[Option[int], str]) -> int:
+    match r:
+        Ok(Some(v)) if v > 0 -> return v
+        Ok(None) -> return -1
+        Err(_) -> return -2
+    return 0
+`, "match_exhaustive_adt"},
+		{"result of a future, nested patterns cover", `
+import std.concurrent as conc
+
+def work(n: int) -> Result[Option[int], str]:
+    if n > 0:
+        return Ok(Some(n))
+    return Err("neg")
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Ok(Some(3)) -> x = 1
+        Ok(Some(_)) -> x = 2
+        Ok(None) -> x = 3
+        Err(e) -> x = 4
+    pool.shutdown()
+    return x
+`, ""},
+		{"result of a future, a nested variant is missing", `
+import std.concurrent as conc
+
+def work(n: int) -> Result[Option[int], str]:
+    if n > 0:
+        return Ok(Some(n))
+    return Err("neg")
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Ok(Some(3)) -> x = 1
+        Ok(Some(_)) -> x = 2
+        Err(e) -> x = 4
+    pool.shutdown()
+    return x
+`, "match_exhaustive_adt"},
+		{"a bare None inside Some is a value too", `
+def f() -> int:
+    o = Some(None)
+    x = 0
+    match o:
+        Some(Some(_)) -> x = 1
+        None -> x = 2
+    return x
+`, "match_exhaustive_adt"},
+		{"a bare None is a value of Option", `
+def f() -> int:
+    o = None
+    x = 0
+    match o:
+        Some(v) -> x = 1
+    return x
+`, "match_exhaustive_adt"},
+		{"bool result of a future, both values", `
+import std.concurrent as conc
+
+def work(n: int) -> bool:
+    return n > 0
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        True -> x = 1
+        False -> x = 2
+    pool.shutdown()
+    return x
+`, ""},
+		{"bool result of a future, one value", `
+import std.concurrent as conc
+
+def work(n: int) -> bool:
+    return n > 0
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        True -> x = 1
+    pool.shutdown()
+    return x
+`, "match_exhaustive_bool"},
+		{"bool inside the result of a future, one value", `
+import std.concurrent as conc
+
+def work(n: int) -> Option[bool]:
+    return Some(n > 0)
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => work(3))
+    r = fut.await()
+    x = 0
+    match r:
+        Some(True) -> x = 1
+        None -> x = 2
+    pool.shutdown()
+    return x
+`, "match_exhaustive_adt"},
+		{"bool patterns do not cover a string", `
+def f(s: str) -> int:
+    match s:
+        True -> return 1
+        False -> return 2
+    return 3
+`, "match_exhaustive"},
+		{"bool patterns do not cover an int inside a variant", `
+def f(o: Option[int]) -> int:
+    x = match o:
+        Some(True) -> 1
+        Some(False) -> 2
+        None -> 3
+    return x
+`, "match_exhaustive_adt"},
+		{"variant patterns do not cover a bool", `
+def f(b: bool) -> int:
+    x = match b:
+        Some(_) -> 1
+        None -> 2
+    return x
+`, "match_exhaustive"},
+		{"recursive type, covered", `
+type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(_) -> return 0
+        Node(Leaf(_), Leaf(_)) -> return 1
+        Node(Node(_, _), _) -> return 2
+        Node(_, Node(_, _)) -> return 2
+`, ""},
+		{"recursive type, one shape missing", `
+type Tree = Leaf(v: int) | Node(l: Tree, r: Tree)
+
+def f(t: Tree) -> int:
+    match t:
+        Leaf(_) -> return 0
+        Node(Leaf(_), Leaf(_)) -> return 1
+        Node(Node(_, _), Leaf(_)) -> return 2
+    return 3
+`, "match_exhaustive_adt"},
+	}
+	for _, c := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n")
+		switch {
+		case c.wantFailed == "" && failed != "":
+			t.Errorf("%s: expected every VC to be proved, failed:\n%s", c.name, failed)
+		case c.wantFailed != "" && !strings.Contains(failed, c.wantFailed):
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", c.name, c.wantFailed, failed)
 		}
 	}
 }

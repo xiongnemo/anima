@@ -129,6 +129,9 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
+		{"../tests/bugs/spark_match_nested_literal.anm", "match_exhaustive_adt"},
+		{"../tests/bugs/spark_match_nested_variant_missing.anm", "no arm for Some(Some(_))"},
+		{"../tests/bugs/spark_match_str_no_default.anm", "match_exhaustive_default"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},
 		{"../tests/bugs/dining_philosophers_deadlock.anm", "DEADLOCK"},
@@ -429,6 +432,133 @@ def main() -> int:
     b = m["b"]
     print(f"a={a} b={b} xs={xs[0]},{xs[1]}")
     return 0
+`
+
+// A literal or range nested in a variant pattern must be compared, on both
+// backends, instead of matching every value of the variant.
+func TestE2ENestedPatternParity(t *testing.T) {
+	runOnBothBackends(t, "nested_patterns", nestedPatternSrc,
+		"zero small other 5 too big\nempty circle circle 2 flat rect 2x3 dot\nfive some 6 none\n")
+}
+
+const nestedPatternSrc = `type Shape = Circle(r: int[0..9]) | Rect(w: int[0..9], h: int[0..9]) | Dot
+
+def get(n: int[0..9]) -> Result[int, str]:
+    if n > 7:
+        return Err("big")
+    return Ok(n)
+
+def classify(n: int[0..9]) -> str:
+    match get(n):
+        Ok(0) -> return "zero"
+        Ok(1..3) -> return "small"
+        Ok(k) -> return f"other {k}"
+        Err("big") -> return "too big"
+        Err(e) -> return e
+    return "?"
+
+def area(s: Shape) -> str:
+    return match s:
+        Circle(0) -> "empty circle"
+        Circle(r) -> f"circle {r}"
+        Rect(w, 0) -> "flat"
+        Rect(w, h) -> f"rect {w}x{h}"
+        Dot -> "dot"
+
+def opt(o: Option[int]) -> str:
+    match o:
+        Some(5) -> return "five"
+        Some(x) -> return f"some {x}"
+        None -> return "none"
+    return "?"
+
+def main() -> int:
+    print(f"{classify(0)} {classify(2)} {classify(5)} {classify(9)}")
+    print(f"{area(Circle(r=0))} {area(Circle(r=2))} {area(Rect(w=2, h=0))} {area(Rect(w=2, h=3))} {area(Dot)}")
+    print(f"{opt(Some(5))} {opt(Some(6))} {opt(None)}")
+    return 0
+`
+
+// An arm that is not taken binds nothing: neither a pattern that fails
+// after one of its names was reached, nor one whose guard fails.
+func TestE2EUntakenArmBindsNothing(t *testing.T) {
+	runOnBothBackends(t, "untaken_arm", untakenArmSrc, "2 2 2\n7\n5\n300\n7 5 300\n")
+}
+
+const untakenArmSrc = `type P = Pair(a: int, b: int) | Zed
+
+def later_field(p: P) -> int:
+    x = 5
+    match p:
+        Pair(x, 0) -> return 1
+        _ -> return 10 / x
+
+def later_field_expr(p: P) -> int:
+    x = 5
+    y = match p:
+        Pair(x, 0) -> 1
+        _ -> 10 / x
+    return y
+
+def guard(n: int) -> int:
+    x = 5
+    match n:
+        x if x > 100 -> return 1
+        _ -> return 10 / x
+
+def taken(p: P) -> int:
+    x = 5
+    match p:
+        Pair(x, _) -> print(x)
+        Zed -> print(2)
+    return x
+
+def guarded(n: int) -> int:
+    x = 5
+    match n:
+        x if x > 100 -> print(x)
+        _ -> print(x)
+    return x
+
+def main() -> int:
+    print(f"{later_field(Pair(0, 1))} {later_field_expr(Pair(0, 1))} {guard(0)}")
+    print(f"{taken(Pair(7, 1))} {guarded(3)} {guarded(300)}")
+    return 0
+`
+
+// Reading from a connection the peer has closed is an error on both backends.
+func TestE2ERecvAtEOFParity(t *testing.T) {
+	runOnBothBackends(t, "recv_eof", recvEOFSrc, "bye / error: EOF\n")
+}
+
+const recvEOFSrc = `import std.socket as sock
+
+def read_all(conn: sock.TcpStream) -> str:
+    first = match conn.recv_text(16):
+        Ok(text) -> text
+        Err(e) -> "error: " + e
+    second = match conn.recv_text(16):
+        Ok(text) -> "data: " + text
+        Err(e) -> "error: " + e
+    return first + " / " + second
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            match sock.connect_tcp("127.0.0.1", ln.port()):
+                Ok(client) ->
+                    match ln.accept(timeout_ms=3000):
+                        Ok(server) ->
+                            sent = server.send_text("bye")
+                            server.close()
+                            print(read_all(client))
+                        Err(e) -> print(f"accept failed: {e}")
+                    client.close()
+                Err(e) -> print(f"connect failed: {e}")
+            ln.close()
+            return 0
+        Err(e) -> print(f"listen failed: {e}")
+    return 1
 `
 
 const movedThenTrySrc = `import std.socket as sock
