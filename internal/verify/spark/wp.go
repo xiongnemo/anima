@@ -293,6 +293,58 @@ func (e *symEnv) pathAtoms() []smt.LinearAtom {
 	return out
 }
 
+// fieldView is a copy of e in which every name n that expr mentions is what
+// e has under prefix+n, and nothing else: a variable of e with the name of
+// a field is not seen.
+func (e *symEnv) fieldView(expr ast.Expr, prefix string) *symEnv {
+	view := e.clone()
+	seen := map[string]bool{}
+	visitExprs(reflect.ValueOf(expr), func(x ast.Expr) bool {
+		id, ok := x.(*ast.Ident)
+		if !ok || seen[id.Name] {
+			return true
+		}
+		seen[id.Name] = true
+		n, from := id.Name, prefix+id.Name
+		view.unbind(n)
+		under := func(k string) (string, bool) {
+			if k == from || strings.HasPrefix(k, from+".") {
+				return n + k[len(from):], true
+			}
+			return "", false
+		}
+		for k, t := range e.intTerms {
+			if nk, ok := under(k); ok {
+				view.intTerms[nk] = t.Clone()
+			}
+		}
+		for k, b := range e.boolTerms {
+			if nk, ok := under(k); ok {
+				view.boolTerms[nk] = b
+			}
+		}
+		for k, t := range e.listLens {
+			if nk, ok := under(k); ok {
+				view.listLens[nk] = t.Clone()
+			}
+		}
+		for k, iv := range e.listElems {
+			if nk, ok := under(k); ok {
+				view.listElems[nk] = iv
+			}
+		}
+		// A field with no value yet is its own symbol, the same one each time.
+		if _, ok := view.intTerms[n]; !ok {
+			view.intTerms[n] = smt.Var(from)
+		}
+		if _, ok := view.boolTerms[n]; !ok {
+			view.boolTerms[n] = smt.BoolVar{Name: from}
+		}
+		return true
+	})
+	return view
+}
+
 func (e *symEnv) pathCond() smt.BoolExpr {
 	return smt.And(e.pc...)
 }
@@ -2177,7 +2229,19 @@ func (v *verifier) evalBool(expr ast.Expr, env *symEnv, scope string) smt.BoolEx
 	return v.evalBoolWithPrefix(expr, env, "")
 }
 
+// evalBoolWithPrefix evaluates expr with each name n in it standing for the
+// variable prefix+n: an entity's invariant, written over its fields, for
+// the entity bound under a path.
 func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string) smt.BoolExpr {
+	if prefix != "" {
+		// Evaluate in a view where the names are bound to the fields, so
+		// that every form of expression reads them, and nothing else.
+		view := env.fieldView(expr, prefix)
+		b := v.evalBoolWithPrefix(expr, view, "")
+		// What was learned about the symbols the evaluation made.
+		env.pc = append(env.pc, view.pc[len(env.pc):]...)
+		return b
+	}
 	switch e := expr.(type) {
 	case *ast.BoolLit:
 		return smt.BoolConst{Val: e.Value}
@@ -2200,8 +2264,8 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		case "implies":
 			return smt.Implies(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
 		case "==", "!=", "<", "<=", ">", ">=":
-			l := v.evalIntPrefixed(e.Left, env, prefix)
-			r := v.evalIntPrefixed(e.Right, env, prefix)
+			l := v.evalInt(e.Left, env, "", false)
+			r := v.evalInt(e.Right, env, "", false)
 			switch e.Op {
 			case "==":
 				return smt.Eq(l, r)
@@ -2219,47 +2283,6 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		}
 	}
 	return smt.BoolVar{Name: env.freshVar("bool")}
-}
-
-func (v *verifier) evalIntPrefixed(expr ast.Expr, env *symEnv, prefix string) smt.LinearTerm {
-	if prefix == "" {
-		return v.evalInt(expr, env, "", false)
-	}
-	if id, ok := expr.(*ast.Ident); ok {
-		path := prefix + id.Name
-		if t, ok := env.intTerms[path]; ok {
-			return t
-		}
-		return smt.Var(path)
-	}
-	if be, ok := expr.(*ast.BinaryExpr); ok {
-		l := v.evalIntPrefixed(be.Left, env, prefix)
-		r := v.evalIntPrefixed(be.Right, env, prefix)
-		switch be.Op {
-		case "+":
-			return l.Add(r)
-		case "-":
-			return l.Sub(r)
-		case "*":
-			if len(r.Coeffs) == 0 {
-				return l.Scale(r.Const)
-			}
-			if len(l.Coeffs) == 0 {
-				return r.Scale(l.Const)
-			}
-			ivL := v.termInterval(l, env)
-			ivR := v.termInterval(r, env)
-			mv := smt.Var(env.freshVar("mul"))
-			// With no bound mv stays free, so nothing about the product, not even that it
-			// fits in 64 bits, can be proved.
-			if prod := smt.MulInterval(ivL, ivR); prod.HasLo && prod.HasHi {
-				env.assume(smt.Ge(mv, smt.Const(prod.Lo)))
-				env.assume(smt.Le(mv, smt.Const(prod.Hi)))
-			}
-			return mv
-		}
-	}
-	return v.evalInt(expr, env, "", false)
 }
 
 // ---------------------------------------------------------------------------
