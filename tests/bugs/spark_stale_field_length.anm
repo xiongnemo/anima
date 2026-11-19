@@ -1,0 +1,16 @@
+# The length of the list in a field is known from the guard, and is the
+# length of another list once the field is assigned.
+entity Bag:
+    items: list[int]
+
+def f(mut b: Bag) -> int:
+    if len(b.items) > 3:
+        b.items = [1]
+        return b.items[3]
+    return 0
+
+def main() -> int:
+    b = Bag(items=[1, 2, 3, 4])
+    r = f(mut b)
+    print(r)
+    return 0

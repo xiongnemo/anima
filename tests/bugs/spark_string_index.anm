@@ -1,0 +1,7 @@
+# An index into a string was not proved in range: a str function returned None.
+def sixth(s: str) -> str:
+    return s[5]
+
+def main() -> int:
+    print(sixth("ab"))
+    return 0

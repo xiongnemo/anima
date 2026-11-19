@@ -1,0 +1,10 @@
+# An index into a list that no variable holds, an element of another list
+# here, was not proved in range: an int function returned None.
+def cell(rows: list[list[int]]) -> int:
+    if len(rows) > 0:
+        return rows[0][2]
+    return 0
+
+def main() -> int:
+    print(cell([[1]]))
+    return 0

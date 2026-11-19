@@ -1,0 +1,11 @@
+# A write to an element was not proved in range. Out of it the write is
+# dropped: set() returned as if ys[i] were 7.
+def set(mut ys: list[int], i: int) -> int:
+    ys[i] = 7
+    return 7
+
+def main() -> int:
+    ys = [1]
+    r = set(mut ys, 1)
+    print(r, ys)
+    return 0

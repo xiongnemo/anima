@@ -1,0 +1,12 @@
+# Only an index into a list held by a variable was proved in range. Through
+# a field it went unchecked: an int function returned None.
+entity Bag:
+    items: list[int]
+
+def third(b: Bag) -> int:
+    return b.items[3]
+
+def main() -> int:
+    b = Bag(items=[1])
+    print(third(b))
+    return 0

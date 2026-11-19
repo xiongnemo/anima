@@ -3379,3 +3379,135 @@ def f(n: int) -> int:
 		t.Errorf("a variable without a range: expected a failed div_nonzero, failed VCs:\n%s", failed)
 	}
 }
+
+// Out of range a read gives None and a write is dropped, so every index
+// into a list or a string is proved inside it: through a field, of a
+// string, of a list no variable holds, and where an element is written.
+func TestSPARKEveryIndexIsProved(t *testing.T) {
+	prelude := `
+entity Bag:
+    items: list[int]
+    name: str
+
+entity Shelf:
+    bag: Bag
+    n: int[0..9]
+
+def keep(b: Bag) -> Bag:
+    return b
+
+def shrink(mut b: Bag) -> int:
+    b.items = [1]
+    return 0
+
+def one() -> list[int]:
+    return [1]
+`
+	rejected := map[string]string{
+		"a field":                  "def f(b: Bag) -> int:\n    return b.items[3]\n",
+		"a string":                 "def f(s: str) -> str:\n    return s[5]\n",
+		"a string in a field":      "def f(b: Bag) -> str:\n    return b.name[0]\n",
+		"a call result":            "def f() -> int:\n    return one()[4]\n",
+		"an element of an element": "def f(xss: list[list[int]]) -> int:\n    if len(xss) > 0:\n        return xss[0][2]\n    return 0\n",
+		"a write":                  "def f(mut ys: list[int], i: int) -> int:\n    ys[i] = 7\n    return 0\n",
+		"a compound write":         "def f(mut ys: list[int[0..9]], i: int) -> int:\n    ys[i] *= 0\n    return 0\n",
+		"a write through a field":  "def f(mut b: Bag) -> int:\n    b.items[7] = 1\n    return 0\n",
+		"a literal":                "def f() -> int:\n    return [1, 2][2]\n",
+		"a string literal":         "def f() -> str:\n    s = \"ab\"\n    return s[2]\n",
+		"a constructed field":      "def f() -> int:\n    b = Bag(items=[1, 2], name=\"ab\")\n    return b.items[2]\n",
+		"a lambda parameter":       "def f(ws: list[str]) -> list[str]:\n    s = \"hello\"\n    return ws |> map(s => s[4])\n",
+		// The length a guard learnt is the length of the value it measured.
+		"a field assigned":            "def f(mut b: Bag) -> int:\n    if len(b.items) > 3:\n        b.items = [1]\n        return b.items[3]\n    return 0\n",
+		"a field assigned by a name":  "def f(mut b: Bag) -> int:\n    c = b\n    if len(b.items) > 3:\n        c.items = [1]\n        return b.items[3]\n    return 0\n",
+		"a field assigned by a call":  "def f(mut b: Bag) -> int:\n    if len(b.items) > 3:\n        z = shrink(mut b)\n        return b.items[3]\n    return 0\n",
+		"a field assigned in a loop":  "def f(mut b: Bag, n: int) -> int:\n    if len(b.items) > 3:\n        for i in 0..n:\n            b.items = [1]\n        return b.items[3]\n    return 0\n",
+		"a string field assigned":     "def f(mut b: Bag) -> str:\n    b.name = \"ab\"\n    return b.name[2]\n",
+		"a string field by a name":    "def f() -> str:\n    b = Bag(items=[1, 2], name=\"ab\")\n    d = b\n    d.name = \"a\"\n    return b.name[1]\n",
+		"a field of a kept entity":    "def f() -> str:\n    b = Bag(items=[1, 2], name=\"ab\")\n    d = keep(b)\n    if len(d.name) > 1:\n        b.name = \"a\"\n        return d.name[1]\n    return \"\"\n",
+		"a string assigned in an if":  "def f(c: bool) -> str:\n    s = \"hello\"\n    if c:\n        s = \"a\"\n    return s[4]\n",
+		"a string assigned in a loop": "def f(xs: list[int]) -> str:\n    s = \"hello\"\n    for x in xs:\n        s = \"a\"\n    return s[4]\n",
+		"a loop variable":             "def f(ws: list[str]) -> int:\n    w = \"hello\"\n    for w in ws:\n        print(w[4])\n    return 0\n",
+		"a pattern name":              "def f(o: Option[str]) -> str:\n    s = \"hello\"\n    match o:\n        Some(s) -> print(s[4])\n        None -> print(0)\n    return s[4]\n",
+		"an entity assigned":          "def f() -> int:\n    b = Bag(items=[1, 2], name=\"ab\")\n    b = keep(Bag(items=[], name=\"\"))\n    return b.items[1]\n",
+		"a callee's requires":         "def g(b: Bag) -> int:\n    requires: len(b.items) > 3\n    return b.items[3]\n\ndef f() -> int:\n    b = Bag(items=[1], name=\"n\")\n    return g(b)\n",
+	}
+	for name, src := range rejected {
+		want := "index_bounds"
+		if name == "a callee's requires" {
+			want = "f.call_g_requires_1"
+		}
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, want) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, want, failed)
+		}
+	}
+	proved := `
+def f(b: Bag, s: str, xs: list[int], sh: Shelf) -> int:
+    requires: len(xs) > 2
+    t = 0
+    if len(b.items) > 3:
+        t = b.items[3]
+    if len(s) > 5:
+        print(s[5])
+    if len(b.name) > 0:
+        print(b.name[0])
+    if len(sh.bag.items) > 1:
+        t = sh.bag.items[1]
+    row = b.items
+    if len(row) > 1:
+        t = row[1]
+    for i in 0..len(xs):
+        t = xs[i]
+    for i in 0..len(b.items):
+        t = b.items[i]
+    return xs[2]
+
+def g(mut b: Bag, mut ys: list[int], zs: list[int[0..9]], i: int) -> int:
+    if i >= 0 and i < len(ys):
+        ys[i] = 7
+    if len(b.items) > 7:
+        b.items[7] = 1
+    o = Bag(items=[1, 2], name="ab")
+    print(o.items[1], o.name[1])
+    p = o with {items: [1, 2, 3]}
+    print(p.items[2], p.name[1])
+    s = "hello"
+    u = s
+    print(s[0], u[4], "abc"[2], [1, 2][1])
+    # A string field is as long as the value it is given.
+    b.name = "ab"
+    print(b.name[1])
+    q = b with {name: "xyz"}
+    print(q.name[2])
+    if len(o.name) > 1:
+        b.name = o.name
+        print(b.name[1])
+    # The list a name was given keeps its length when the field gets another.
+    old = b.items
+    if len(old) > 3:
+        b.items = [1]
+        print(old[3])
+    return f(o, "abcdef", [1, 2, 3], Shelf(bag=o, n=1))
+
+def h(xss: list[list[int]], o: Option[str], ws: list[str], m: map[str, int]) -> int:
+    t = 0
+    if len(xss) > 0:
+        row = xss[0]
+        if len(row) > 2:
+            t = row[2]
+    match o:
+        Some(v) if len(v) > 0 -> print(v[0])
+        _ -> print(0)
+    for w in ws:
+        if len(w) > 0:
+            print(w[0])
+    # A map is keyed.
+    if len(m) > 0:
+        t = m["a"]
+        m2: map[str, int] = {}
+        m2["b"] = 1
+    return t
+`
+	if failed := failedVCs(verifySrc(t, prelude+proved)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
