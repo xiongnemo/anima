@@ -1523,8 +1523,9 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Object, env, scope)
 	case *ast.TryExpr:
 		v.evalSideEffects(e.Inner, env, scope)
-		// Inside a lambda `?` returns from the lambda, not from the function.
-		if v.lambdaDepth == 0 {
+		// Inside a lambda `?` returns from the lambda, not from the function,
+		// and `Some(x)?` or `Ok(x)?` never returns.
+		if v.lambdaDepth == 0 && !v.neverFails(e.Inner) {
 			v.checkTryExit(env, scope, e.Span)
 		}
 	case *ast.RangeExpr:

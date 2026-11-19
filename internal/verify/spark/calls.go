@@ -129,6 +129,17 @@ func (v *verifier) checkParamsNotRebound(params []sema.FuncParamInfo, body any, 
 	}
 }
 
+// neverFails reports whether e is written as the success variant of an
+// Option or a Result, on which `?` cannot return.
+func (v *verifier) neverFails(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Ident)
+	return ok && (id.Name == "Some" || id.Name == "Ok") && !v.curLocals[id.Name]
+}
+
 // checkTryExit proves what a caller may rely on when a `?` returns from the
 // current function: the invariants of its mut entities and the ensures
 // clauses that do not speak about the result.
