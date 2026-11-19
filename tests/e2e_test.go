@@ -98,6 +98,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		wantSub string
 	}{
 		{"../tests/bugs/spark_overflow.anm", "SPARK FAILED"},
+		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},

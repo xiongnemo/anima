@@ -2,14 +2,50 @@ package smt
 
 import (
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 // LinearTerm represents sum(Coeffs[v] * v) + Const.
+// Overflow marks a term whose coefficients or constant left the symmetric 64-bit range
+// [-MaxInt64, MaxInt64] while it was built; its numbers are then meaningless.
 type LinearTerm struct {
-	Coeffs map[string]int64
-	Const  int64
+	Coeffs   map[string]int64
+	Const    int64
+	Overflow bool
+}
+
+func addChecked(a, b int64) (int64, bool) {
+	s := a + b
+	if (a >= 0) == (b >= 0) && (s >= 0) != (a >= 0) {
+		return 0, false
+	}
+	return s, s != math.MinInt64
+}
+
+func mulChecked(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a == math.MinInt64 || b == math.MinInt64 {
+		return 0, false
+	}
+	p := a * b
+	if p/b != a {
+		return 0, false
+	}
+	return p, p != math.MinInt64
+}
+
+var unknownAtomID atomic.Int64
+
+// unknownAtom stands for a comparison the 64-bit representation cannot express.
+// A fresh unconstrained variable can take either truth value, so nothing is proved from it.
+func unknownAtom() BoolExpr {
+	return BoolVar{Name: fmt.Sprintf("__ovf_%d", unknownAtomID.Add(1))}
 }
 
 func Var(name string) LinearTerm {
@@ -27,14 +63,21 @@ func (t LinearTerm) Clone() LinearTerm {
 			c[k] = v
 		}
 	}
-	return LinearTerm{Coeffs: c, Const: t.Const}
+	return LinearTerm{Coeffs: c, Const: t.Const, Overflow: t.Overflow}
 }
 
 func (t LinearTerm) Add(o LinearTerm) LinearTerm {
 	res := t.Clone()
-	res.Const += o.Const
+	var ok bool
+	if res.Const, ok = addChecked(res.Const, o.Const); !ok {
+		res.Overflow = true
+	}
+	res.Overflow = res.Overflow || o.Overflow
 	for k, v := range o.Coeffs {
-		nv := res.Coeffs[k] + v
+		nv, ok := addChecked(res.Coeffs[k], v)
+		if !ok {
+			res.Overflow = true
+		}
 		if nv == 0 {
 			delete(res.Coeffs, k)
 		} else {
@@ -45,30 +88,82 @@ func (t LinearTerm) Add(o LinearTerm) LinearTerm {
 }
 
 func (t LinearTerm) Sub(o LinearTerm) LinearTerm {
-	res := t.Clone()
-	res.Const -= o.Const
-	for k, v := range o.Coeffs {
-		nv := res.Coeffs[k] - v
-		if nv == 0 {
-			delete(res.Coeffs, k)
-		} else {
-			res.Coeffs[k] = nv
+	return t.Add(o.Scale(-1))
+}
+
+func (t LinearTerm) Scale(k int64) LinearTerm {
+	if k == 0 {
+		return LinearTerm{Coeffs: map[string]int64{}, Overflow: t.Overflow}
+	}
+	res := LinearTerm{Coeffs: make(map[string]int64, len(t.Coeffs)), Overflow: t.Overflow}
+	var ok bool
+	if res.Const, ok = mulChecked(t.Const, k); !ok {
+		res.Overflow = true
+	}
+	for v, coef := range t.Coeffs {
+		p, ok := mulChecked(coef, k)
+		if !ok {
+			res.Overflow = true
+		}
+		if p != 0 {
+			res.Coeffs[v] = p
 		}
 	}
 	return res
 }
 
-func (t LinearTerm) Scale(k int64) LinearTerm {
-	if k == 0 {
-		return Const(0)
+// int64Half names a solver variable that Int64Pins fixes at -2^62. An atom bound is itself
+// an int64, so `t >= MinInt64` has no direct encoding once t carries a constant; writing
+// MinInt64 as 2*int64Half does. '#' cannot occur in a program identifier.
+const int64Half = "#int64_half"
+
+// Int64Pins must be conjoined to any query that contains a FitsInt64 formula.
+func Int64Pins() BoolExpr {
+	h := map[string]int64{int64Half: 1}
+	nh := map[string]int64{int64Half: -1}
+	return And(
+		AtomExpr{Atom: LinearAtom{Coeffs: h, Bound: -(1 << 62)}},
+		AtomExpr{Atom: LinearAtom{Coeffs: nh, Bound: 1 << 62}},
+	)
+}
+
+// StripInt64Pins removes the helper variable from a model.
+func StripInt64Pins(model map[string]int64) {
+	delete(model, int64Half)
+}
+
+// FitsInt64 states MinInt64 <= t <= MaxInt64 exactly.
+func FitsInt64(t LinearTerm) BoolExpr {
+	if t.Overflow {
+		return BoolConst{Val: false}
 	}
-	c := make(map[string]int64, len(t.Coeffs))
-	for v, coef := range t.Coeffs {
-		if coef*k != 0 {
-			c[v] = coef * k
-		}
+	if len(t.Coeffs) == 0 {
+		return BoolConst{Val: true}
 	}
-	return LinearTerm{Coeffs: c, Const: t.Const * k}
+	pos := LinearTerm{Coeffs: t.Coeffs}.Clone()
+	neg := pos.Scale(-1)
+	if neg.Overflow {
+		return BoolConst{Val: false}
+	}
+	c := t.Const
+	var hi, lo LinearAtom
+	if c >= 0 {
+		// vars <= MaxInt64 - c
+		hi = LinearAtom{Coeffs: pos.Coeffs, Bound: math.MaxInt64 - c}
+	} else {
+		// vars + c <= -2h - 1
+		pos.Coeffs[int64Half] = 2
+		hi = LinearAtom{Coeffs: pos.Coeffs, Bound: -1 - c}
+	}
+	if c < 0 {
+		// -vars <= c - MinInt64
+		lo = LinearAtom{Coeffs: neg.Coeffs, Bound: (c + 1) + math.MaxInt64}
+	} else {
+		// 2h <= vars + c
+		neg.Coeffs[int64Half] = 2
+		lo = LinearAtom{Coeffs: neg.Coeffs, Bound: c}
+	}
+	return And(AtomExpr{Atom: hi.Normalized()}, AtomExpr{Atom: lo.Normalized()})
 }
 
 func (t LinearTerm) String() string {
@@ -158,11 +253,11 @@ func (a LinearAtom) String() string {
 }
 
 func (a LinearAtom) Eval(model map[string]int64) bool {
-	var sum int64
+	sum := new(big.Int)
 	for k, c := range a.Coeffs {
-		sum += c * model[k]
+		sum.Add(sum, new(big.Int).Mul(big.NewInt(c), big.NewInt(model[k])))
 	}
-	return sum <= a.Bound
+	return sum.Cmp(big.NewInt(a.Bound)) <= 0
 }
 
 func gcd(a, b int64) int64 {
@@ -237,6 +332,9 @@ func (o OrExpr) String() string {
 // Helper constructors
 func Le(a, b LinearTerm) BoolExpr {
 	diff := a.Sub(b)
+	if diff.Overflow {
+		return unknownAtom()
+	}
 	if len(diff.Coeffs) == 0 {
 		return BoolConst{Val: 0 <= -diff.Const}
 	}

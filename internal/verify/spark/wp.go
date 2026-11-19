@@ -154,10 +154,67 @@ func (e *symEnv) unbind(name string) {
 	}
 }
 
+// rename moves what is bound under one program name to another, keeping the symbols.
+func (e *symEnv) rename(from, to string) {
+	move := func(k string) (string, bool) {
+		if k == from || strings.HasPrefix(k, from+".") {
+			return to + k[len(from):], true
+		}
+		return "", false
+	}
+	for k, t := range e.intTerms {
+		if nk, ok := move(k); ok {
+			delete(e.intTerms, k)
+			e.intTerms[nk] = t
+		}
+	}
+	for k, b := range e.boolTerms {
+		if nk, ok := move(k); ok {
+			delete(e.boolTerms, k)
+			e.boolTerms[nk] = b
+		}
+	}
+	if t, ok := e.listLens[from]; ok {
+		delete(e.listLens, from)
+		e.listLens[to] = t
+	}
+	if iv, ok := e.listElems[from]; ok {
+		delete(e.listElems, from)
+		e.listElems[to] = iv
+	}
+}
+
 func (e *symEnv) assume(b smt.BoolExpr) {
 	if b != nil {
 		e.pc = append(e.pc, b)
 	}
+}
+
+// assumeRange records that t holds a value of the bounded type ty. The fact is attached to
+// the term, not to a variable name, so it stays true after the variable is reassigned.
+func (e *symEnv) assumeRange(t smt.LinearTerm, ty *sema.IntType) {
+	e.assume(smt.Ge(t, smt.Const(ty.Lo)))
+	e.assume(smt.Le(t, smt.Const(ty.Hi)))
+}
+
+// pathAtoms returns the linear atoms the path condition asserts unconditionally.
+func (e *symEnv) pathAtoms() []smt.LinearAtom {
+	var out []smt.LinearAtom
+	var walk func(b smt.BoolExpr)
+	walk = func(b smt.BoolExpr) {
+		switch x := b.(type) {
+		case smt.AtomExpr:
+			out = append(out, x.Atom)
+		case smt.AndExpr:
+			for _, a := range x.Args {
+				walk(a)
+			}
+		}
+	}
+	for _, b := range e.pc {
+		walk(b)
+	}
+	return out
 }
 
 func (e *symEnv) pathCond() smt.BoolExpr {
@@ -176,6 +233,8 @@ type verifier struct {
 	}
 	curEnsures []ast.Expr
 	curRetType sema.Type
+	fstrSpan   *ast.Span
+	strParams  map[string]bool
 }
 
 func (v *verifier) prove(name, scope string, span ast.Span, env *symEnv, goal smt.BoolExpr) {
@@ -188,8 +247,9 @@ func (v *verifier) prove(name, scope string, span ast.Span, env *symEnv, goal sm
 		return
 	}
 
-	query := smt.And(env.pathCond(), smt.Not(goal))
+	query := smt.And(smt.Int64Pins(), env.pathCond(), smt.Not(goal))
 	res := smt.CheckSat(query)
+	smt.StripInt64Pins(res.IntModel)
 	switch res.Status {
 	case smt.StatusUnsat:
 		v.record(name, scope, span, goal.String(), VCProved, res.Explain, nil)
@@ -215,6 +275,12 @@ func (v *verifier) record(name, scope string, span ast.Span, formula string, st 
 }
 
 func (v *verifier) verifyAll() {
+	// 0. Entity invariants are evaluated at run time when an entity crosses a JSON boundary
+	for _, d := range v.info.Program.Decls {
+		if ent, ok := d.(*ast.EntityDecl); ok {
+			v.verifyEntityInvariantArith(ent)
+		}
+	}
 	// 1. Verify monitor / machine state invariants & transitions
 	for _, d := range v.info.Program.Decls {
 		if m, ok := d.(*ast.MachineDecl); ok {
@@ -245,6 +311,8 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 			env.intervals[name] = smt.Interval{HasLo: true, HasHi: true, Lo: t.Lo, Hi: t.Hi}
 			env.assume(smt.Ge(term, smt.Const(t.Lo)))
 			env.assume(smt.Le(term, smt.Const(t.Hi)))
+		} else {
+			env.assume(smt.FitsInt64(term))
 		}
 	case sema.BoolType:
 		env.boolTerms[name] = smt.BoolVar{Name: name}
@@ -272,6 +340,24 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 	}
 }
 
+// verifyEntityInvariantArith checks the arithmetic of each invariant under the field types
+// and the invariants before it, which is the order the runtime short-circuits them in.
+func (v *verifier) verifyEntityInvariantArith(ent *ast.EntityDecl) {
+	et := v.info.Entities[ent.Name]
+	if et == nil {
+		return
+	}
+	scope := "entity:" + ent.Name
+	env := newSymEnv()
+	for _, f := range et.Fields {
+		v.bindVarType(env, f.Name, f.Type)
+	}
+	for _, inv := range et.Invariants {
+		v.checkArith(inv, env, scope)
+		env.assume(v.evalBool(inv, env, scope))
+	}
+}
+
 func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 	scope := m.Kind + ":" + m.Name
 	baseEnv := newSymEnv()
@@ -294,6 +380,7 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 		initEnv := newSymEnv()
 		for _, cv := range m.ControlVars {
 			if cv.Init != nil {
+				v.checkArith(cv.Init, initEnv, scope)
 				term := v.evalInt(cv.Init, initEnv, scope, true)
 				initEnv.intTerms[cv.Name] = term
 				if ty, err := v.resolveSimpleRange(cv.Type); err == nil && ty != nil && ty.IsBounded {
@@ -323,6 +410,7 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 				tEnv.assume(v.evalBool(inv, tEnv, scope))
 			}
 			if tr.Guard != nil {
+				v.checkArith(tr.Guard, tEnv, scope)
 				tEnv.assume(v.evalBool(tr.Guard, tEnv, scope))
 			}
 			for _, bs := range tr.Body {
@@ -476,6 +564,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			hasElse = true
 			continue
 		}
+		v.checkArith(br.Guard, env, scope)
 		g := v.evalBool(br.Guard, env, scope)
 		guards = append(guards, g)
 	}
@@ -510,6 +599,7 @@ func (v *verifier) execBlock(stmts []ast.Stmt, env *symEnv, scope string) bool {
 func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
+		v.checkArith(s.Value, env, scope)
 		v.assignSymbolic(s.Name, s.Value, env, scope, s.Span)
 		if s.TypeAnno != nil {
 			if ty, ok := v.info.ExprTypes[s.Value]; ok {
@@ -532,6 +622,10 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			op = "*"
 		}
 		rhsAst = &ast.BinaryExpr{Span: s.Span, Op: op, Left: s.Target, Right: s.Value}
+		v.checkArith(s.Value, env, scope)
+		if _, isInt := v.info.ExprTypes[s.Target].(*sema.IntType); isInt {
+			v.proveFitsInt64(rhsAst, env, scope)
+		}
 		rhsTerm := v.evalInt(rhsAst, env, scope, true)
 		if targetTy, ok := v.info.ExprTypes[s.Target]; ok {
 			if it, ok := targetTy.(*sema.IntType); ok && it.IsBounded {
@@ -546,7 +640,17 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			}
 		}
 
+	case *ast.IndexAssignStmt:
+		v.checkArith(s.Index, env, scope)
+		v.checkArith(s.Value, env, scope)
+
+	case *ast.CallStmt:
+		if s.Call != nil {
+			v.checkArith(s.Call, env, scope)
+		}
+
 	case *ast.FieldAssignStmt:
+		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		path := ""
 		if objID, ok := s.Object.(*ast.Ident); ok {
@@ -577,6 +681,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		var outs []branchOut
 
 		for _, br := range s.Branches {
+			v.checkArith(br.Cond, curEnv, scope)
 			cond := v.evalBool(br.Cond, curEnv, scope)
 			thenEnv := curEnv.clone()
 			thenEnv.assume(cond)
@@ -662,6 +767,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			armEnv := env.clone()
 			v.assumePattern(arm.Pattern, s.Subject, armEnv, scope)
 			if arm.Guard != nil {
+				v.checkArith(arm.Guard, armEnv, scope)
 				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
 			}
 			v.execBlock(arm.Body, armEnv, scope)
@@ -680,11 +786,13 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			for _, av := range assigned {
 				if _, isInt := stepEnv.intTerms[av]; isInt {
 					stepEnv.intTerms[av] = smt.Var(av)
+					stepEnv.assume(smt.FitsInt64(smt.Var(av)))
 				}
 			}
 			for _, inv := range s.Invariants {
 				stepEnv.assume(v.evalBool(inv, stepEnv, scope))
 			}
+			v.checkArith(s.Cond, stepEnv, scope)
 			cond := v.evalBool(s.Cond, stepEnv, scope)
 			stepEnv.assume(cond)
 
@@ -710,6 +818,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		}
 
 	case *ast.ForStmt:
+		v.checkArith(s.Iterable, env, scope)
 		if r, ok := s.Iterable.(*ast.RangeExpr); ok {
 			lo := v.evalInt(r.Lo, env, scope, true)
 			hi := v.evalInt(r.Hi, env, scope, true)
@@ -729,6 +838,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if me, ok := s.Value.(*ast.MatchExpr); ok {
 				v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, s.Span)
 			}
+			v.checkArith(s.Value, env, scope)
 			v.evalSideEffects(s.Value, env, scope)
 			if rTerm := v.tryEvalInt(s.Value, env); rTerm != nil {
 				env.intTerms["result"] = *rTerm
@@ -741,6 +851,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		if me, ok := s.Expr.(*ast.MatchExpr); ok {
 			v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, s.Span)
 		}
+		v.checkArith(s.Expr, env, scope)
 		v.evalSideEffects(s.Expr, env, scope)
 	}
 	return false
@@ -758,7 +869,7 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 		if _, has := env.intTerms[name]; has {
 			if rhsTy, ok := v.info.ExprTypes[rhs]; ok {
 				if rt, ok := rhsTy.(*sema.IntType); ok && rt.IsBounded {
-					env.intervals[name] = smt.Interval{HasLo: true, HasHi: true, Lo: rt.Lo, Hi: rt.Hi}
+					env.assumeRange(env.intTerms[name], rt)
 				}
 			}
 			return
@@ -774,7 +885,7 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 			t := v.evalInt(rhs, env, scope, false)
 			env.intTerms[name] = t
 			if rt.IsBounded {
-				env.intervals[name] = smt.Interval{HasLo: true, HasHi: true, Lo: rt.Lo, Hi: rt.Hi}
+				env.assumeRange(t, rt)
 			}
 			return
 		case sema.BoolType:
@@ -1070,6 +1181,377 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	}
 }
 
+// checkArith proves that no integer operation the runtime performs while evaluating expr
+// leaves the int64 range. Inside that range the unbounded integers of the proof and the
+// 64-bit integers of the VM and native backends agree, so every other VC stays meaningful.
+func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
+	switch e := expr.(type) {
+	case *ast.UnaryExpr:
+		v.checkArith(e.Expr, env, scope)
+		if _, lit := e.Expr.(*ast.IntLit); e.Op == "-" && !lit {
+			v.proveFitsInt64(e, env, scope)
+		}
+	case *ast.BinaryExpr:
+		v.checkArith(e.Left, env, scope)
+		switch e.Op {
+		case "and", "implies", "or":
+			// The right operand only runs when the left one does not decide the result.
+			rEnv := env.clone()
+			left := v.evalBool(e.Left, rEnv, scope)
+			if e.Op == "or" {
+				left = smt.Not(left)
+			}
+			rEnv.assume(left)
+			v.checkArith(e.Right, rEnv, scope)
+		case "+", "-", "*":
+			v.checkArith(e.Right, env, scope)
+			if !v.isIntArith(e) {
+				break
+			}
+			if why := v.productUnbounded(e, env, scope); e.Op == "*" && why != "" {
+				v.record(scope+".int64_overflow", scope, v.arithSpan(e), "product fits in 64 bits", VCUnknown, why, nil)
+				break
+			}
+			v.proveFitsInt64(e, env, scope)
+		case "/", "%":
+			v.checkArith(e.Right, env, scope)
+			// The only overflowing quotient is MinInt64 / -1.
+			num := v.evalInt(e.Left, env, scope, false)
+			den := v.evalInt(e.Right, env, scope, false)
+			v.proveArith(e, env, scope, smt.Or(smt.FitsInt64(num.Scale(-1)), smt.Neq(den, smt.Const(-1))))
+		default:
+			v.checkArith(e.Right, env, scope)
+		}
+	case *ast.FStrExpr:
+		// Interpolated expressions are parsed on their own and carry no position in the file.
+		outer := v.fstrSpan
+		if outer == nil {
+			v.fstrSpan = &e.Span
+		}
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				v.checkArith(part.Expr, env, scope)
+			}
+		}
+		v.fstrSpan = outer
+	case *ast.FieldExpr:
+		v.checkArith(e.Object, env, scope)
+	case *ast.IndexExpr:
+		v.checkArith(e.List, env, scope)
+		v.checkArith(e.Index, env, scope)
+	case *ast.CallExpr:
+		v.checkArith(e.Callee, env, scope)
+		for _, a := range e.Args {
+			v.checkArith(a.Value, env, scope)
+		}
+	case *ast.LambdaExpr:
+		var types []sema.Type
+		if ft, ok := v.info.ExprTypes[e].(*sema.FuncType); ok {
+			for _, p := range ft.Params {
+				types = append(types, p.Type)
+			}
+		}
+		v.checkLambdaArith(e, types, v.lambdaEnv(e, types, env), scope)
+	case *ast.PipeExpr:
+		v.checkArith(e.Left, env, scope)
+		v.checkPipeStepArith(e, env, scope)
+	case *ast.TryExpr:
+		v.checkArith(e.Inner, env, scope)
+	case *ast.RangeExpr:
+		v.checkArith(e.Lo, env, scope)
+		v.checkArith(e.Hi, env, scope)
+	case *ast.ListLit:
+		for _, el := range e.Elems {
+			v.checkArith(el, env, scope)
+		}
+	case *ast.MapLit:
+		for _, en := range e.Entries {
+			v.checkArith(en.Key, env, scope)
+			v.checkArith(en.Value, env, scope)
+		}
+	case *ast.MatchExpr:
+		v.checkArith(e.Subject, env, scope)
+		for _, arm := range e.Arms {
+			armEnv := env.clone()
+			v.assumePattern(arm.Pattern, e.Subject, armEnv, scope)
+			if arm.Guard != nil {
+				v.checkArith(arm.Guard, armEnv, scope)
+				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
+			}
+			v.checkArith(arm.Value, armEnv, scope)
+		}
+	}
+}
+
+// lambdaEnv binds each parameter to an arbitrary value of its type: the body runs once per
+// element, on values the enclosing env knows nothing about.
+func (v *verifier) lambdaEnv(lam *ast.LambdaExpr, types []sema.Type, env *symEnv) *symEnv {
+	bodyEnv := env.clone()
+	for i, p := range lam.Params {
+		bodyEnv.unbind(p)
+		sym := bodyEnv.freshVar(p)
+		if i < len(types) {
+			v.bindVarType(bodyEnv, sym, types[i])
+			bodyEnv.rename(sym, p)
+		}
+		if _, ok := bodyEnv.intTerms[p]; !ok {
+			bodyEnv.intTerms[p] = smt.Var(sym)
+		}
+		if _, ok := bodyEnv.boolTerms[p]; !ok {
+			bodyEnv.boolTerms[p] = smt.BoolVar{Name: sym}
+		}
+	}
+	return bodyEnv
+}
+
+// checkPipeStepArith covers the arithmetic a pipeline stage runs per element of pe.Left.
+func (v *verifier) checkPipeStepArith(pe *ast.PipeExpr, env *symEnv, scope string) {
+	var name string
+	var args []ast.CallArg
+	switch rhs := pe.Right.(type) {
+	case *ast.CallExpr:
+		args = rhs.Args
+		if id, ok := rhs.Callee.(*ast.Ident); ok {
+			name = id.Name
+		}
+	case *ast.Ident:
+		name = rhs.Name
+	}
+	list, _ := v.info.ExprTypes[pe.Left].(*sema.ListType)
+	elem := v.pipeElemInterval(pe.Left, env, scope)
+	maxLen, hasLen := v.pipeMaxLen(pe.Left, env)
+	sumBounded := hasLen && elem.HasLo && elem.HasHi
+
+	switch {
+	case name == "sum" && len(args) == 0:
+		if sumBounded {
+			n := smt.Const(maxLen)
+			v.proveArith(pe, env, scope, smt.And(smt.FitsInt64(n.Scale(elem.Lo)), smt.FitsInt64(n.Scale(elem.Hi))))
+		} else {
+			v.record(scope+".int64_overflow", scope, pe.Span, "sum fits in 64 bits", VCUnknown,
+				"sum needs a list of known maximum length with bounded int elements", nil)
+		}
+		return
+	case name == "fold" && len(args) == 2 && sumBounded:
+		lam, ok := args[1].Value.(*ast.LambdaExpr)
+		if !ok || !isSumLambda(lam) {
+			break
+		}
+		// Before adding an element the accumulator is init plus the sum of k earlier ones.
+		v.checkArith(args[0].Value, env, scope)
+		bodyEnv := v.lambdaEnv(lam, nil, env)
+		k := smt.Var(bodyEnv.freshVar("k"))
+		partial := smt.Var(bodyEnv.freshVar("partial"))
+		x := smt.Var(bodyEnv.freshVar(lam.Params[1]))
+		bodyEnv.assume(smt.Ge(k, smt.Const(0)))
+		bodyEnv.assume(smt.Lt(k, smt.Const(maxLen)))
+		bodyEnv.assume(smt.Ge(partial, k.Scale(elem.Lo)))
+		bodyEnv.assume(smt.Le(partial, k.Scale(elem.Hi)))
+		bodyEnv.assume(smt.Ge(x, smt.Const(elem.Lo)))
+		bodyEnv.assume(smt.Le(x, smt.Const(elem.Hi)))
+		bodyEnv.intTerms[lam.Params[0]] = v.evalInt(args[0].Value, env, scope, false).Add(partial)
+		bodyEnv.intTerms[lam.Params[1]] = x
+		v.checkArith(lam.Body, bodyEnv, scope)
+		return
+	}
+
+	for i, a := range args {
+		lam, ok := a.Value.(*ast.LambdaExpr)
+		if !ok || list == nil {
+			v.checkArith(a.Value, env, scope)
+			continue
+		}
+		switch {
+		case len(lam.Params) == 1:
+			v.checkLambdaArith(lam, []sema.Type{list.Elem}, v.elemLambdaEnv(lam, pe.Left, env, scope), scope)
+		case name == "fold" && i == 1 && len(lam.Params) == 2:
+			// The accumulator is only known to have the type of the initial value.
+			types := []sema.Type{v.info.ExprTypes[args[0].Value], list.Elem}
+			if it, ok := types[0].(*sema.IntType); ok && it.IsBounded {
+				types[0] = sema.NewUnboundedInt()
+			}
+			v.checkLambdaArith(lam, types, v.lambdaEnv(lam, types, env), scope)
+		default:
+			v.checkArith(a.Value, env, scope)
+		}
+	}
+}
+
+// checkLambdaArith checks a lambda body in bodyEnv. Sema leaves the parameters of an inline
+// lambda untyped, so the ones known to be strings are noted for isIntArith.
+func (v *verifier) checkLambdaArith(lam *ast.LambdaExpr, types []sema.Type, bodyEnv *symEnv, scope string) {
+	saved := v.strParams
+	v.strParams = map[string]bool{}
+	for k, b := range saved {
+		v.strParams[k] = b
+	}
+	for i, p := range lam.Params {
+		isStr := false
+		if i < len(types) {
+			_, isStr = types[i].(sema.StrType)
+		}
+		v.strParams[p] = isStr
+	}
+	v.checkArith(lam.Body, bodyEnv, scope)
+	v.strParams = saved
+}
+
+// isIntArith tells integer +, -, * from string concatenation, the only other use of `+`.
+func (v *verifier) isIntArith(e *ast.BinaryExpr) bool {
+	if e.Op != "+" {
+		return true
+	}
+	for _, x := range []ast.Expr{e, e.Left, e.Right} {
+		switch t := x.(type) {
+		case *ast.StrLit, *ast.FStrExpr:
+			return false
+		case *ast.Ident:
+			if v.strParams[t.Name] {
+				return false
+			}
+		case *ast.BinaryExpr:
+			if t != e && t.Op == "+" && !v.isIntArith(t) {
+				return false
+			}
+		}
+		if _, isStr := v.info.ExprTypes[x].(sema.StrType); isStr {
+			return false
+		}
+	}
+	return true
+}
+
+// elemLambdaEnv is lambdaEnv for a one-parameter stage lambda, with the parameter narrowed
+// to the element range the earlier stages of the pipeline produce.
+func (v *verifier) elemLambdaEnv(lam *ast.LambdaExpr, left ast.Expr, env *symEnv, scope string) *symEnv {
+	var types []sema.Type
+	if lt, ok := v.info.ExprTypes[left].(*sema.ListType); ok {
+		types = []sema.Type{lt.Elem}
+	}
+	bodyEnv := v.lambdaEnv(lam, types, env)
+	iv := v.pipeElemInterval(left, env, scope)
+	t := bodyEnv.intTerms[lam.Params[0]]
+	if iv.HasLo && iv.HasHi && len(t.Coeffs) == 1 && t.Const == 0 {
+		for sym, c := range t.Coeffs {
+			if c == 1 {
+				bodyEnv.intervals[sym] = iv
+				bodyEnv.assume(smt.Ge(t, smt.Const(iv.Lo)))
+				bodyEnv.assume(smt.Le(t, smt.Const(iv.Hi)))
+			}
+		}
+	}
+	return bodyEnv
+}
+
+// pipeMaxLen is the largest length the list e evaluates to can have, when that is known.
+func (v *verifier) pipeMaxLen(e ast.Expr, env *symEnv) (int64, bool) {
+	if lt, ok := v.info.ExprTypes[e].(*sema.ListType); ok && lt.HasCap && lt.Cap >= 0 {
+		return lt.Cap, true
+	}
+	switch x := e.(type) {
+	case *ast.ListLit:
+		return int64(len(x.Elems)), true
+	case *ast.Ident:
+		if n, ok := env.listLens[x.Name]; ok {
+			if iv := v.termInterval(n, env); iv.HasHi && iv.Hi >= 0 {
+				return iv.Hi, true
+			}
+		}
+	case *ast.PipeExpr:
+		call, ok := x.Right.(*ast.CallExpr)
+		if !ok {
+			break
+		}
+		if id, ok := call.Callee.(*ast.Ident); ok && (id.Name == "filter" || id.Name == "map") {
+			return v.pipeMaxLen(x.Left, env)
+		}
+	}
+	return 0, false
+}
+
+// pipeElemInterval bounds the int elements of the list e evaluates to, when it can.
+func (v *verifier) pipeElemInterval(e ast.Expr, env *symEnv, scope string) smt.Interval {
+	if lt, ok := v.info.ExprTypes[e].(*sema.ListType); ok {
+		if it, ok := lt.Elem.(*sema.IntType); ok && it.IsBounded {
+			return smt.Interval{HasLo: true, HasHi: true, Lo: it.Lo, Hi: it.Hi}
+		}
+	}
+	switch x := e.(type) {
+	case *ast.Ident:
+		return env.listElems[x.Name]
+	case *ast.PipeExpr:
+		call, ok := x.Right.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			break
+		}
+		id, _ := call.Callee.(*ast.Ident)
+		lam, _ := call.Args[0].Value.(*ast.LambdaExpr)
+		if id == nil || lam == nil || len(lam.Params) != 1 {
+			break
+		}
+		switch id.Name {
+		case "filter":
+			return v.pipeElemInterval(x.Left, env, scope)
+		case "map":
+			bodyEnv := v.elemLambdaEnv(lam, x.Left, env, scope)
+			return v.termInterval(v.evalInt(lam.Body, bodyEnv, scope, false), bodyEnv)
+		}
+	}
+	return smt.Interval{}
+}
+
+// isSumLambda reports whether lam is (a, b) => a + b, in either operand order.
+func isSumLambda(lam *ast.LambdaExpr) bool {
+	be, ok := lam.Body.(*ast.BinaryExpr)
+	if !ok || be.Op != "+" || len(lam.Params) != 2 || lam.Params[0] == lam.Params[1] {
+		return false
+	}
+	l, lok := be.Left.(*ast.Ident)
+	r, rok := be.Right.(*ast.Ident)
+	if !lok || !rok {
+		return false
+	}
+	return (l.Name == lam.Params[0] && r.Name == lam.Params[1]) || (l.Name == lam.Params[1] && r.Name == lam.Params[0])
+}
+
+// productUnbounded explains why the interval approximation used for x * y cannot show the
+// product fits, or returns "" when it has bounds to work with. A product with a constant
+// side is linear and needs none.
+func (v *verifier) productUnbounded(e *ast.BinaryExpr, env *symEnv, scope string) string {
+	probe := env.clone()
+	l := v.evalInt(e.Left, probe, scope, false)
+	r := v.evalInt(e.Right, probe, scope, false)
+	if len(l.Coeffs) == 0 || len(r.Coeffs) == 0 {
+		return ""
+	}
+	il, ir := v.termInterval(l, probe), v.termInterval(r, probe)
+	if !il.HasLo || !il.HasHi || !ir.HasLo || !ir.HasHi {
+		return "cannot bound a product of two non-constant operands; give both a bounded type or a requires range"
+	}
+	if p := smt.MulInterval(il, ir); !p.HasLo || !p.HasHi {
+		return "the operand ranges allow a product beyond 64 bits; narrow them"
+	}
+	return ""
+}
+
+func (v *verifier) arithSpan(e ast.Expr) ast.Span {
+	if v.fstrSpan != nil {
+		return *v.fstrSpan
+	}
+	return e.GetSpan()
+}
+
+func (v *verifier) proveFitsInt64(e ast.Expr, env *symEnv, scope string) {
+	v.proveArith(e, env, scope, smt.FitsInt64(v.evalInt(e, env, scope, false)))
+}
+
+func (v *verifier) proveArith(e ast.Expr, env *symEnv, scope string, goal smt.BoolExpr) {
+	if bc, ok := goal.(smt.BoolConst); ok && bc.Val {
+		return
+	}
+	v.prove(scope+".int64_overflow", scope, v.arithSpan(e), env, goal)
+}
+
 // checkIntRange verifies lo <= expr <= hi, using exact Presburger characterization for div!
 func (v *verifier) checkIntRange(term smt.LinearTerm, expr ast.Expr, env *symEnv, target *sema.IntType, vcName, scope string, span ast.Span) {
 	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == "/" {
@@ -1185,8 +1667,9 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 			ivL := v.termInterval(l, env)
 			ivR := v.termInterval(r, env)
 			mv := smt.Var(env.freshVar("mul"))
-			if ivL.HasLo && ivL.HasHi && ivR.HasLo && ivR.HasHi {
-				prod := smt.MulInterval(ivL, ivR)
+			// With no bound mv stays free, so nothing about the product, not even that it
+			// fits in 64 bits, can be proved.
+			if prod := smt.MulInterval(ivL, ivR); prod.HasLo && prod.HasHi {
 				env.assume(smt.Ge(mv, smt.Const(prod.Lo)))
 				env.assume(smt.Le(mv, smt.Const(prod.Hi)))
 			}
@@ -1196,6 +1679,7 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 				v.prove(scope+".div_nonzero", scope, e.Span, env, smt.Neq(r, smt.Const(0)))
 			}
 			dv := smt.Var(env.freshVar("div"))
+			env.assume(smt.FitsInt64(dv))
 			ivL := v.termInterval(l, env)
 			ivR := v.termInterval(r, env)
 			if qiv, ok := smt.DivInterval(ivL, ivR); ok {
@@ -1214,24 +1698,48 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 			}
 		}
 	}
-	return smt.Var(env.freshVar("term"))
+	// Anything else is a value the runtime holds in an int64.
+	term := smt.Var(env.freshVar("term"))
+	if it, ok := v.info.ExprTypes[expr].(*sema.IntType); ok && it.IsBounded {
+		env.assumeRange(term, it)
+	} else {
+		env.assume(smt.FitsInt64(term))
+	}
+	return term
 }
 
+// termInterval bounds t from the declared ranges of its variables and from the
+// single-variable facts on the path (a requires clause, a branch condition).
 func (v *verifier) termInterval(t smt.LinearTerm, env *symEnv) smt.Interval {
+	if t.Overflow {
+		return smt.Interval{}
+	}
+	lo, hi := smt.Const(t.Const), smt.Const(t.Const)
 	if len(t.Coeffs) == 0 {
 		return smt.Interval{HasLo: true, HasHi: true, Lo: t.Const, Hi: t.Const}
 	}
-	if len(t.Coeffs) == 1 {
-		for k, c := range t.Coeffs {
-			if iv, ok := env.intervals[k]; ok && iv.HasLo && iv.HasHi {
-				if c >= 0 {
-					return smt.Interval{HasLo: true, HasHi: true, Lo: c*iv.Lo + t.Const, Hi: c*iv.Hi + t.Const}
-				}
-				return smt.Interval{HasLo: true, HasHi: true, Lo: c*iv.Hi + t.Const, Hi: c*iv.Lo + t.Const}
+	var pathBounds map[string]smt.Interval
+	for k, c := range t.Coeffs {
+		iv := env.intervals[k]
+		if !iv.HasLo || !iv.HasHi {
+			if pathBounds == nil {
+				_, _, pathBounds = smt.OctagonAnalyze(env.pathAtoms())
 			}
+			iv = iv.Intersect(pathBounds[k])
 		}
+		if !iv.HasLo || !iv.HasHi {
+			return smt.Interval{}
+		}
+		a, b := smt.Const(iv.Lo).Scale(c), smt.Const(iv.Hi).Scale(c)
+		if c < 0 {
+			a, b = b, a
+		}
+		lo, hi = lo.Add(a), hi.Add(b)
 	}
-	return smt.Interval{}
+	if lo.Overflow || hi.Overflow {
+		return smt.Interval{}
+	}
+	return smt.Interval{HasLo: true, HasHi: true, Lo: lo.Const, Hi: hi.Const}
 }
 
 func (v *verifier) evalBool(expr ast.Expr, env *symEnv, scope string) smt.BoolExpr {
@@ -1311,8 +1819,9 @@ func (v *verifier) evalIntPrefixed(expr ast.Expr, env *symEnv, prefix string) sm
 			ivL := v.termInterval(l, env)
 			ivR := v.termInterval(r, env)
 			mv := smt.Var(env.freshVar("mul"))
-			if ivL.HasLo && ivL.HasHi && ivR.HasLo && ivR.HasHi {
-				prod := smt.MulInterval(ivL, ivR)
+			// With no bound mv stays free, so nothing about the product, not even that it
+			// fits in 64 bits, can be proved.
+			if prod := smt.MulInterval(ivL, ivR); prod.HasLo && prod.HasHi {
 				env.assume(smt.Ge(mv, smt.Const(prod.Lo)))
 				env.assume(smt.Le(mv, smt.Const(prod.Hi)))
 			}
@@ -1460,8 +1969,70 @@ func (v *verifier) patternCond(pat ast.Pattern, st smt.LinearTerm, env *symEnv) 
 }
 
 func (v *verifier) assumePattern(pat ast.Pattern, subj ast.Expr, env *symEnv, scope string) {
+	switch p := pat.(type) {
+	case *ast.VariantPat:
+		v.bindVariantPat(p, v.info.ExprTypes[subj], env)
+		return
+	case *ast.BoolPat:
+		b := v.evalBool(subj, env, scope)
+		if !p.Value {
+			b = smt.Not(b)
+		}
+		env.assume(b)
+		return
+	case *ast.StrPat:
+		return
+	}
 	st := v.evalInt(subj, env, scope, false)
 	env.assume(v.patternCond(pat, st, env))
+}
+
+// bindVariantPat makes the arm reachable with each bound field an arbitrary value of its
+// declared type. Which variant the subject holds is not modelled.
+func (v *verifier) bindVariantPat(p *ast.VariantPat, subjTy sema.Type, env *symEnv) {
+	subjADT, _ := subjTy.(*sema.ADTType)
+	adt := v.info.Variants[p.Name]
+	if adt == nil {
+		adt = subjADT
+	}
+	var fields []sema.EntityFieldInfo
+	subst := map[string]sema.Type{}
+	if adt != nil {
+		fields = adt.VariantMap[p.Name].Fields
+		if subjADT != nil && subjADT.Name == adt.Name {
+			for i, tp := range adt.TypeParams {
+				if i < len(subjADT.TypeArgs) {
+					subst[tp] = subjADT.TypeArgs[i]
+				}
+			}
+		}
+	}
+	for i, sub := range p.Fields {
+		var fty sema.Type
+		if i < len(fields) {
+			fty = fields[i].Type
+			if tv, ok := fty.(sema.TypeVar); ok {
+				fty = subst[tv.Name]
+			}
+		}
+		switch sp := sub.(type) {
+		case *ast.VarPat:
+			env.unbind(sp.Name)
+			sym := env.freshVar(sp.Name)
+			if fty != nil {
+				v.bindVarType(env, sym, fty)
+				env.rename(sym, sp.Name)
+			}
+			if _, ok := env.intTerms[sp.Name]; !ok {
+				env.intTerms[sp.Name] = smt.Var(sym)
+			}
+			if _, ok := env.boolTerms[sp.Name]; !ok {
+				env.boolTerms[sp.Name] = smt.BoolVar{Name: sym}
+			}
+		case *ast.VariantPat:
+			v.bindVariantPat(sp, fty, env)
+		}
+	}
 }
 
 func collectAssignedVars(stmts []ast.Stmt) []string {

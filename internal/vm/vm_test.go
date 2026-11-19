@@ -183,7 +183,7 @@ def main() -> int:
     resps = req.gather([f1, f2])
     sess.close()
 
-    good_count = 0
+    good_count: int = 0
     for r in resps:
         match r:
             Ok(resp) ->
@@ -193,7 +193,7 @@ def main() -> int:
             Err(e) -> good_count += 0
 
     # 2. ThreadPool & Channel concurrency
-    ch = conc.Channel[int](cap=4)
+    ch = conc.Channel[int[0..100]](cap=4)
     pool = conc.ThreadPool(2, 8)
     fut = pool.submit(() => ch.send(7))
     _ = fut.await()

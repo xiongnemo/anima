@@ -4,6 +4,7 @@
 
 1. **Ada / SPARK-Level Data & Contract Proofs (Self-Built `AnimaSMT`)**:
    - Refinement range types (`int[0..1_000_000]`), `requires` / `ensures` / `old(...)`, entity `invariant`s, `mut` exclusive anti-aliasing, loop/recursion `decreases` termination, and SMT-verified exhaustive `match` + `choice` completeness/exclusivity.
+   - `int` is a signed 64-bit integer at run time, in both backends, while proofs reason over unbounded integers. Every `+`, `-`, `*`, unary `-`, `/`, `%`, `sum` and `fold` therefore gets an `int64_overflow` proof obligation, and `anima check` fails when one cannot be proved. A product of two non-constant operands needs bounds on both (a range type or a `requires`).
    - 100% pure-Go prover: **Interval/Octagon Abstract Domain (Floyd-Warshall)** + **CDCL SAT (2-watched literals + 1-UIP)** + **Exact Rational Dutertre-de Moura Simplex (`math/big.Rat`)** + **Integer Branch-and-Bound**.
 2. **SWEN90004 FSP / LTSA & Linear Typestate Verification**:
    - Compiles `monitor`, `machine`, and `workflow` synchronizations into explicit Labelled Transition Systems (`||` composition, relabeling, hiding, priority).
