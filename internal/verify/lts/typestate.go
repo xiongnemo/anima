@@ -506,9 +506,18 @@ func (t *typestateChecker) walkStmt(stmt ast.Stmt, env *tsEnv) bool {
 		t.evalExpr(s.Value, env, false)
 
 	case *ast.CompoundAssignStmt:
+		// The target's own sub-expressions run first, then the value.
+		switch tgt := s.Target.(type) {
+		case *ast.FieldExpr:
+			t.evalExpr(tgt.Object, env, false)
+		case *ast.IndexExpr:
+			t.evalExpr(tgt.List, env, false)
+			t.evalExpr(tgt.Index, env, false)
+		}
 		t.evalExpr(s.Value, env, false)
 
 	case *ast.IndexAssignStmt:
+		t.evalExpr(s.List, env, false)
 		t.evalExpr(s.Index, env, false)
 		t.evalExpr(s.Value, env, false)
 

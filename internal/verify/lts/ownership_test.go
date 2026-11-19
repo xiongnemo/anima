@@ -686,6 +686,23 @@ def f() -> Result[int, str]:
     x = old(conn.close())
     return Ok(1)
 `, "never executed"},
+		{"try in the index of a compound assignment", `
+def pos() -> Result[int[0..1], str]:
+    return Err("no")
+
+def f(xs: list[int[0..9]]) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    xs[pos()?] += 0
+    conn.close()
+    return Ok(1)
+`, "`?` may return early"},
+		{"handle moved in the index of an assignment", `
+def f(xs: list[int[0..9]]) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    xs[close_it(own conn)] = 1
+    conn.close()
+    return Ok(1)
+`, "after it was moved"},
 		{"stored in a list", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?
