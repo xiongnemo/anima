@@ -320,7 +320,20 @@ func (v *verifier) havocMutArg(a ast.CallArg, env *symEnv, returned bool) {
 	saved := v.noInvariants
 	v.noInvariants = !returned
 	if path, ok := mutArgPath(a.Value); ok {
+		// A callee given a map cannot make the name hold another one: the
+		// keys that were in it still are (forgetMapLens).
+		kept := map[string]smt.BoolExpr{}
+		if _, isMap := v.info.ExprTypes[a.Value].(*sema.MapType); isMap {
+			for k, b := range env.boolTerms {
+				if strings.HasPrefix(k, path+inMark) {
+					kept[k] = b
+				}
+			}
+		}
 		v.bindFresh(env, path, v.info.ExprTypes[a.Value])
+		for k, b := range kept {
+			env.boolTerms[k] = b
+		}
 	} else if root := mutRoot(a.Value); root != nil {
 		v.bindFresh(env, root.Name, v.info.ExprTypes[root])
 	}

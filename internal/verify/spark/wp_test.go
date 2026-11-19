@@ -3501,10 +3501,142 @@ def h(xss: list[list[int]], o: Option[str], ws: list[str], m: map[str, int]) -> 
         if len(w) > 0:
             print(w[0])
     # A map is keyed.
-    if len(m) > 0:
+    if "a" in m:
         t = m["a"]
         m2: map[str, int] = {}
         m2["b"] = 1
+    return t
+`
+	if failed := failedVCs(verifySrc(t, prelude+proved)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
+
+// A map read at a key that is not there gives None, whatever the value
+// type says, so every read is proved to find its key: under `k in m`, after
+// `m[k] = v`, or a key of the literal. What is known of a key holds for the
+// map and the key it was learnt of, and a map only gains keys.
+func TestSPARKMapKeyIsPresent(t *testing.T) {
+	prelude := `
+entity T:
+    tbl: map[str, int[1..9]]
+
+def other() -> map[str, int[1..9]]:
+    m: map[str, int[1..9]] = {"b": 1}
+    return m
+
+def put(mut m: map[str, int[1..9]]) -> int:
+    m["a"] = 1
+    return 0
+
+def swap(mut b: T) -> int:
+    e: map[str, int[1..9]] = {}
+    b.tbl = e
+    return 0
+
+def g(m: map[str, int[1..9]], k: str) -> int:
+    requires: k in m
+    return 10 / m[k]
+
+def ga(m: map[str, int[1..9]]) -> int:
+    requires: "a" in m
+    return 10 / m["a"]
+
+def gt(b: T, c: T) -> int:
+    requires: "a" in c.tbl
+    return 10 / c.tbl["a"]
+`
+	rejected := map[string]string{
+		"no guard":               "def f(m: map[str, int[1..9]]) -> int:\n    return 10 / m[\"zz\"]\n",
+		"another key":            "def f(m: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return 10 / m[\"b\"]\n    return 0\n",
+		"a key not in a literal": "def f() -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    return 10 / m[\"b\"]\n",
+		"a compound write":       "def f(mut m: map[str, int]) -> int:\n    m[\"zz\"] += 1\n    return 0\n",
+		"a guard in one branch":  "def f(m: map[str, int[1..9]], c: bool) -> int:\n    t = 0\n    if c:\n        if \"a\" in m:\n            t = 1\n    return 10 / m[\"a\"]\n",
+		"the else branch":        "def f(m: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return 1\n    else:\n        return 10 / m[\"a\"]\n",
+		"an int key":             "def f(mi: map[int, int[1..9]], i: int) -> int:\n    requires: i > 0 and i < 100\n    j = i\n    if j in mi:\n        j += 1\n        return 10 / mi[j]\n    return 0\n",
+		"a field":                "def f(b: T) -> int:\n    return 10 / b.tbl[\"a\"]\n",
+		"a lambda":               "def f(ms: list[map[str, int[1..9]]]) -> list[int]:\n    return ms |> map(m => 10 / m[\"a\"])\n",
+		// The map the name holds is another one.
+		"the map assigned":          "def f() -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    if \"a\" in m:\n        m = other()\n        return 10 / m[\"a\"]\n    return 0\n",
+		"the map assigned in an if": "def f(m: map[str, int[1..9]], n: map[str, int[1..9]], c: bool) -> int:\n    x = m\n    if \"a\" in x:\n        if c:\n            x = n\n        return 10 / x[\"a\"]\n    return 0\n",
+		"the map a loop variable":   "def f(ms: list[map[str, int[1..9]]]) -> int:\n    m: map[str, int[1..9]] = {\"a\": 1}\n    for m in ms:\n        print(1)\n    return 10 / m[\"a\"]\n",
+		"the field assigned":        "def f(mut b: T) -> int:\n    if \"a\" in b.tbl:\n        e: map[str, int[1..9]] = {}\n        b.tbl = e\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		"the field by another name": "def f(mut b: T) -> int:\n    c = b\n    if \"a\" in b.tbl:\n        e: map[str, int[1..9]] = {}\n        c.tbl = e\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		"the field by a callee":     "def f(mut b: T) -> int:\n    if \"a\" in b.tbl:\n        z = swap(mut b)\n        return 10 / b.tbl[\"a\"]\n    return 0\n",
+		// The key the name holds is another one.
+		"the key assigned":           "def f(m: map[str, int[1..9]]) -> int:\n    k = \"a\"\n    if k in m:\n        k = \"zz\"\n        return 10 / m[k]\n    return 0\n",
+		"the key a loop variable":    "def f(m: map[str, int[1..9]], ks: list[str]) -> int:\n    k = \"a\"\n    if k in m:\n        for k in ks:\n            print(k)\n        return 10 / m[k]\n    return 0\n",
+		"the key a pattern name":     "def f(m: map[str, int[1..9]], o: Option[str]) -> int:\n    k = \"a\"\n    if k in m:\n        match o:\n            Some(k) -> print(k)\n            None -> print(0)\n        return 10 / m[k]\n    return 0\n",
+		"the key a lambda parameter": "def f(m: map[str, int[1..9]], ks: list[str]) -> list[int]:\n    k = \"a\"\n    if k in m:\n        return ks |> map(k => 10 / m[k])\n    return []\n",
+		"a key of the loop":          "def f(m: map[str, int[1..9]], ks: list[str]) -> int:\n    t = 0\n    for k in ks:\n        if \"a\" in m:\n            t = 10 / m[k]\n    return t\n",
+		// A callee's requires is proved of the map and the key it is given.
+		"requires, another map":   "def f(m: map[str, int[1..9]], n: map[str, int[1..9]]) -> int:\n    if \"a\" in m:\n        return ga(n)\n    return 0\n",
+		"requires, another key":   "def f(m: map[str, int[1..9]], k: str, w: str) -> int:\n    if k in m:\n        return g(m, w)\n    return 0\n",
+		"requires, another field": "def f(b: T, c: T) -> int:\n    if \"a\" in b.tbl:\n        return gt(b, c)\n    return 0\n",
+	}
+	for name, src := range rejected {
+		want := "key_present"
+		if strings.HasPrefix(name, "requires") {
+			want = "_requires_1"
+		}
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, want) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, want, failed)
+		}
+	}
+	// A key that was not in the map may be in it after an insertion, by
+	// this name, another one, a callee or a loop: the branch is checked.
+	reached := map[string]string{
+		"this name":    "def f(mut m: map[str, int[1..9]], k: str) -> int:\n    if not (\"z\" in m):\n        m[k] = 1\n        if \"z\" in m:\n            return 10 / 0\n    return 0\n",
+		"another name": "def f(mut m: map[str, int[1..9]]) -> int:\n    m2 = m\n    if not (\"a\" in m):\n        m2[\"a\"] = 1\n        if \"a\" in m:\n            return 10 / 0\n    return 0\n",
+		"a callee":     "def f(mut m: map[str, int[1..9]]) -> int:\n    if not (\"a\" in m):\n        z = put(mut m)\n        if \"a\" in m:\n            return 10 / 0\n    return 0\n",
+		"a loop":       "def f(mut m: map[str, int[1..9]], ks: list[str]) -> int:\n    if not (\"z\" in m):\n        for k in ks:\n            m[k] = 1\n        if \"z\" in m:\n            return 10 / 0\n    return 0\n",
+		"a field":      "def f() -> int:\n    m: map[str, int[1..9]] = {\"b\": 1}\n    b = T(tbl=m)\n    if not (\"z\" in b.tbl):\n        m[\"z\"] = 1\n        if \"z\" in b.tbl:\n            return 10 / 0\n    return 0\n",
+		"an int key":   "def f(mut mi: map[int, int[1..9]], i: int, j: int) -> int:\n    if not (i in mi):\n        mi[j] = 1\n        if i in mi:\n            return 10 / 0\n    return 0\n",
+	}
+	for name, src := range reached {
+		if failed := strings.Join(failedVCs(verifySrc(t, prelude+"\n"+src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := `
+def f(mut m: map[str, int[1..9]], ks: list[str], mi: map[int, int], i: int, b: T) -> int:
+    t = 0
+    for k in ks:
+        if k in m:
+            t = 10 / m[k]
+    m["q"] = 3
+    t = 10 / m["q"]
+    k2 = "w"
+    m[k2] = 4
+    t = m[k2] + m["q"]
+    if "a" in m:
+        # What was found stays found when the map gains a key.
+        m["b"] = 2
+        z = put(mut m)
+        m["a"] += 1 - 1
+        t = m["a"] + m["b"]
+        t = ga(m)
+        t = g(m, k2)
+    if i in mi:
+        t = mi[i]
+        j = i
+        t = mi[j]
+    if "a" in b.tbl and "b" in b.tbl:
+        t = b.tbl["a"] + b.tbl["b"]
+        t = gt(b, b)
+    lit: map[str, int] = {"x": 1, "y": 2}
+    lit["z"] = 3
+    al = lit
+    al["u"] = 4
+    print(lit["x"], lit["y"], lit["z"], al["u"])
+    mn: map[int, int] = {1: 5}
+    print(mn[1])
+    # A closure reads the map and the key it was made with.
+    x = m
+    if k2 in x:
+        h = () => 10 / x[k2]
+        x = other()
+        t = h()
     return t
 `
 	if failed := failedVCs(verifySrc(t, prelude+proved)); len(failed) != 0 {

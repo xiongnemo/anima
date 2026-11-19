@@ -1,7 +1,10 @@
 package spark
 
 import (
+	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
@@ -102,7 +105,7 @@ func (v *verifier) elemHull(ix *ast.IndexExpr, env *symEnv) (smt.Interval, bool)
 // write is dropped. The length is known of a literal and of what a
 // variable or a field of one holds; any other list or string has to be
 // given a name first. A map is keyed, and takes any key.
-func (v *verifier) proveIndex(indexed ast.Expr, idx smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
+func (v *verifier) proveIndex(indexed, key ast.Expr, idx smt.LinearTerm, write bool, env *symEnv, scope string, span ast.Span) {
 	name := scope + ".index_bounds"
 	path, named := mutArgPath(indexed)
 	var length smt.LinearTerm
@@ -120,6 +123,11 @@ func (v *verifier) proveIndex(indexed ast.Expr, idx smt.LinearTerm, env *symEnv,
 		}
 		length = lt
 	case *sema.MapType:
+		// A write makes the key; a read of a key that is not there gives
+		// None, whatever the value type says.
+		if !write {
+			v.prove(scope+".key_present", scope, span, env, v.memberOf(indexed, key, env))
+		}
 		return
 	default:
 		// A value sema has no type for is checked when its length is known.
@@ -150,4 +158,98 @@ func (v *verifier) lenOfValue(e ast.Expr, env *symEnv) (smt.LinearTerm, bool) {
 		return env.lenOf(path), true
 	}
 	return smt.LinearTerm{}, false
+}
+
+// inMark is in the name of a bool that says whether a key is in a map:
+// <map path>.in:<key>. Under the path of its map, it is forgotten with it.
+const inMark = ".in:"
+
+// keyFact names the bool for key in the map that indexed evaluates to. A
+// key is known by its value: a literal, the integer it is, or the string
+// variable that holds it, until that variable is assigned.
+func (v *verifier) keyFact(indexed, key ast.Expr, env *symEnv) (string, bool) {
+	path, named := mutArgPath(indexed)
+	if _, isMap := v.info.ExprTypes[indexed].(*sema.MapType); !isMap || !named {
+		return "", false
+	}
+	switch k := key.(type) {
+	case *ast.StrLit:
+		return path + inMark + strconv.Quote(k.Value), true
+	case *ast.Ident:
+		if _, isStr := v.info.ExprTypes[key].(sema.StrType); isStr {
+			return path + inMark + "$" + k.Name, true
+		}
+	}
+	if _, isInt := v.info.ExprTypes[key].(*sema.IntType); isInt {
+		if t := v.tryEvalInt(key, env); t != nil {
+			return path + inMark + fmt.Sprint(*t), true
+		}
+	}
+	return "", false
+}
+
+// memberOf is whether key is in the map that indexed evaluates to.
+func (v *verifier) memberOf(indexed, key ast.Expr, env *symEnv) smt.BoolExpr {
+	fact, ok := v.keyFact(indexed, key, env)
+	if !ok {
+		return smt.BoolVar{Name: env.freshVar("in")}
+	}
+	if b, known := env.boolTerms[fact]; known {
+		return b
+	}
+	b := smt.BoolVar{Name: env.freshVar("in")}
+	env.boolTerms[fact] = b
+	return b
+}
+
+// keyWritten records that key is in the map after `m[key] = v`.
+func (v *verifier) keyWritten(indexed, key ast.Expr, env *symEnv) {
+	if fact, ok := v.keyFact(indexed, key, env); ok {
+		env.boolTerms[fact] = smt.BoolConst{Val: true}
+	}
+}
+
+// forgetKeysOf forgets which keys were looked up by the string variable name.
+func (e *symEnv) forgetKeysOf(name string) {
+	for _, k := range sortedKeys(e.boolTerms) {
+		if strings.HasSuffix(k, inMark+"$"+name) {
+			delete(e.boolTerms, k)
+		}
+	}
+}
+
+// literalKey is how keyFact writes a key that is a literal.
+func (v *verifier) literalKey(key ast.Expr) string {
+	switch k := key.(type) {
+	case *ast.StrLit:
+		return strconv.Quote(k.Value)
+	case *ast.IntLit:
+		return fmt.Sprint(smt.Const(k.Value))
+	}
+	return ""
+}
+
+// keyBinds gives the map a callee names param the keys the caller knows of
+// the map it passes, held under arg. A key looked up by a string variable
+// is known to the callee when that variable is an argument too.
+func keyBinds(env *symEnv, arg, param string, strParams map[string][]string) []func(*symEnv) {
+	var binds []func(*symEnv)
+	for _, k := range sortedKeys(env.boolTerms) {
+		key, ok := strings.CutPrefix(k, arg+inMark)
+		if !ok {
+			continue
+		}
+		b := env.boolTerms[k]
+		names := []string{key}
+		if v, byVar := strings.CutPrefix(key, "$"); byVar {
+			names = nil
+			for _, p := range strParams[v] {
+				names = append(names, "$"+p)
+			}
+		}
+		for _, n := range names {
+			binds = append(binds, func(c *symEnv) { c.boolTerms[param+inMark+n] = b })
+		}
+	}
+	return binds
 }

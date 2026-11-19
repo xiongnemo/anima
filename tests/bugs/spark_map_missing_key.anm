@@ -1,0 +1,9 @@
+# A map read at a key that is not there gives None, whatever the value type
+# says: the division is by None.
+def f(m: map[str, int[1..9]]) -> int:
+    return 10 / m["zz"]
+
+def main() -> int:
+    m: map[str, int[1..9]] = {"a": 1}
+    print(f(m))
+    return 0
