@@ -746,6 +746,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				env.intTerms[path] = rhsTerm
 				v.proveSharedEntity(fe.Object, env, scope, s.Span)
 			}
+			v.forgetAliases(fe.Object, env)
 		}
 
 	case *ast.IndexAssignStmt:
@@ -801,6 +802,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			v.setField(path, s.Value, rhsTerm, env, scope, s.Span)
 			v.proveSharedEntity(s.Object, env, scope, s.Span)
 		}
+		v.forgetAliases(s.Object, env)
 
 	case *ast.IfStmt:
 		curEnv := env.clone()
@@ -1631,6 +1633,7 @@ func (v *verifier) havocAssigned(stmts []ast.Stmt, env *symEnv) {
 	for _, name := range v.sharedIn(stmts) {
 		env.shared[name] = true
 	}
+	v.forgetWrittenAliases(stmts, env)
 	names, compound := collectAssignedVars(stmts)
 	for _, name := range names {
 		if _, ok := env.intTerms[name]; ok {
