@@ -715,3 +715,28 @@ def keep(n: int[0..10]) -> int:
 		})
 	}
 }
+
+// The index of an assignment target is evaluated at run time, so arithmetic
+// inside it needs the same proof obligations as anywhere else.
+func TestSPARKChecksArithmeticInAssignmentIndex(t *testing.T) {
+	for name, src := range map[string]string{
+		"compound": `
+def zero() -> int[0..0]:
+    return 0
+
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    xs[10 / n] += zero()
+    return 0
+`,
+		"plain": `
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    xs[10 / n] = 5
+    return 0
+`,
+	} {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+}

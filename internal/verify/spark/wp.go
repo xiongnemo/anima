@@ -638,6 +638,11 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			op = "*"
 		}
 		rhsAst = &ast.BinaryExpr{Span: s.Span, Op: op, Left: s.Target, Right: s.Value}
+		// The target is evaluated too (`xs[10 / n] += 1`).
+		v.checkArith(s.Target, env, scope)
+		if ix, ok := s.Target.(*ast.IndexExpr); ok {
+			v.evalSideEffects(ix.Index, env, scope)
+		}
 		v.checkArith(s.Value, env, scope)
 		if _, isInt := v.info.ExprTypes[s.Target].(*sema.IntType); isInt {
 			v.proveFitsInt64(rhsAst, env, scope)
@@ -658,6 +663,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.IndexAssignStmt:
 		v.checkArith(s.Index, env, scope)
+		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
 
 	case *ast.CallStmt:
