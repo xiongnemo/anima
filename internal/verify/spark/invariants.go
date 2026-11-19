@@ -275,7 +275,11 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 		switch c := x.Callee.(type) {
 		case *ast.Ident:
 			if fi := v.info.Funcs[c.Name]; fi != nil {
-				keeps = v.mayKeepArgument(fi.Type.Params, fi.Type.Return)
+				for _, a := range x.Args {
+					if v.mayKeepArgument(fi.Type.Params, fi.Type.Return, v.info.ExprTypes[a.Value]) {
+						stored(a.Value)
+					}
+				}
 			} else {
 				keeps = v.info.Entities[c.Name] != nil || v.isVariantConstructor(x)
 			}
@@ -289,9 +293,11 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 		}
 	case *ast.RunWorkflowExpr:
-		if wi := v.info.Workflows[x.Name]; wi != nil && v.mayKeepArgument(wi.Params, wi.Return) {
+		if wi := v.info.Workflows[x.Name]; wi != nil {
 			for _, a := range x.Args {
-				stored(a.Value)
+				if v.mayKeepArgument(wi.Params, wi.Return, v.info.ExprTypes[a.Value]) {
+					stored(a.Value)
+				}
 			}
 		}
 	case *ast.PipeExpr:
@@ -363,11 +369,11 @@ func mayHoldEntityIn(t sema.Type, depth int) bool {
 }
 
 // mayKeepArgument reports whether a function with these parameters and
-// result can leave one of its arguments reachable after it returns: inside
-// a mut argument that has room for an entity, through a handle (a channel,
-// a pool), or as its result.
-func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) bool {
-	if ret != nil && mayHoldEntity(ret) {
+// result can leave an argument of type arg reachable after it returns:
+// inside a mut argument that has room for a reference, through a handle (a
+// channel, a pool), or as, or inside, its result.
+func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type, arg sema.Type) bool {
+	if v.resultMayBe(ret, arg) {
 		return true
 	}
 	for _, p := range params {
@@ -380,6 +386,28 @@ func (v *verifier) mayKeepArgument(params []sema.FuncParamInfo, ret sema.Type) b
 		}
 	}
 	return false
+}
+
+// resultMayBe reports whether a result of type ret can be a value of type
+// arg, or hold one: a list of numbers is not an entity and holds none.
+func (v *verifier) resultMayBe(ret, arg sema.Type) bool {
+	if ret == nil || !mayHoldEntity(ret) || !mayHoldEntity(arg) {
+		return false
+	}
+	if v.hasRoom(ret) {
+		return true
+	}
+	switch ret.(type) {
+	case *sema.ListType:
+		_, same := arg.(*sema.ListType)
+		return same
+	case *sema.MapType:
+		_, same := arg.(*sema.MapType)
+		return same
+	case *sema.EntityType:
+		return ret.Equals(arg)
+	}
+	return true
 }
 
 // hasRoom reports whether a value of type t has a place to put a reference
@@ -400,9 +428,10 @@ func (v *verifier) hasRoom(t sema.Type) bool {
 // reach: a literal, a new entity, or the result of a call that was given
 // nothing it could hand back.
 func (v *verifier) isFreshValue(e ast.Expr) bool {
-	scalarArgs := func(args []ast.CallArg) bool {
+	// No argument can be, or be inside, a result of type ret.
+	keepsNone := func(ret sema.Type, args []ast.CallArg) bool {
 		for _, a := range args {
-			if mayHoldEntity(v.info.ExprTypes[a.Value]) {
+			if ret == nil || v.resultMayBe(ret, v.info.ExprTypes[a.Value]) {
 				return false
 			}
 		}
@@ -423,10 +452,10 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 		}
 		return true
 	case *ast.RunWorkflowExpr:
-		return scalarArgs(x.Args)
+		return keepsNone(v.info.ExprTypes[x], x.Args)
 	case *ast.PipeExpr:
 		if c := v.pipedCall(x); c != nil {
-			return v.isFreshValue(c)
+			return keepsNone(v.info.ExprTypes[x], c.Args)
 		}
 	case *ast.CallExpr:
 		id, ok := x.Callee.(*ast.Ident)
@@ -436,7 +465,7 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 		if v.info.Entities[id.Name] != nil || v.isVariantConstructor(x) {
 			return true
 		}
-		return scalarArgs(x.Args)
+		return keepsNone(v.info.ExprTypes[x], x.Args)
 	}
 	return false
 }
