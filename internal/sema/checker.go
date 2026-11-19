@@ -1236,6 +1236,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		if e.Op == "not" {
+			if knownType(ity) && ity.Kind() != KindBool {
+				return nil, fmt.Errorf("%s: not needs a bool, got %s", e.Span, ity)
+			}
 			return BoolType{}, nil
 		}
 		if it, ok := ity.(*IntType); ok && e.Op == "-" {
@@ -1265,6 +1268,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			}
 			return NewUnboundedInt(), nil
 		case "==", "!=", "<", "<=", ">", ">=", "and", "or", "implies", "in":
+			if err := checkComparison(e, lt, rt); err != nil {
+				return nil, err
+			}
 			return BoolType{}, nil
 		}
 		return UnknownType{}, nil
@@ -1540,6 +1546,85 @@ var builtinCallables = map[string]bool{
 // checkCalleeNotShadowed rejects a call by a name that is a variable and a
 // function at once. Both backends call the variable; sema and the kernels
 // would check the function.
+// knownType is false for a type sema could not work out: nothing is said
+// about such an operand.
+func knownType(t Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Kind() {
+	case KindUnknown, KindTypeVar, KindVoid:
+		return false
+	}
+	return true
+}
+
+// sameSort says whether a value of type a can be equal to one of type b:
+// the same kind, and for entities and variant types the same declaration.
+func sameSort(a, b Type) bool {
+	if !knownType(a) || !knownType(b) {
+		return true
+	}
+	if a.Kind() != b.Kind() {
+		return false
+	}
+	switch x := a.(type) {
+	case *EntityType:
+		y, ok := b.(*EntityType)
+		return !ok || x.Name == y.Name
+	case *ADTType:
+		y, ok := b.(*ADTType)
+		return !ok || x.Name == y.Name
+	}
+	return true
+}
+
+// checkComparison checks the operands of a comparison or a logical operator.
+// Both backends run any of them on any two values, and do not agree on the
+// answer when the operands are not what the operator is for.
+func checkComparison(e *ast.BinaryExpr, lt, rt Type) error {
+	switch e.Op {
+	case "==", "!=":
+		if !sameSort(lt, rt) {
+			return fmt.Errorf("%s: %s between %s and %s: they are never equal", e.Span, e.Op, lt, rt)
+		}
+	case "<", "<=", ">", ">=":
+		for _, t := range []Type{lt, rt} {
+			if knownType(t) && t.Kind() != KindInt && t.Kind() != KindStr {
+				return fmt.Errorf("%s: %s orders integers or strings, got %s", e.Span, e.Op, t)
+			}
+		}
+		if !sameSort(lt, rt) {
+			return fmt.Errorf("%s: %s between %s and %s: both sides must be integers, or both strings", e.Span, e.Op, lt, rt)
+		}
+	case "and", "or", "implies":
+		for _, t := range []Type{lt, rt} {
+			if knownType(t) && t.Kind() != KindBool {
+				return fmt.Errorf("%s: %s needs a bool on both sides, got %s", e.Span, e.Op, t)
+			}
+		}
+	case "in":
+		if !knownType(rt) {
+			return nil
+		}
+		var of Type
+		switch r := rt.(type) {
+		case *ListType:
+			of = r.Elem
+		case *MapType:
+			of = r.Key
+		case StrType:
+			of = rt
+		default:
+			return fmt.Errorf("%s: in looks into a list, a map or a string, got %s", e.Span, rt)
+		}
+		if !sameSort(lt, of) {
+			return fmt.Errorf("%s: in looks for %s in %s, which holds %s", e.Span, lt, rt, of)
+		}
+	}
+	return nil
+}
+
 func (c *checker) checkCalleeNotShadowed(name string, span ast.Span, sc *scope) error {
 	if _, local := sc.lookup(name); !local {
 		return nil
