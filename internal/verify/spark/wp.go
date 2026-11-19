@@ -1474,8 +1474,18 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 	case *ast.WithExpr:
 		v.evalSideEffects(e.Base, env, scope)
+		et, _ := v.info.ExprTypes[e.Base].(*sema.EntityType)
 		for _, f := range e.Fields {
 			v.evalSideEffects(f.Value, env, scope)
+			// The copy's fields have the declared types, as a constructor's do.
+			v.proveEntityValue(f.Value, env, scope)
+			if et == nil {
+				continue
+			}
+			if it, ok := et.FieldMap[f.Name].(*sema.IntType); ok && it.IsBounded {
+				t := v.evalInt(f.Value, env, scope, true)
+				v.checkIntRange(t, f.Value, env, it, scope+".with_"+f.Name+"_bounds", scope, e.Span)
+			}
 		}
 	case *ast.IntLit, *ast.BoolLit, *ast.StrLit, *ast.NoneLit, *ast.Ident, *ast.OldExpr:
 	default:
