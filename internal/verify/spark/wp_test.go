@@ -2308,3 +2308,110 @@ def idf(a: A) -> A:
 		t.Errorf("an entity handed back by a piped call: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
 	}
 }
+
+// Review round 9 of the aliasing work.
+func TestSPARKClosureResultBareOptionAndNestedAliasWrite(t *testing.T) {
+	nested := invariantPrelude + `
+entity Outer:
+    inner: A
+    k: int[0..9]
+`
+	rejected := map[string]struct{ src, vc string }{
+		"entity handed back by a closure": {invariantPrelude + `
+def f() -> int:
+    b = A(x=5, y=5)
+    g = n => b
+    c = g(1)
+    if c.x != 0:
+        b.x = 0
+        return 10 / c.x
+    return 0
+`, "div_nonzero"},
+		"closure with the name of a function": {invariantPrelude + `
+def mk(n: int) -> A:
+    return A(x=1, y=1)
+
+def f() -> int:
+    b = A(x=5, y=5)
+    mk = n => b
+    c = mk(1)
+    if c.x != 0:
+        b.x = 0
+        return 10 / c.x
+    return 0
+`, "div_nonzero"},
+		"map handed back by a closure": {`
+def f() -> int:
+    m: map[str, int] = {}
+    g = n => m
+    k = g(1)
+    if len(m) == 0:
+        k["a"] = 1
+        return 10 / (1 - len(m))
+    return 0
+`, "div_nonzero"},
+		"bare Option next to its mut payload": {invariantPrelude + `
+def wrap(a: A) -> Option:
+    return Some(a)
+
+def g(mut p: A, q: Option[A]) -> int:
+    return 0
+
+def f() -> int:
+    b = A(x=5, y=5)
+    o = wrap(b)
+    return g(mut b, o)
+`, "call_g_mut_alias"},
+		"nested invariant broken through a second name": {nested + `
+def f(mut o: Outer) -> int:
+    h = o.inner
+    h.x = 6
+    return 0
+`, "entity_h_invariant_1"},
+		"nested invariant broken before the second name": {nested + `
+def f(mut o: Outer, mut rows: list[A]) -> int:
+    o.inner.x = 6
+    h = o.inner
+    if len(rows) > 0:
+        rows[0].x = 0
+    return 0
+`, "f.mut_o.inner_invariant"},
+		"a ? that can return": {invariantPrelude + `
+def half(n: int) -> Option[int]:
+    if n > 0:
+        return Some(n / 2)
+    return None
+
+def f(mut o: A, n: int) -> Option[int]:
+    o.x = 6
+    v = half(n)?
+    o.y = 4
+    return Some(v)
+`, "f.mut_o_invariant"},
+	}
+	for name, c := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n"); !strings.Contains(failed, c.vc) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, c.vc, failed)
+		}
+	}
+	proved := map[string]string{
+		"nested entity written through a second name": nested + `
+def f(mut o: Outer) -> int:
+    h = o.inner
+    h.x = 0
+    return 0
+`,
+		"a ? that cannot return": nested + `
+def f(mut o: Outer) -> Option[int]:
+    o.inner.x = 6
+    v = Some(1)?
+    o.inner.y = 4
+    return Some(v)
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
