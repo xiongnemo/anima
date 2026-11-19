@@ -708,11 +708,10 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		case *ast.IndexExpr:
 			lC := g.emitExpr(tgt.List)
 			iC := g.emitExpr(tgt.Index)
-			inRange := fmt.Sprintf("(%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len)", lC, lC, iC, iC, lC)
 			cur := g.freshTmp("elem")
-			g.line("AnimaVal %s = %s ? %s.u.list->items[(%s).u.i] : v_none();", cur, inRange, lC, iC)
+			g.line("AnimaVal %s = v_index_get(%s, %s);", cur, lC, iC)
 			rhsC := g.emitExpr(s.Value)
-			g.line("if %s { %s.u.list->items[(%s).u.i] = v_int(%s.u.i %s (%s).u.i); }", inRange, lC, iC, cur, opSym, rhsC)
+			g.line("v_index_set(%s, %s, v_int(%s.u.i %s (%s).u.i));", lC, iC, cur, opSym, rhsC)
 		}
 
 	case *ast.FieldAssignStmt:
@@ -724,8 +723,7 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		lC := g.emitExpr(s.List)
 		iC := g.emitExpr(s.Index)
 		vC := g.emitExpr(s.Value)
-		g.line("if (%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len) { %s.u.list->items[(%s).u.i] = %s; }",
-			lC, lC, iC, iC, lC, lC, iC, vC)
+		g.line("v_index_set(%s, %s, %s);", lC, iC, vC)
 
 	case *ast.IfStmt:
 		// An elif condition may emit statements, so it is nested in the
@@ -1068,10 +1066,7 @@ func (g *cgen) emitExprInline(expr ast.Expr) string {
 	case *ast.IndexExpr:
 		lst := g.emitExpr(e.List)
 		idx := g.emitExpr(e.Index)
-		tmp := g.freshTmp("idxv")
-		g.line("AnimaVal %s = (%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len) ? %s.u.list->items[(%s).u.i] : v_none();",
-			tmp, lst, lst, idx, idx, lst, lst, idx)
-		return tmp
+		return fmt.Sprintf("v_index_get(%s, %s)", lst, idx)
 	case *ast.WithExpr:
 		base := g.emitExpr(e.Base)
 		cp := g.freshTmp("with")

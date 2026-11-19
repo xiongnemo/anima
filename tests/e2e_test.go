@@ -382,6 +382,26 @@ index-rhs
 ys0=5
 `
 
+// Element reads and writes behave the same for lists and maps on both backends.
+func TestE2EElementAccessParity(t *testing.T) {
+	runOnBothBackends(t, "element_access", elementAccessSrc, "a=1 b=7 xs=3,9\n")
+}
+
+const elementAccessSrc = `def zero() -> int[0..0]:
+    return 0
+
+def main() -> int:
+    m: map[str, int[0..9]] = {"a": 1, "b": 2}
+    m["a"] += zero()
+    m["b"] = 7
+    xs: list[int[0..9]] = [3, 4]
+    xs[1] = 9
+    a = m["a"]
+    b = m["b"]
+    print(f"a={a} b={b} xs={xs[0]},{xs[1]}")
+    return 0
+`
+
 const movedThenTrySrc = `import std.socket as sock
 import std.concurrent as conc
 import std.time as time
