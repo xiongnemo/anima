@@ -1095,13 +1095,38 @@ func (c *checker) ensureMutableTarget(root string, sc *scope, span ast.Span) err
 }
 
 func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
-	switch p := pat.(type) {
-	case *ast.WildcardPat, *ast.IntPat, *ast.RangePat, *ast.BoolPat, *ast.StrPat:
+	// A pattern of another type than a subject whose type is known never
+	// matches: it is a mistake, not an arm.
+	fits := func(span ast.Span, what string, kind TypeKind) error {
+		if subjTy == nil {
+			return nil
+		}
+		switch k := subjTy.Kind(); k {
+		case KindInt, KindBool, KindStr, KindList, KindMap, KindEntity, KindADT:
+			if k != kind {
+				return fmt.Errorf("%s: %s pattern cannot match a value of type %s", span, what, subjTy)
+			}
+		}
 		return nil
+	}
+	switch p := pat.(type) {
+	case *ast.WildcardPat:
+		return nil
+	case *ast.IntPat:
+		return fits(p.Span, "an int", KindInt)
+	case *ast.RangePat:
+		return fits(p.Span, "an int range", KindInt)
+	case *ast.BoolPat:
+		return fits(p.Span, "a bool", KindBool)
+	case *ast.StrPat:
+		return fits(p.Span, "a string", KindStr)
 	case *ast.VarPat:
 		sc.defineLocal(p.Name, varBinding{ty: subjTy, span: p.Span})
 		return nil
 	case *ast.VariantPat:
+		if err := fits(p.Span, "a variant", KindADT); err != nil {
+			return err
+		}
 		adt, ok := c.info.Variants[p.Name]
 		if !ok {
 			if subjADT, isADT := subjTy.(*ADTType); isADT {
@@ -1110,12 +1135,15 @@ func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
 				return fmt.Errorf("%s: unknown ADT variant %q", p.Span, p.Name)
 			}
 		}
+		if subjADT, isADT := subjTy.(*ADTType); isADT && subjADT.Name != adt.Name {
+			return fmt.Errorf("%s: variant %s of %s cannot match a value of type %s", p.Span, p.Name, adt.Name, subjTy)
+		}
 		vi, ok := adt.VariantMap[p.Name]
 		if !ok {
 			return fmt.Errorf("%s: variant %q not in ADT %s", p.Span, p.Name, adt.Name)
 		}
-		if len(p.Fields) > len(vi.Fields) {
-			return fmt.Errorf("%s: variant %s expects %d fields, pattern has %d", p.Span, p.Name, len(vi.Fields), len(p.Fields))
+		if len(p.Fields) != len(vi.Fields) {
+			return fmt.Errorf("%s: variant %s has %d field(s), pattern has %d", p.Span, p.Name, len(vi.Fields), len(p.Fields))
 		}
 		// Resolve TypeVars using subjTy TypeArgs if applicable
 		subMap := map[string]Type{}
@@ -1371,7 +1399,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		// A value of a type that is known has no other member: the VM
 		// stops on one and the native backend gives `()`.
 		switch objTy.Kind() {
-		case KindInt, KindBool, KindStr, KindList, KindMap, KindADT:
+		case KindADT:
+			return nil, fmt.Errorf("%s: a value of type %s has no member %q; match on it to reach what it holds", e.Span, objTy, e.Field)
+		case KindInt, KindBool, KindStr, KindList, KindMap:
 			return nil, fmt.Errorf("%s: a value of type %s has no member %q", e.Span, objTy, e.Field)
 		}
 		return UnknownType{}, nil

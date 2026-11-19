@@ -455,7 +455,7 @@ def f() -> int:
     r = sock.connect_tcp("127.0.0.1", 1)
     r.close()
     return 0
-`, "match on it before calling"},
+`, "match on it to reach what it holds"},
 		{"overwritten while open", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?
