@@ -216,3 +216,77 @@ def main() -> int:
 		t.Fatalf("HTTP parity mismatch: vm=%q native=%q", string(vmOut), string(natOut))
 	}
 }
+
+// A connection moved into a worker must stay open when the function that
+// moved it later returns early through `?`.
+func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	src := filepath.Join(tmp, "moved_then_try.anm")
+	if err := os.WriteFile(src, []byte(movedThenTrySrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := "dispatch failed: boom\nreply=late\n"
+
+	vmOut, err := exec.Command(animaBin, "run", src).CombinedOutput()
+	if err != nil || string(vmOut) != want {
+		t.Fatalf("VM: err=%v, output:\n%s", err, vmOut)
+	}
+	nativeBin := filepath.Join(tmp, "moved_then_try")
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, src).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	natOut, err := exec.Command(nativeBin).CombinedOutput()
+	if err != nil || string(natOut) != want {
+		t.Fatalf("native: err=%v, output:\n%s", err, natOut)
+	}
+}
+
+const movedThenTrySrc = `import std.socket as sock
+import std.concurrent as conc
+import std.time as time
+
+def late_reply(own conn: sock.TcpStream) -> bool:
+    time.sleep_ms(300)
+    sent = conn.send_text("late")
+    conn.close()
+    match sent:
+        Ok(n) -> return True
+        Err(e) -> return False
+    return False
+
+def fail() -> Result[int, str]:
+    return Err("boom")
+
+def dispatch(ln: sock.TcpListener, pool: conc.ThreadPool) -> Result[int, str]:
+    conn = ln.accept(timeout_ms=3000)?
+    fut = pool.submit(() => late_reply(own conn))
+    n = fail()?
+    _ = fut.await()
+    return Ok(n)
+
+def read_reply(conn: sock.TcpStream) -> str:
+    match conn.recv_text(16):
+        Ok(text) -> return text
+        Err(e) -> return "error: " + e
+    return ""
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            pool = conc.ThreadPool(1, 2)
+            match sock.connect_tcp("127.0.0.1", ln.port()):
+                Ok(client) ->
+                    match dispatch(ln, pool):
+                        Ok(n) -> print("dispatch ok")
+                        Err(e) -> print(f"dispatch failed: {e}")
+                    reply = read_reply(client)
+                    client.close()
+                    print(f"reply={reply}")
+                Err(e) -> print(f"connect failed: {e}")
+            pool.shutdown()
+            ln.close()
+            return 0
+        Err(e) -> print(f"listen failed: {e}")
+    return 1
+`

@@ -21,7 +21,7 @@ var Modules = []ModuleSpec{
 	{
 		Path:                  "std.socket",
 		Description:           "TCP listener and stream sockets (listen_tcp, connect_tcp, accept, send_text, recv_text, close)",
-		VerificationGuarantee: "Linear Typestate LTS enforcement preventing FD leaks and use-after-close + RAII ? unwind cleanup",
+		VerificationGuarantee: "Ownership and typestate checking: every socket has one owner that closes it on every path; no use after close or move, no sharing of a stream between threads",
 	},
 	{
 		Path:                  "std.requests",

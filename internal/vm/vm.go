@@ -424,6 +424,10 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 	}
 
 	var stack []Value
+	// Handles stored in this frame that a failing `?` closes on its early
+	// return. Sockets and files are excluded: the ownership checker rejects `?`
+	// while the function owns an open one, so any still reachable here is
+	// either borrowed or was moved to another owner (possibly another thread).
 	var ownedHandles []*HandleValue
 	cleanupHandles := func(except Value) {
 		for _, h := range ownedHandles {
@@ -433,8 +437,6 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 			h.Close()
 		}
 	}
-	// On explicit normal return, we keep handles closed only on `?` early unwind (or let user close in code);
-	// on `?` early-return unwrap failure, close all opened handles in this frame (RAII).
 
 	push := func(v Value) {
 		stack = append(stack, v)
@@ -479,7 +481,11 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 			val := pop()
 			locals[imm] = val
 			if val.Kind == ValHandle && val.Handle != nil {
-				ownedHandles = append(ownedHandles, val.Handle)
+				switch val.Handle.Kind {
+				case HandleListener, HandleStream, HandleFile:
+				default:
+					ownedHandles = append(ownedHandles, val.Handle)
+				}
 			}
 		case OpLoadUpval:
 			push(upvals[imm])
@@ -698,7 +704,6 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 					}
 					continue
 				case "Err", "None":
-					// RAII: close all open local handles before early-returning error!
 					cleanupHandles(VVoid())
 					return v, true, locals, nil
 				}

@@ -269,7 +269,10 @@ type typestateChecker struct {
 	touched  map[string]bool
 }
 
-type taskCtx struct{ pool string }
+type taskCtx struct {
+	pool   string
+	sawTry bool // a `?` in the closure body has already been evaluated
+}
 
 func (t *typestateChecker) err(span ast.Span, format string, args ...any) {
 	e := TypestateError{Span: span, Func: t.fn, Message: fmt.Sprintf(format, args...)}
@@ -279,6 +282,12 @@ func (t *typestateChecker) err(span ast.Span, format string, args ...any) {
 		}
 	}
 	t.errs = append(t.errs, e)
+}
+
+// deferred reports whether the code being walked is a closure body, which
+// runs later (if at all) and so cannot end a loan for the enclosing function.
+func (t *typestateChecker) deferred() bool {
+	return t.inLambda || t.task != nil
 }
 
 // touch records that the code being walked used the handle.
@@ -689,6 +698,7 @@ func (t *typestateChecker) walkMatch(s *ast.MatchStmt, env *tsEnv) bool {
 		t.evalExpr(arm.Guard, a, false)
 		if !t.walkBlock(arm.Body, a) {
 			t.endScope(arm.Span, env, a)
+			t.endPorts(arm.Span, env, a)
 			live = append(live, a)
 		}
 	}
@@ -720,6 +730,7 @@ func (t *typestateChecker) walkLoop(span ast.Span, body []ast.Stmt, cond ast.Exp
 		return
 	}
 	t.endScope(span, env, b)
+	t.endPorts(span, env, b)
 	t.evalExpr(cond, b, false)
 	t.requireUnchanged(span, env, b, "the loop body")
 	// A loan made in the body may have been made once per iteration: its
@@ -827,6 +838,24 @@ func (t *typestateChecker) endScope(span ast.Span, outer, inner *tsEnv) {
 	}
 }
 
+// endPorts checks port protocols first used inside a loop body or match arm,
+// whose state is not carried to the code after it.
+func (t *typestateChecker) endPorts(span ast.Span, outer, inner *tsEnv) {
+	keys := make([]string, 0, len(inner.ports))
+	for k := range inner.ports {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, existed := outer.ports[k]; existed {
+			continue
+		}
+		if hs := inner.ports[k]; !isAcceptingState(hs.spec, hs.state) {
+			t.err(span, "resource handle leak in inner block: port %q left in state %q", strings.TrimPrefix(k, "port:"), hs.state)
+		}
+	}
+}
+
 func (t *typestateChecker) requireUnchanged(span ast.Span, before, after *tsEnv, what string) {
 	for _, k := range before.names() {
 		was := before.h[k]
@@ -927,6 +956,9 @@ func (t *typestateChecker) checkBorrowedAtExit(span ast.Span, env *tsEnv, name s
 
 // checkTry runs at a `?`, which returns early on Err/None.
 func (t *typestateChecker) checkTry(span ast.Span, env *tsEnv) {
+	if t.task != nil {
+		t.task.sawTry = true
+	}
 	if t.inLambda || t.task != nil {
 		return
 	}
@@ -1031,9 +1063,15 @@ func (t *typestateChecker) evalExpr(expr ast.Expr, env *tsEnv, source bool) {
 		}
 	case *ast.MatchExpr:
 		t.evalExpr(e.Subject, env, false)
+		var live []*tsEnv
 		for _, arm := range e.Arms {
-			t.evalConditional(arm.Guard, env)
-			t.evalConditional(arm.Value, env)
+			a := env.clone()
+			t.evalConditional(arm.Guard, a)
+			t.evalExpr(arm.Value, a, false)
+			live = append(live, a)
+		}
+		if len(live) > 0 {
+			t.join(e.Span, env, live, false)
 		}
 	case *ast.RunWorkflowExpr:
 		if wi := t.info.Workflows[e.Name]; wi != nil {
@@ -1115,13 +1153,13 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 					t.inLambda, t.task = prevL, prevT
 					return
 				}
-			case objTy.Name == "conc.ThreadPool" && callee.Field == "shutdown" && name != "":
+			case objTy.Name == "conc.ThreadPool" && callee.Field == "shutdown" && name != "" && !t.deferred():
 				env.release(func(l loan) bool { return l.pool == name })
-			case objTy.Name == "Future" && callee.Field == "await" && name != "":
+			case objTy.Name == "Future" && callee.Field == "await" && name != "" && !t.deferred():
 				env.release(func(l loan) bool { return l.fut == name })
 			}
 		case *sema.ModuleType:
-			if objTy.Path == "std.concurrent" && callee.Field == "gather" {
+			if objTy.Path == "std.concurrent" && callee.Field == "gather" && !t.deferred() {
 				for _, a := range e.Args {
 					if ll, ok := a.Value.(*ast.ListLit); ok {
 						for _, el := range ll.Elems {
@@ -1149,22 +1187,32 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 
 // evalUserCall passes args to a function or workflow with the given
 // parameters: a handle is lent to a borrowed parameter and moved into an
-// `own` one.
+// `own` one. The callee only runs once every argument has been evaluated, so
+// the other arguments are walked first: a `?` in one of them still sees the
+// handles as held by the caller, and a nested call that closes or moves one
+// makes passing it here an error.
 func (t *typestateChecker) evalUserCall(args []ast.CallArg, params []sema.FuncParamInfo, env *tsEnv) {
-	seen := map[string]bool{}
+	isHandleArg := make([]bool, len(args))
 	for i, a := range args {
-		id, ok := t.handleIdent(a.Value, env)
-		if !ok || i >= len(params) {
-			if a.Own {
-				// sema guarantees an `own` argument is a handle-typed variable
-				if aid, isID := a.Value.(*ast.Ident); isID {
-					t.err(a.Span, "%q is not a handle owned by a variable of this function", aid.Name)
-				}
-				continue
-			}
-			t.evalExpr(a.Value, env, false)
+		if _, ok := t.handleIdent(a.Value, env); ok && i < len(params) {
+			isHandleArg[i] = true
 			continue
 		}
+		if a.Own {
+			// sema guarantees an `own` argument is a handle-typed variable
+			if aid, isID := a.Value.(*ast.Ident); isID {
+				t.err(a.Span, "%q is not a handle owned by a variable of this function", aid.Name)
+			}
+			continue
+		}
+		t.evalExpr(a.Value, env, false)
+	}
+	seen := map[string]bool{}
+	for i, a := range args {
+		if !isHandleArg[i] {
+			continue
+		}
+		id := a.Value.(*ast.Ident)
 		hs := env.h[id.Name]
 		if seen[id.Name] {
 			t.err(a.Span, "%s %q is passed more than once in the same call", hs.typeName, id.Name)
@@ -1185,6 +1233,10 @@ func (t *typestateChecker) evalUserCall(args []ast.CallArg, params []sema.FuncPa
 				t.err(a.Span, "cannot give away borrowed %s %q; only its owner can move it", hs.typeName, id.Name)
 			} else if env.lent(id.Name) {
 				t.err(a.Span, "cannot move %s %q while a task may still be using it; await the future or shut down the pool first", hs.typeName, id.Name)
+			} else if t.task != nil && t.task.sawTry {
+				// The task already owns the handle it captured; the `?`
+				// would end the task before the callee receives it.
+				t.err(a.Span, "resource handle leak: a `?` evaluated earlier in this task may end it before %s %q is handed over", hs.typeName, id.Name)
 			} else {
 				hs.moved, hs.movedAt = true, a.Span
 				env.h[id.Name] = hs

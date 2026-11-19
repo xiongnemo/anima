@@ -85,7 +85,6 @@ type cgen struct {
 	localVars   map[string]bool
 	upvalMap    map[string]int
 	freeScanSet map[string]bool
-	hasHandles  bool
 	wfVars      map[string]bool
 	wfCtxPtr    string
 }
@@ -276,7 +275,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	g.cur = g.bodyOut
 	g.localVars = map[string]bool{}
 	g.upvalMap = nil
-	g.hasHandles = true
 	g.wfVars = nil
 
 	var ps []string
@@ -290,7 +288,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	}
 	g.line("static AnimaVal __fn_%s(%s) {", fn.Name, pStr)
 	g.indent++
-	g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 	for _, lv := range collectStmtLocals(fn.Body) {
 		if !g.localVars[lv] {
 			g.localVars[lv] = true
@@ -305,7 +302,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	g.line("return v_void();")
 	g.indent--
 	g.line("}")
-	g.hasHandles = false
 	return nil
 }
 
@@ -341,10 +337,8 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	prevVars := g.localVars
 	prevWfVars := g.wfVars
 	prevCtx := g.wfCtxPtr
-	prevHandles := g.hasHandles
 	g.wfVars = varNames
 	g.wfCtxPtr = "ctx"
-	g.hasHandles = false
 
 	forkWorkerMap := map[string][]string{}
 	for _, n := range wf.Nodes {
@@ -362,7 +356,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 			g.line("static void *%s(void *arg) {", wfn)
 			g.indent++
 			g.line("%s *ctx = (%s *)arg;", ctxName, ctxName)
-			g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 			for _, op := range br.Ops {
 				switch op.Kind {
 				case ast.BranchAcquire:
@@ -402,7 +395,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	g.indent++
 	g.line("%s ctx_val = {0};", ctxName)
 	g.line("%s *ctx = &ctx_val;", ctxName)
-	g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 	for _, p := range wf.Params {
 		g.line("ctx->%s = %s;", cVarName(p.Name), cVarName(p.Name))
 	}
@@ -518,7 +510,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	g.localVars = prevVars
 	g.wfVars = prevWfVars
 	g.wfCtxPtr = prevCtx
-	g.hasHandles = prevHandles
 	return nil
 }
 
@@ -692,9 +683,6 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		valC := g.emitExpr(s.Value)
 		dest := g.ensureVarDeclared(s.Name)
 		g.line("%s = %s;", dest, valC)
-		if isHandleCreator(s.Value) {
-			g.line("if (__n_owned < 32) __owned_hdls[__n_owned++] = %s;", dest)
-		}
 
 	case *ast.CompoundAssignStmt:
 		rhsC := g.emitExpr(s.Value)
@@ -939,20 +927,6 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 	}
 }
 
-func isHandleCreator(expr ast.Expr) bool {
-	if te, ok := expr.(*ast.TryExpr); ok {
-		return isHandleCreator(te.Inner)
-	}
-	ce, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "listen_tcp" || fe.Field == "connect_tcp" || fe.Field == "accept" || fe.Field == "open"
-	}
-	return false
-}
-
 func (g *cgen) emitExpr(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.IntLit:
@@ -1081,9 +1055,6 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 		g.line("AnimaVal %s = %s;", res, inner)
 		g.line("if (v_is_variant(%s, \"Err\") || v_is_variant(%s, \"None\") || %s.kind == VAL_NONE) {", res, res, res)
 		g.indent++
-		if g.hasHandles {
-			g.line("for (int __hi = 0; __hi < __n_owned; __hi++) hdl_close(__owned_hdls[__hi]);")
-		}
 		g.line("return %s;", res)
 		g.indent--
 		g.line("}")
@@ -1128,12 +1099,10 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	prevCur := g.cur
 	prevVars := g.localVars
 	prevUp := g.upvalMap
-	prevHandles := g.hasHandles
 
 	g.cur = g.liftedFns
 	g.localVars = map[string]bool{}
 	g.upvalMap = map[string]int{}
-	g.hasHandles = false
 	for i, fv := range freeVars {
 		g.upvalMap[fv] = i
 	}
@@ -1152,7 +1121,6 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	g.cur = prevCur
 	g.localVars = prevVars
 	g.upvalMap = prevUp
-	g.hasHandles = prevHandles
 
 	if len(freeVars) == 0 {
 		return fmt.Sprintf("v_closure(%s, 0, NULL)", lname)

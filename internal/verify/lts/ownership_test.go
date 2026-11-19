@@ -25,6 +25,18 @@ def accept_one(ln: sock.TcpListener) -> int:
         Ok(c) -> c.close()
         Err(e) -> print(e)
     return 0
+
+def fallible() -> Result[int, str]:
+    return Err("no")
+
+port AuditLog:
+    protocol:
+        state Closed:
+            on open_log -> Open
+        state Open:
+            on close_log -> Closed
+    extern def open_log()
+    extern def close_log()
 `
 
 // ownershipErrors returns the front-end error or the typestate errors of src.
@@ -214,6 +226,43 @@ def f() -> Result[int, str]:
     n = run_workflow W(conn)
     conn.close()
     return Ok(n)
+`,
+		"every arm of a match expression moves the handle": `
+def f(b: bool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    n = match b:
+        True -> close_it(own conn)
+        False -> close_it(own conn) + 1
+    return Ok(n)
+`,
+		"fallible argument evaluated before the handle is opened": `
+def keep(conn: sock.TcpStream, n: int) -> int:
+    return n
+
+def f() -> Result[int, str]:
+    n = fallible()?
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    m = keep(conn, n)
+    conn.close()
+    return Ok(m)
+`,
+		"port opened and closed in a loop body": `
+def f(xs: list[int]) -> int:
+    for x in xs:
+        AuditLog.open_log()
+        AuditLog.close_log()
+    return 0
+`,
+		"task fails only after the callee took the handle": `
+def try_close(own conn: sock.TcpStream) -> Result[int, str]:
+    conn.close()
+    return Err("closed")
+
+def f(pool: conc.ThreadPool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    a = pool.submit(() => try_close(own conn)?)
+    _ = a.await()
+    return Ok(0)
 `,
 		"own is still an ordinary name": `
 def f(own: int) -> int:
@@ -498,6 +547,84 @@ def f() -> Result[int, str]:
     conn.close()
     return Ok(1)
 `, "overwritten"},
+		{"fallible argument after an own argument", `
+def consume(own conn: sock.TcpStream, n: int) -> int:
+    conn.close()
+    return n
+
+def f() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    return Ok(consume(own conn, fallible()?))
+`, "`?` may return early"},
+		{"later argument closes a borrowed argument", `
+def keep(conn: sock.TcpStream, n: int) -> int:
+    return n
+
+def f() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    return Ok(keep(conn, close_it(own conn)))
+`, "after it was moved"},
+		{"await inside an unused closure", `
+def f(pool: conc.ThreadPool) -> Result[int, str]:
+    ln = sock.listen_tcp("127.0.0.1", 0)?
+    a = pool.submit(() => accept_one(ln))
+    wait = () => a.await()
+    ln.close()
+    _ = a.await()
+    return Ok(0)
+`, "while a task may still be using"},
+		{"await inside another task", `
+def f(pool: conc.ThreadPool) -> Result[int, str]:
+    ln = sock.listen_tcp("127.0.0.1", 0)?
+    a = pool.submit(() => accept_one(ln))
+    w = pool.submit(() => a.await())
+    ln.close()
+    _ = a.await()
+    _ = w.await()
+    return Ok(0)
+`, "while a task may still be using"},
+		{"shutdown inside a closure", `
+def f() -> Result[int, str]:
+    ln = sock.listen_tcp("127.0.0.1", 0)?
+    pool = conc.ThreadPool(2, 4)
+    a = pool.submit(() => accept_one(ln))
+    stop = () => pool.shutdown()
+    ln.close()
+    pool.shutdown()
+    return Ok(0)
+`, "while a task may still be using"},
+		{"match expression moves the handle in one arm", `
+def f(b: bool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    n = match b:
+        True -> close_it(own conn)
+        False -> 0
+    return Ok(n)
+`, "every path must leave it in the same state"},
+		{"port left open by a loop body", `
+def f(xs: list[int]) -> int:
+    for x in xs:
+        AuditLog.open_log()
+    return 0
+`, "resource handle leak in inner block"},
+		{"port left open by a match arm", `
+def f(b: bool) -> int:
+    match b:
+        True -> AuditLog.open_log()
+        False -> print("skip")
+    return 0
+`, "resource handle leak in inner block"},
+		{"task may fail before taking the handle it captured", `
+def consume(own conn: sock.TcpStream, n: int) -> int:
+    conn.close()
+    return n
+
+def f(pool: conc.ThreadPool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 1)?
+    a = pool.submit(() => consume(own conn, fallible()?))
+    _ = a.await()
+    return Ok(0)
+`, "may end it before"},
 		{"stored in a list", `
 def f() -> Result[int, str]:
     conn = sock.connect_tcp("127.0.0.1", 1)?
