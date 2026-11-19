@@ -222,6 +222,10 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 			}
 			src = t.Inner
 		}
+		if with, ok := src.(*ast.WithExpr); ok && !v.isFlatEntity(v.info.ExprTypes[with.Base]) {
+			// The copy shares the entities inside the original.
+			src = with.Base
+		}
 		if r := mutRoot(src); r != nil {
 			// A second name, or a name for something inside another value.
 			names = append(names, x.Name, r.Name)
@@ -348,8 +352,10 @@ func (v *verifier) isFreshValue(e ast.Expr) bool {
 		return true
 	}
 	switch x := e.(type) {
-	case *ast.ListLit, *ast.MapLit, *ast.WithExpr, *ast.LambdaExpr:
+	case *ast.ListLit, *ast.MapLit, *ast.LambdaExpr:
 		return true
+	case *ast.WithExpr:
+		return v.isFlatEntity(v.info.ExprTypes[x.Base])
 	case *ast.TryExpr:
 		return v.isFreshValue(x.Inner)
 	case *ast.MatchExpr:
