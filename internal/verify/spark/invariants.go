@@ -177,8 +177,11 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 	case *ast.VarPat:
 		names = append(names, x.Name)
 	case *ast.LetAssignStmt:
-		if _, ok := v.info.ExprTypes[x.Value].(*sema.EntityType); !ok {
+		switch v.info.ExprTypes[x.Value].(type) {
+		case *sema.IntType, sema.BoolType, sema.StrType:
 			// A number read out of an entity is not a way to reach it.
+			// A value of any other type may be one, an element of an
+			// untyped map for instance.
 			return nil, x.Name
 		}
 		src := x.Value
