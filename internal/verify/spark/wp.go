@@ -2156,23 +2156,15 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 	switch t := subjTy.(type) {
 	case *sema.IntType:
 		st := v.evalInt(subj, env, scope, false)
+		// The subject is known to lie in its range type; a length is not
+		// negative; any other int can be any value.
 		var dom smt.BoolExpr = smt.BoolConst{Val: true}
-		var dParts []smt.BoolExpr
 		if t.IsBounded {
-			dParts = append(dParts, smt.Ge(st, smt.Const(t.Lo)), smt.Le(st, smt.Const(t.Hi)))
-		} else {
-			dParts = append(dParts, smt.Ge(st, smt.Const(0))) // assume >=0 for len() unless negative allowed
-		}
-		// Wait: if subject is len(...) specifically, len >= 0
-		if call, ok := subj.(*ast.CallExpr); ok {
+			dom = smt.And(smt.Ge(st, smt.Const(t.Lo)), smt.Le(st, smt.Const(t.Hi)))
+		} else if call, ok := subj.(*ast.CallExpr); ok {
 			if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "len" {
-				dParts = []smt.BoolExpr{smt.Ge(st, smt.Const(0))}
+				dom = smt.Ge(st, smt.Const(0))
 			}
-		} else if !t.IsBounded {
-			dParts = nil
-		}
-		if len(dParts) > 0 {
-			dom = smt.And(dParts...)
 		}
 
 		var covered []smt.BoolExpr

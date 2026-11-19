@@ -1390,3 +1390,29 @@ def g(xs: list[int], c: int[0..3]) -> int:
 		}
 	}
 }
+
+// A match on an int that a call returns must cover the negative values too:
+// nothing says the result is not negative.
+func TestSPARKMatchOnCallResultCoversNegatives(t *testing.T) {
+	src := `
+def neg() -> int:
+    return 0 - 5
+
+def g() -> int:
+    match neg():
+        k if k >= 0 -> return 1
+    return 10 / 0
+`
+	failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+	if !strings.Contains(failed, "match_exhaustive") {
+		t.Errorf("expected a failed match_exhaustive, failed VCs:\n%s", failed)
+	}
+	ok := `
+def g(xs: list[int]) -> int:
+    match len(xs):
+        k if k >= 0 -> return 1
+`
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("a length is never negative, failed VCs: %v", failed)
+	}
+}
