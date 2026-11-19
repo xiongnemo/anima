@@ -1266,7 +1266,7 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 			// of them when that cannot be bounded.
 			curElem = v.pipeElemInterval(stageOf[step], env, scope)
 		case "fold":
-			if len(ce.Args) >= 1 && curElem.HasLo && curElem.HasHi {
+			if isSumFold(ce) && curElem.HasLo && curElem.HasHi {
 				initT := v.evalInt(ce.Args[0].Value, env, scope, true)
 				fv := smt.Var(env.freshVar("fold"))
 				env.intTerms[targetVar] = fv
@@ -1299,6 +1299,28 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	if curElem.HasLo && curElem.HasHi {
 		env.listElems[targetVar] = curElem
 	}
+}
+
+// isSumFold reports whether call is fold(init, (a, x) => a + x): the one
+// fold whose result is init plus the sum of the elements.
+func isSumFold(call *ast.CallExpr) bool {
+	if len(call.Args) != 2 {
+		return false
+	}
+	lam, ok := call.Args[1].Value.(*ast.LambdaExpr)
+	if !ok || len(lam.Params) != 2 || lam.Params[0] == lam.Params[1] {
+		return false
+	}
+	be, ok := lam.Body.(*ast.BinaryExpr)
+	if !ok || be.Op != "+" {
+		return false
+	}
+	l, ok := be.Left.(*ast.Ident)
+	r, ok2 := be.Right.(*ast.Ident)
+	if !ok || !ok2 {
+		return false
+	}
+	return (l.Name == lam.Params[0] && r.Name == lam.Params[1]) || (l.Name == lam.Params[1] && r.Name == lam.Params[0])
 }
 
 // literalHull bounds the int elements of a list literal: the smallest
