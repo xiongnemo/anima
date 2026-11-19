@@ -1922,3 +1922,54 @@ def f(o: Ord) -> int:
 		t.Errorf("copy of a read-only entity with a relation: expected a failed readonly_c, failed VCs:\n%s", failed)
 	}
 }
+
+// Review round 3 of the aliasing work: two rules that were stricter than
+// they need to be.
+func TestSPARKElementWriteAndCopyOfReadonlyValue(t *testing.T) {
+	element := `
+entity R:
+    id: int[0..10]
+    count: int[0..10]
+    invariant: id >= 1
+    invariant: count <= 10 - id + id
+
+def f(mut rows: list[R]) -> int:
+    if len(rows) > 0:
+        rows[0].count = 1
+    return 0
+`
+	if failed := failedVCs(verifySrc(t, element)); len(failed) != 0 {
+		t.Errorf("an invariant on an untouched field: expected every VC proved, failed VCs: %v", failed)
+	}
+	touched := strings.Replace(strings.Replace(element, "count <= 10 - id + id", "count <= id", 1), "count = 1", "count = 5", 1)
+	if failed := strings.Join(failedVCs(verifySrc(t, touched)), "\n"); !strings.Contains(failed, "entity_element_invariant_2") {
+		t.Errorf("an invariant the write can break: expected a failed entity_element_invariant_2, failed VCs:\n%s", failed)
+	}
+	prelude := `
+entity Acc:
+    bal: int[0..10]
+
+entity Ord:
+    amount: int[0..9]
+    rel buyer -> 1 Acc
+
+def zap(mut o: Ord) -> int:
+    o.buyer.bal = 0
+    return 0
+`
+	own := prelude + "\ndef f(o: Ord) -> int:\n    c = o with {amount: 1}\n    c.amount = 3\n    return c.amount\n"
+	if failed := failedVCs(verifySrc(t, own)); len(failed) != 0 {
+		t.Errorf("own field of a copy: expected every VC proved, failed VCs: %v", failed)
+	}
+	below := map[string]string{
+		"readonly_c": "    c = o with {amount: 1}\n    c.buyer.bal = 0\n    return 0",
+		"readonly_h": "    c = o with {amount: 1}\n    d = c\n    h = d.buyer\n    h.bal = 0\n    return 0",
+		"readonly_d": "    c = o with {amount: 1}\n    d = c\n    return zap(mut d)",
+	}
+	for vc, body := range below {
+		failed := strings.Join(failedVCs(verifySrc(t, prelude+"\ndef f(o: Ord) -> int:\n"+body+"\n")), "\n")
+		if !strings.Contains(failed, vc) {
+			t.Errorf("below a copy: expected a failed %s, failed VCs:\n%s", vc, failed)
+		}
+	}
+}
