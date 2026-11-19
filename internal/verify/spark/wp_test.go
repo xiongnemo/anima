@@ -972,6 +972,7 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
 		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
 		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"a lambda's own parameter":        "    rows = [s]\n    ys = rows |> map(r => r.n + five(mut r))\n    return 0",
 		// The same entity under another name.
 		"read under another name":       "    t = s\n    if s.n == 0 or clear(mut t):\n        return 1\n    return 10 / s.n",
 		"another name beside the call":  "    t = s\n    y = s.n + five(mut t)\n    return 0",

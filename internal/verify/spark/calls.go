@@ -477,13 +477,11 @@ func (v *verifier) checkMutCalls(exprs []ast.Expr, env *symEnv, scope string, sp
 				if other == root {
 					continue
 				}
-				for _, x := range exprs {
-					if mentionsOutside(reflect.ValueOf(x), other, owner[root]) {
-						v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
-							"%q is passed as mut and may be reached through %q, which is used elsewhere in this statement; "+
-								"put the call in a statement of its own", root, other), nil)
-						return
-					}
+				if outerMentioned(exprs, other, owner[root]) {
+					v.record(name, scope, span, formula, VCFailed, fmt.Sprintf(
+						"%q is passed as mut and may be reached through %q, which is used elsewhere in this statement; "+
+							"put the call in a statement of its own", root, other), nil)
+					return
 				}
 			}
 		}
@@ -514,12 +512,30 @@ func mentionsOutside(n reflect.Value, root string, owner ast.Expr) bool {
 		if id, ok := e.(*ast.Ident); ok && id.Name == root {
 			found = true
 		}
-		// A lambda's parameter of that name is another variable.
-		if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, root) {
-			return false
-		}
 		return true
 	})
+	return found
+}
+
+// outerMentioned reports whether the outer variable name appears in exprs
+// anywhere but among the arguments of the call owner. A lambda's parameter
+// of that name is another variable, and hides it in the lambda's body.
+func outerMentioned(exprs []ast.Expr, name string, owner ast.Expr) bool {
+	found := false
+	for _, x := range exprs {
+		visitExprs(reflect.ValueOf(x), func(e ast.Expr) bool {
+			if found || e == owner {
+				return false
+			}
+			if lam, ok := e.(*ast.LambdaExpr); ok && slices.Contains(lam.Params, name) {
+				return false
+			}
+			if id, ok := e.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+			return true
+		})
+	}
 	return found
 }
 
