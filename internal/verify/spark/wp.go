@@ -1289,6 +1289,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 		}
 	case *ast.PipeExpr:
+		if call := v.pipedCall(e); call != nil {
+			v.evalSideEffects(call, env, scope)
+			return
+		}
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
 	case *ast.RunWorkflowExpr:

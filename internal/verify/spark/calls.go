@@ -187,6 +187,24 @@ func (v *verifier) checkMutCaptures(exprs []ast.Expr, scope string, span ast.Spa
 	}
 }
 
+// pipedCall returns the call `x |> f(a)` or `x |> f` makes when f is a
+// function of the program: f(x, a). It is nil for any other stage.
+func (v *verifier) pipedCall(pe *ast.PipeExpr) *ast.CallExpr {
+	first := ast.CallArg{Span: pe.Left.GetSpan(), Value: pe.Left}
+	switch rhs := pe.Right.(type) {
+	case *ast.CallExpr:
+		if id, ok := rhs.Callee.(*ast.Ident); ok && v.info.Funcs[id.Name] != nil {
+			return &ast.CallExpr{Span: rhs.Span, Callee: rhs.Callee, TypeArgs: rhs.TypeArgs,
+				Args: append([]ast.CallArg{first}, rhs.Args...)}
+		}
+	case *ast.Ident:
+		if v.info.Funcs[rhs.Name] != nil {
+			return &ast.CallExpr{Span: pe.Span, Callee: rhs, Args: []ast.CallArg{first}}
+		}
+	}
+	return nil
+}
+
 // callArgs returns the arguments of a call or run_workflow expression.
 func callArgs(e ast.Expr) ([]ast.CallArg, bool) {
 	switch c := e.(type) {

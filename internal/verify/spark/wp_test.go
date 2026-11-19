@@ -1131,3 +1131,41 @@ def g(mut a: A) -> int:
 		t.Errorf("expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// `x |> f(a)` calls f(x, a): the piped value is the first argument when the
+// callee's contract is checked and applied.
+func TestSPARKPipedCallBindsThePipedValueFirst(t *testing.T) {
+	prelude := mutCallPrelude + `
+def inv(x: int[0..9]) -> int:
+    requires: x != 0
+    return 10 / x
+
+def set_to(x: int[0..9], mut s: S, other: int[0..9]) -> int[0..0]:
+    ensures: s.n == x
+    s.n = x
+    return 0
+`
+	cases := []struct{ name, body, wantFailed string }{
+		{"bare stage", "    z: int[0..9] = 0\n    y = z |> inv\n    return 0", "call_inv_requires_1"},
+		{"stage with arguments", "    z: int[0..9] = 0\n    y = z |> inv()\n    return 0", "call_inv_requires_1"},
+		{"ensures uses the piped value", "    x: int[0..9] = 0\n    y = x |> set_to(mut s, 5)\n    return 10 / s.n", "div_nonzero"},
+	}
+	for _, tc := range cases {
+		src := prelude + "\ndef g(mut s: S) -> int:\n" + tc.body + "\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
+	}
+	ok := prelude + `
+def g(mut s: S) -> int:
+    x: int[0..9] = 4
+    y = x |> set_to(mut s, 0)
+    q = 10 / s.n
+    r = x |> inv
+    return 0
+`
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("expected every VC proved, failed VCs: %v", failed)
+	}
+}
