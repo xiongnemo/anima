@@ -8,6 +8,7 @@ import (
 
 	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/sema"
+	"github.com/xiongnemo/anima/internal/verify/smt"
 )
 
 // An entity's invariant may be broken while a function updates its fields
@@ -459,4 +460,21 @@ func (v *verifier) checkWrittenObject(obj ast.Expr, field string, scope string, 
 	}
 	v.record(fmt.Sprintf("%s.field_%s_object_type", scope, field), scope, span, "the written object has a known entity type", VCFailed,
 		fmt.Sprintf("the type of the object whose field %s is written is not known, so its invariants cannot be checked; give the map or variable it comes from a type", field), nil)
+}
+
+// proveElementWrite is called for a field write on an object that has no
+// name (rows[i].x = v, rows[i].x += v). The object stays inside its
+// container, so its invariants must hold with this one field known.
+func (v *verifier) proveElementWrite(obj ast.Expr, field string, term smt.LinearTerm, env *symEnv, scope string, span ast.Span) {
+	et, ok := v.info.ExprTypes[obj].(*sema.EntityType)
+	if !ok || !hasInvariants(et, nil) {
+		return
+	}
+	probe := env.clone()
+	saved := v.noInvariants
+	v.noInvariants = true
+	v.bindFresh(probe, entityProbe, et)
+	v.noInvariants = saved
+	probe.intTerms[entityProbe+"."+field] = term
+	v.proveInvariants(et, entityProbe, "element", span, probe, scope, map[*sema.EntityType]bool{})
 }

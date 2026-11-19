@@ -768,6 +768,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			if path, ok := mutArgPath(fe); ok {
 				env.intTerms[path] = rhsTerm
 				v.proveSharedEntity(fe.Object, env, scope, s.Span)
+			} else {
+				v.proveElementWrite(fe.Object, fe.Field, rhsTerm, env, scope, s.Span)
 			}
 			v.forgetAliases(fe.Object, env)
 		}
@@ -799,16 +801,8 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			path = obj + "." + s.Field
 		}
 		rhsTerm := v.evalInt(s.Value, env, scope, true)
-		// The object has no name (rows[i].x = v): it stays inside its
-		// container, so its invariants must hold with this one field known.
-		if et, ok := v.info.ExprTypes[s.Object].(*sema.EntityType); ok && path == "" && hasInvariants(et, nil) {
-			probe := env.clone()
-			saved := v.noInvariants
-			v.noInvariants = true
-			v.bindFresh(probe, entityProbe, et)
-			v.noInvariants = saved
-			probe.intTerms[entityProbe+"."+s.Field] = rhsTerm
-			v.proveInvariants(et, entityProbe, "element", s.Span, probe, scope, map[*sema.EntityType]bool{})
+		if path == "" {
+			v.proveElementWrite(s.Object, s.Field, rhsTerm, env, scope, s.Span)
 		}
 		if objTy, ok := v.info.ExprTypes[s.Object]; ok {
 			if et, ok := objTy.(*sema.EntityType); ok {
