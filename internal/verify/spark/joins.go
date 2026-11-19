@@ -115,6 +115,8 @@ func (v *verifier) joinBranches(env *symEnv, outs []*symEnv) {
 			env.shared[k] = true
 		}
 	}
+	// A map length after the join: what some branch left as one.
+	env.mapLens = map[string]bool{}
 	for _, o := range outs {
 		for k := range o.mapLens {
 			env.mapLens[k] = true
