@@ -1527,10 +1527,38 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
+// builtinCallables are the names that mean something of their own when
+// called, to sema and to the kernels.
+var builtinCallables = map[string]bool{
+	"len": true, "print": true, "assert": true, "str": true, "to_str": true,
+	"abs": true, "min": true, "max": true, "Some": true, "Ok": true, "Err": true,
+	"filter": true, "map": true, "flat_map": true, "fold": true, "sum": true,
+	"any": true, "all": true, "find": true, "take": true, "drop": true,
+	"filter_ok": true, "unwrap_or": true, "and_then": true,
+}
+
+// checkCalleeNotShadowed rejects a call by a name that is a variable and a
+// function at once. Both backends call the variable; sema and the kernels
+// would check the function.
+func (c *checker) checkCalleeNotShadowed(name string, span ast.Span, sc *scope) error {
+	if _, local := sc.lookup(name); !local {
+		return nil
+	}
+	if _, fn := c.info.Funcs[name]; fn || builtinCallables[name] {
+		return fmt.Errorf("%s: %s is called here, and is both a variable and a function: rename the variable", span, name)
+	}
+	return nil
+}
+
 func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	// SPARK Anti-Aliasing rule on all call sites
 	if err := c.checkCallAliasing(e.Args, false); err != nil {
 		return nil, err
+	}
+	if id, ok := e.Callee.(*ast.Ident); ok {
+		if err := c.checkCalleeNotShadowed(id.Name, id.Span, sc); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check special built-in functions first
@@ -1882,6 +1910,12 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	var elemTy Type = UnknownType{}
 	if lt, ok := lhsTy.(*ListType); ok {
 		elemTy = lt.Elem
+	}
+
+	if direct {
+		if err := c.checkCalleeNotShadowed(fnName, e.Right.GetSpan(), sc); err != nil {
+			return nil, err
+		}
 	}
 
 	// A function of the program named like a stage is what both backends

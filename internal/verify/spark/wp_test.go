@@ -2320,19 +2320,6 @@ def f() -> int:
         return 10 / c.x
     return 0
 `, "div_nonzero"},
-		"closure with the name of a function": {invariantPrelude + `
-def mk(n: int) -> A:
-    return A(x=1, y=1)
-
-def f() -> int:
-    b = A(x=5, y=5)
-    mk = n => b
-    c = mk(1)
-    if c.x != 0:
-        b.x = 0
-        return 10 / c.x
-    return 0
-`, "div_nonzero"},
 		"map handed back by a closure": {`
 def f() -> int:
     m: map[str, int] = {}

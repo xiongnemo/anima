@@ -638,6 +638,15 @@ def f(s: str, n: int, b: bool, xs: list[int], m: map[str, int], sh: Shape, o: Op
 		{"g = (v) => first(v)\n    return g(1)", ""},
 		{"g = (v) => v > 1\n    ys = xs |> filter(g)\n    return 0", ""},
 		{"first = 3\n    return first", ""},
+		// A call by a name that is a variable and a function at once: the
+		// backends call the variable, the kernels would check the function.
+		{"first = 3\n    return first(1)", "both a variable and a function"},
+		{"first = (v) => 0\n    return first(1)", "both a variable and a function"},
+		{"first = (v) => 0\n    return n |> first", "both a variable and a function"},
+		{"len = 5\n    return len(xs)", "both a variable and a function"},
+		{"filter = 5\n    ys = xs |> filter((v) => v > 1)\n    return 0", "both a variable and a function"},
+		{"sum = 0\n    for v in xs:\n        sum = v\n    return sum", ""},
+		{"ys = xs |> map(first => first)\n    return first(n)", ""},
 		// Only a function is called.
 		{"return n(1)", "cannot be called"},
 		{"return s(1)", "cannot be called"},
