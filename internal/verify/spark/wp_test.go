@@ -1683,7 +1683,9 @@ func TestSPARKEntityInAnUntypedMap(t *testing.T) {
 			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, vc, failed)
 		}
 	}
-	if failed := failedVCs(verifySrc(t, body("    r: A = m[\"k\"]\n    r.x = 0"))); len(failed) != 0 {
-		t.Errorf("a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
+	// With a typed map the element's other fields are known to fit the invariant.
+	typed := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m: map[str, A] = {}\n    m[\"k\"] = A(x=5, y=5)\n    r = m[\"k\"]\n    r.x = 0\n    return use(m[\"k\"])\n"
+	if failed := failedVCs(verifySrc(t, typed)); len(failed) != 0 {
+		t.Errorf("typed map, a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
 	}
 }

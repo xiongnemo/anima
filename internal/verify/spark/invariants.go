@@ -288,5 +288,5 @@ func (v *verifier) checkWrittenObject(obj ast.Expr, field string, scope string, 
 		return
 	}
 	v.record(fmt.Sprintf("%s.field_%s_object_type", scope, field), scope, span, "the written object has a known entity type", VCFailed,
-		fmt.Sprintf("the type of the object whose field %s is written is not known, so its invariants cannot be checked; give it a type (`r: T = ...`)", field), nil)
+		fmt.Sprintf("the type of the object whose field %s is written is not known, so its invariants cannot be checked; give the map or variable it comes from a type", field), nil)
 }
