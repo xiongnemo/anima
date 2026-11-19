@@ -2928,3 +2928,103 @@ def f(t: Tree) -> int:
 		}
 	}
 }
+
+// `==` between two booleans says that one holds when the other does. Between
+// lists, maps, entities and variants it says nothing the kernel can keep: they
+// change in place.
+func TestSPARKEqualityOfValuesThatAreNotIntegers(t *testing.T) {
+	rejected := map[string]string{
+		"boolean changed after the comparison": `
+def f(b: bool, c: bool) -> int:
+    d = b
+    if d == c:
+        d = not d
+        if d != c:
+            return 10 / 0
+    return 0
+`,
+		"list written after the comparison": `
+def f(mut xs: list[int], ys: list[int]) -> int:
+    if xs == ys:
+        if len(xs) > 0:
+            xs[0] = 9
+        if xs != ys:
+            return 10 / 0
+    return 0
+`,
+		"map written after the comparison": `
+def f(mut m: map[str, int], k: map[str, int]) -> int:
+    if m == k:
+        m["a"] = 9
+        if m != k:
+            return 10 / 0
+    return 0
+`,
+		"variant that holds a list": `
+def f(mut xs: list[int], o: Option[list[int]]) -> int:
+    p = Some(xs)
+    if p == o:
+        if len(xs) > 0:
+            xs[0] = 9
+        if p != o:
+            return 10 / 0
+    return 0
+`,
+		"two lists that are not the same list": `
+def f(xs: list[int], ys: list[int]) -> int:
+    if xs == ys:
+        return 1
+    return 10 / 0
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := map[string]string{
+		"boolean equal to a constant": `
+def f(b: bool) -> int:
+    c = True
+    if b == c:
+        if not b:
+            return 10 / 0
+    return 0
+`,
+		"boolean known to hold": `
+def f(b: bool) -> int:
+    if b:
+        if b == False:
+            return 10 / 0
+        if b != True:
+            return 10 / 0
+    return 0
+`,
+		"two booleans that differ": `
+def f(b: bool, c: bool) -> int:
+    if b != c:
+        if b:
+            if c:
+                return 10 / 0
+    return 0
+`,
+		"strings": `
+def f(s: str, t: str) -> int:
+    if s == t:
+        if s != t:
+            return 10 / 0
+    return 0
+`,
+		"integers": `
+def f(n: int, k: int) -> int:
+    if n == k:
+        return 10 / (n - k + 1)
+    return 0
+`,
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}

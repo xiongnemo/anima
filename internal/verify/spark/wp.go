@@ -2408,6 +2408,11 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		case "implies":
 			return smt.Implies(v.evalBoolWithPrefix(e.Left, env, prefix), v.evalBoolWithPrefix(e.Right, env, prefix))
 		case "==", "!=", "<", "<=", ">", ">=":
+			if e.Op == "==" || e.Op == "!=" {
+				if b, ok := v.evalEquality(e, env); ok {
+					return b
+				}
+			}
 			l := v.evalInt(e.Left, env, "", false)
 			r := v.evalInt(e.Right, env, "", false)
 			switch e.Op {
@@ -2427,6 +2432,32 @@ func (v *verifier) evalBoolWithPrefix(expr ast.Expr, env *symEnv, prefix string)
 		}
 	}
 	return smt.BoolVar{Name: env.freshVar("bool")}
+}
+
+// evalEquality is `==` and `!=` between values that are not integers. Two
+// booleans are equal when one holds exactly when the other does. A list, a
+// map, an entity and a variant change in place or hold what does, so that
+// nothing said of two names once stays true: the comparison is unknown.
+// Integers and strings are left to the caller.
+func (v *verifier) evalEquality(e *ast.BinaryExpr, env *symEnv) (smt.BoolExpr, bool) {
+	lt, rt := v.info.ExprTypes[e.Left], v.info.ExprTypes[e.Right]
+	known := func(t sema.Type) bool { return t != nil && t.Kind() != sema.KindUnknown }
+	isBool := func(t sema.Type) bool { return t != nil && t.Kind() == sema.KindBool }
+	var eq smt.BoolExpr
+	switch {
+	case (isBool(lt) || !known(lt)) && (isBool(rt) || !known(rt)) && (isBool(lt) || isBool(rt)):
+		l := v.evalBoolWithPrefix(e.Left, env, "")
+		r := v.evalBoolWithPrefix(e.Right, env, "")
+		eq = smt.And(smt.Implies(l, r), smt.Implies(r, l))
+	case (known(lt) && !isScalar(lt)) || (known(rt) && !isScalar(rt)):
+		eq = smt.BoolVar{Name: env.freshVar("bool")}
+	default:
+		return nil, false
+	}
+	if e.Op == "!=" {
+		return smt.Not(eq), true
+	}
+	return eq, true
 }
 
 // ---------------------------------------------------------------------------
