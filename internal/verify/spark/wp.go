@@ -2825,6 +2825,13 @@ func collectAssignedVars(stmts []ast.Stmt) (out []string, compound map[string][]
 		}
 	}
 	walk(stmts)
+	// A name in a pattern is written by the arm that matches, in a match
+	// statement and in a match expression alike.
+	visitNodes(reflect.ValueOf(stmts), func(n any) {
+		if vp, ok := n.(*ast.VarPat); ok {
+			add(vp.Name)
+		}
+	})
 	for name := range plain {
 		if plain[name] {
 			delete(compound, name)

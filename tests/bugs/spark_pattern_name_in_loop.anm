@@ -1,0 +1,14 @@
+# The arm that matches writes x on every pass of the loop, but the kernel
+# only forgot what assignments and loop variables write: after the loop it
+# still took x for 5.
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        match o:
+            Some(x) -> print(x)
+            None -> print("none")
+    return 10 / x
+
+def main() -> int:
+    print(f([Some(0)]))
+    return 0

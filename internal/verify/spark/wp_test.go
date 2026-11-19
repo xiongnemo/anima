@@ -3085,3 +3085,68 @@ def f() -> int:
 		}
 	}
 }
+
+// A name in a pattern is written by the arm that matches: in a loop the
+// kernel forgets what the variable held, as it does for an assignment.
+func TestSPARKPatternNameWrittenInALoop(t *testing.T) {
+	rejected := map[string]string{
+		"match statement in a for": `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        match o:
+            Some(x) -> print(x)
+            None -> print("none")
+    return 10 / x
+`,
+		"match expression in a for": `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        r = match o:
+            Some(x) -> x
+            None -> 0
+        print(r)
+    return 10 / x
+`,
+		"match statement in a while": `
+def f(o: Option[int], n: int[0..5]) -> int:
+    x = 5
+    i: int[0..5] = 0
+    while i < n:
+        match o:
+            Some(x) -> print(x)
+            None -> print("none")
+        i += 1
+    return 10 / x
+`,
+		"a boolean": `
+def f(os: list[Option[bool]]) -> int:
+    b = True
+    for o in os:
+        match o:
+            Some(b) -> print(b)
+            None -> print("none")
+    if b:
+        return 1
+    return 10 / 0
+`,
+	}
+	for name, src := range rejected {
+		if failed := strings.Join(failedVCs(verifySrc(t, src)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	proved := `
+def f(os: list[Option[int]]) -> int:
+    x = 5
+    for o in os:
+        match o:
+            Some(v) -> print(v)
+            None -> print("none")
+    return 10 / x
+`
+	if failed := failedVCs(verifySrc(t, proved)); len(failed) != 0 {
+		t.Errorf("a pattern name of its own: expected every VC proved, failed VCs: %v", failed)
+	}
+}
