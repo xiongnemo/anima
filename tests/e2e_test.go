@@ -28,8 +28,8 @@ func TestE2EAllExamplesDualBackendParityAndExports(t *testing.T) {
 	animaBin := buildCLI(t, tmp)
 
 	examples, err := filepath.Glob("../examples/*.anm")
-	if err != nil || len(examples) != 5 {
-		t.Fatalf("expected 5 flagship examples, got %v (err=%v)", examples, err)
+	if err != nil || len(examples) != 6 {
+		t.Fatalf("expected 6 flagship examples, got %v (err=%v)", examples, err)
 	}
 
 	for _, ex := range examples {
@@ -101,6 +101,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
+		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
 		{"../tests/bugs/spark_match_incomplete.anm", "match_exhaustive"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},
@@ -108,6 +109,15 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/lts_livelock_progress.anm", "PROGRESS"},
 		{"../tests/bugs/socket_leak.anm", "resource handle leak"},
 		{"../tests/bugs/socket_use_after_close.anm", "use-after-close"},
+		{"../tests/bugs/own_param_never_closed.anm", "resource handle leak"},
+		{"../tests/bugs/own_use_after_move.anm", "after it was moved"},
+		{"../tests/bugs/own_alias_use_after_close.anm", "after it was moved"},
+		{"../tests/bugs/own_try_while_open.anm", "`?` may return early"},
+		{"../tests/bugs/own_branch_mismatch.anm", "every path must leave it in the same state"},
+		{"../tests/bugs/own_borrowed_closed.anm", "is borrowed"},
+		{"../tests/bugs/own_stream_shared_with_task.anm", "cannot be shared with a task"},
+		{"../tests/bugs/own_listener_closed_while_lent.anm", "while a task may still be using"},
+		{"../tests/bugs/own_stored_in_entity.anm", "cannot hold"},
 		{"../tests/bugs/petri_fork_merge_improper.anm", "IMPROPER COMPLETION"},
 		{"../tests/bugs/petri_choice_join_deadlock.anm", "OPTION TO COMPLETE"},
 		{"../tests/bugs/petri_pool_leak.anm", "IMPROPER COMPLETION"},
@@ -207,3 +217,237 @@ def main() -> int:
 		t.Fatalf("HTTP parity mismatch: vm=%q native=%q", string(vmOut), string(natOut))
 	}
 }
+
+// runOnBothBackends verifies src, runs it on the VM and as a native binary,
+// and requires both to print want.
+func runOnBothBackends(t *testing.T, name, src, want string) {
+	t.Helper()
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	path := filepath.Join(tmp, name+".anm")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vmOut, err := exec.Command(animaBin, "run", path).CombinedOutput()
+	if err != nil || string(vmOut) != want {
+		t.Fatalf("VM: err=%v, output:\n%s\nwant:\n%s", err, vmOut, want)
+	}
+	nativeBin := filepath.Join(tmp, name)
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	natOut, err := exec.Command(nativeBin).CombinedOutput()
+	if err != nil || string(natOut) != want {
+		t.Fatalf("native: err=%v, output:\n%s\nwant:\n%s", err, natOut, want)
+	}
+}
+
+// A connection moved into a worker must stay open when the function that
+// moved it later returns early through `?`.
+func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
+	runOnBothBackends(t, "moved_then_try", movedThenTrySrc, "dispatch failed: boom\nreply=late\n")
+}
+
+// The native backend must evaluate calls and field reads once and in source
+// order, skip the right operand of a short-circuit operator, fall through a
+// failed match guard, and lower a match expression wherever it appears.
+func TestE2EEvaluationOrderParity(t *testing.T) {
+	runOnBothBackends(t, "evaluation_order", evaluationOrderSrc, evaluationOrderWant)
+}
+
+const evaluationOrderSrc = `import std.concurrent as conc
+
+def a() -> int[1..1]:
+    print("a")
+    return 1
+
+def b() -> int[2..2]:
+    print("b")
+    return 2
+
+def add(x: int[0..5], y: int[0..5]) -> int[0..10]:
+    return x + y
+
+def yes(tag: str) -> bool:
+    print(tag)
+    return True
+
+def zero(tag: str) -> int[0..0]:
+    print(tag)
+    return 0
+
+def fail(tag: str) -> Result[bool, str]:
+    print(tag)
+    return Err(tag)
+
+def guarded(skip: bool) -> Result[bool, str]:
+    ok = skip or fail("or-rhs-try")?
+    return Ok(ok)
+
+def pick(n: int[0..9]) -> int[0..9]:
+    match n:
+        k if k > 5 -> return 1
+        _ -> return 0
+    return 9
+
+def pick_expr(n: int[0..9]) -> int[0..9]:
+    r = match n:
+        k if k > 5 -> 1
+        _ -> 0
+    return r
+
+def ladder(n: int[0..9]) -> str:
+    if n > 5 and yes("first"):
+        return "big"
+    elif n > 2 and yes("second"):
+        return "mid"
+    elif yes("third"):
+        return "small"
+    return "none"
+
+entity Box:
+    v: int[0..10]
+
+def reset(mut box: Box) -> int[1..1]:
+    box.v = 0
+    print("reset")
+    return 1
+
+def capacity(mut box: Box) -> int[1..4]:
+    box.v = 2
+    print("capacity")
+    return 4
+
+def main() -> int:
+    s = add(a(), b())
+    d = a() - b()
+    m = min(a(), b())
+    t = False and yes("and-rhs")
+    u = True or yes("or-rhs")
+    v = False implies yes("implies-rhs")
+    print(f"s={s} d={d} m={m} t={t} u={u} v={v}")
+    print(f"pick={pick(3)}{pick(7)} pick_expr={pick_expr(3)}{pick_expr(7)}")
+    print(f"ladder={ladder(7)},{ladder(4)},{ladder(1)}")
+    match guarded(True):
+        Ok(x) -> print(f"guarded skip ok={x}")
+        Err(e) -> print(f"guarded skip err={e}")
+    match guarded(False):
+        Ok(x) -> print(f"guarded ok={x}")
+        Err(e) -> print(f"guarded err={e}")
+    box = Box(v=0)
+    box.v = match s:
+        3 -> 7
+        _ -> 8
+    xs = [0, 0]
+    xs[1] = match d:
+        0 -> 3
+        _ -> 4
+    print(f"box={box.v} xs1={xs[1]}")
+    box.v += reset(mut box)
+    print(f"compound={box.v}")
+    box.v = 5
+    total = box.v + reset(mut box)
+    print(f"total={total} after={box.v}")
+    ch = conc.Channel[int[0..9]](cap=capacity(mut box))
+    ch.close()
+    print(f"cap box={box.v}")
+    ys: list[int[0..100]] = [5, 6]
+    ys[0] += zero("index-rhs")
+    print(f"ys0={ys[0]}")
+    return 0
+`
+
+const evaluationOrderWant = `a
+b
+a
+b
+a
+b
+s=3 d=-1 m=1 t=False u=True v=True
+pick=01 pick_expr=01
+first
+second
+third
+ladder=big,mid,small
+guarded skip ok=True
+or-rhs-try
+guarded err=or-rhs-try
+box=7 xs1=4
+reset
+compound=8
+reset
+total=6 after=0
+capacity
+cap box=2
+index-rhs
+ys0=5
+`
+
+// Element reads and writes behave the same for lists and maps on both backends.
+func TestE2EElementAccessParity(t *testing.T) {
+	runOnBothBackends(t, "element_access", elementAccessSrc, "a=1 b=7 xs=3,9\n")
+}
+
+const elementAccessSrc = `def zero() -> int[0..0]:
+    return 0
+
+def main() -> int:
+    m: map[str, int[0..9]] = {"a": 1, "b": 2}
+    m["a"] += zero()
+    m["b"] = 7
+    xs: list[int[0..9]] = [3, 4]
+    xs[1] = 9
+    a = m["a"]
+    b = m["b"]
+    print(f"a={a} b={b} xs={xs[0]},{xs[1]}")
+    return 0
+`
+
+const movedThenTrySrc = `import std.socket as sock
+import std.concurrent as conc
+import std.time as time
+
+def late_reply(own conn: sock.TcpStream) -> bool:
+    time.sleep_ms(300)
+    sent = conn.send_text("late")
+    conn.close()
+    match sent:
+        Ok(n) -> return True
+        Err(e) -> return False
+    return False
+
+def fail() -> Result[int, str]:
+    return Err("boom")
+
+def dispatch(ln: sock.TcpListener, pool: conc.ThreadPool) -> Result[int, str]:
+    conn = ln.accept(timeout_ms=3000)?
+    fut = pool.submit(() => late_reply(own conn))
+    n = fail()?
+    _ = fut.await()
+    return Ok(n)
+
+def read_reply(conn: sock.TcpStream) -> str:
+    match conn.recv_text(16):
+        Ok(text) -> return text
+        Err(e) -> return "error: " + e
+    return ""
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            pool = conc.ThreadPool(1, 2)
+            match sock.connect_tcp("127.0.0.1", ln.port()):
+                Ok(client) ->
+                    match dispatch(ln, pool):
+                        Ok(n) -> print("dispatch ok")
+                        Err(e) -> print(f"dispatch failed: {e}")
+                    reply = read_reply(client)
+                    client.close()
+                    print(f"reply={reply}")
+                Err(e) -> print(f"connect failed: {e}")
+            pool.shutdown()
+            ln.close()
+            return 0
+        Err(e) -> print(f"listen failed: {e}")
+    return 1
+`

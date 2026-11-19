@@ -715,3 +715,90 @@ def keep(n: int[0..10]) -> int:
 		})
 	}
 }
+
+// The index of an assignment target is evaluated at run time, so arithmetic
+// inside it needs the same proof obligations as anywhere else.
+func TestSPARKChecksArithmeticInAssignmentIndex(t *testing.T) {
+	for name, src := range map[string]string{
+		"compound": `
+def zero() -> int[0..0]:
+    return 0
+
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    xs[10 / n] += zero()
+    return 0
+`,
+		"plain": `
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    xs[10 / n] = 5
+    return 0
+`,
+	} {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// A division is only checked on the paths that evaluate it: the right operand
+// of and/or/implies runs only when the left one does not decide the result.
+func TestSPARKDivisionUnderShortCircuitAndInElementWrites(t *testing.T) {
+	cases := []struct {
+		name, src string
+		wantFail  bool
+	}{
+		{"guarded by and", `
+def f(n: int[0..3]) -> bool:
+    ok = n != 0 and 10 / n > 1
+    return ok
+`, false},
+		{"guarded by or", `
+def f(n: int[0..3]) -> bool:
+    ok = n == 0 or 10 / n > 1
+    return ok
+`, false},
+		{"or with the wrong guard", `
+def f(n: int[0..3]) -> bool:
+    bad = n != 0 or 10 / n > 1
+    return bad
+`, true},
+		{"value written to a map", `
+def f(mut m: map[str, int], n: int[0..3]) -> int:
+    m["k"] = 10 / n
+    return 0
+`, true},
+		{"value added to a list element", `
+def f(mut xs: list[int[0..9]], n: int[0..3]) -> int:
+    if len(xs) > 1:
+        xs[0] += 9 / n
+    return 0
+`, true},
+	}
+	for _, c := range cases {
+		failed := strings.Join(failedVCs(verifySrc(t, c.src)), "\n")
+		if got := strings.Contains(failed, "div_nonzero"); got != c.wantFail {
+			t.Errorf("%s: div_nonzero failed = %v, want %v; failed VCs:\n%s", c.name, got, c.wantFail, failed)
+		}
+	}
+}
+
+// A guard is not trusted across a call that may change what it tested.
+func TestSPARKGuardNotKeptAcrossMutCall(t *testing.T) {
+	src := `
+entity S:
+    n: int[0..9]
+
+def clear(mut s: S) -> bool:
+    s.n = 0
+    return True
+
+def f(mut s: S) -> bool:
+    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1
+    return ok
+`
+	failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+	if !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+}

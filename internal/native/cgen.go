@@ -85,7 +85,6 @@ type cgen struct {
 	localVars   map[string]bool
 	upvalMap    map[string]int
 	freeScanSet map[string]bool
-	hasHandles  bool
 	wfVars      map[string]bool
 	wfCtxPtr    string
 }
@@ -276,7 +275,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	g.cur = g.bodyOut
 	g.localVars = map[string]bool{}
 	g.upvalMap = nil
-	g.hasHandles = true
 	g.wfVars = nil
 
 	var ps []string
@@ -290,7 +288,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	}
 	g.line("static AnimaVal __fn_%s(%s) {", fn.Name, pStr)
 	g.indent++
-	g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 	for _, lv := range collectStmtLocals(fn.Body) {
 		if !g.localVars[lv] {
 			g.localVars[lv] = true
@@ -305,7 +302,6 @@ func (g *cgen) emitFunc(fn *ast.FuncDecl) error {
 	g.line("return v_void();")
 	g.indent--
 	g.line("}")
-	g.hasHandles = false
 	return nil
 }
 
@@ -341,10 +337,8 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	prevVars := g.localVars
 	prevWfVars := g.wfVars
 	prevCtx := g.wfCtxPtr
-	prevHandles := g.hasHandles
 	g.wfVars = varNames
 	g.wfCtxPtr = "ctx"
-	g.hasHandles = false
 
 	forkWorkerMap := map[string][]string{}
 	for _, n := range wf.Nodes {
@@ -362,7 +356,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 			g.line("static void *%s(void *arg) {", wfn)
 			g.indent++
 			g.line("%s *ctx = (%s *)arg;", ctxName, ctxName)
-			g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 			for _, op := range br.Ops {
 				switch op.Kind {
 				case ast.BranchAcquire:
@@ -402,7 +395,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	g.indent++
 	g.line("%s ctx_val = {0};", ctxName)
 	g.line("%s *ctx = &ctx_val;", ctxName)
-	g.line("AnimaVal __owned_hdls[32]; int __n_owned = 0;")
 	for _, p := range wf.Params {
 		g.line("ctx->%s = %s;", cVarName(p.Name), cVarName(p.Name))
 	}
@@ -518,7 +510,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	g.localVars = prevVars
 	g.wfVars = prevWfVars
 	g.wfCtxPtr = prevCtx
-	g.hasHandles = prevHandles
 	return nil
 }
 
@@ -692,34 +683,35 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		valC := g.emitExpr(s.Value)
 		dest := g.ensureVarDeclared(s.Name)
 		g.line("%s = %s;", dest, valC)
-		if isHandleCreator(s.Value) {
-			g.line("if (__n_owned < 32) __owned_hdls[__n_owned++] = %s;", dest)
-		}
 
 	case *ast.CompoundAssignStmt:
-		rhsC := g.emitExpr(s.Value)
+		// The target is read before the right-hand side runs, as on the VM.
+		opSym := "+"
+		if s.Op == "-=" {
+			opSym = "-"
+		} else if s.Op == "*=" {
+			opSym = "*"
+		}
 		switch tgt := s.Target.(type) {
 		case *ast.Ident:
 			vref := g.varRef(tgt.Name)
-			switch s.Op {
-			case "+=":
-				g.line("%s = v_int(%s.u.i + (%s).u.i);", vref, vref, rhsC)
-			case "-=":
-				g.line("%s = v_int(%s.u.i - (%s).u.i);", vref, vref, rhsC)
-			case "*=":
-				g.line("%s = v_int(%s.u.i * (%s).u.i);", vref, vref, rhsC)
-			}
+			cur := g.freshTmp("cur")
+			g.line("AnimaVal %s = %s;", cur, vref)
+			rhsC := g.emitExpr(s.Value)
+			g.line("%s = v_int(%s.u.i %s (%s).u.i);", vref, cur, opSym, rhsC)
 		case *ast.FieldExpr:
 			objC := g.emitExpr(tgt.Object)
 			curF := g.freshTmp("fld")
 			g.line("AnimaVal %s = v_entity_get(%s, %s);", curF, objC, cEscapeStr(tgt.Field))
-			opSym := "+"
-			if s.Op == "-=" {
-				opSym = "-"
-			} else if s.Op == "*=" {
-				opSym = "*"
-			}
+			rhsC := g.emitExpr(s.Value)
 			g.line("v_entity_set(%s, %s, v_int(%s.u.i %s (%s).u.i));", objC, cEscapeStr(tgt.Field), curF, opSym, rhsC)
+		case *ast.IndexExpr:
+			lC := g.emitExpr(tgt.List)
+			iC := g.emitExpr(tgt.Index)
+			cur := g.freshTmp("elem")
+			g.line("AnimaVal %s = v_index_get(%s, %s);", cur, lC, iC)
+			rhsC := g.emitExpr(s.Value)
+			g.line("v_index_set(%s, %s, v_int(%s.u.i %s (%s).u.i));", lC, iC, cur, opSym, rhsC)
 		}
 
 	case *ast.FieldAssignStmt:
@@ -731,17 +723,20 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		lC := g.emitExpr(s.List)
 		iC := g.emitExpr(s.Index)
 		vC := g.emitExpr(s.Value)
-		g.line("if (%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len) { %s.u.list->items[(%s).u.i] = %s; }",
-			lC, lC, iC, iC, lC, lC, iC, vC)
+		g.line("v_index_set(%s, %s, %s);", lC, iC, vC)
 
 	case *ast.IfStmt:
+		// An elif condition may emit statements, so it is nested in the
+		// else block of the branch before it.
+		nested := 0
 		for idx, br := range s.Branches {
-			condC := g.emitExpr(br.Cond)
-			kw := "if"
 			if idx > 0 {
-				kw = "} else if"
+				g.line("} else {")
+				g.indent++
+				nested++
 			}
-			g.line("%s (v_truthy(%s)) {", kw, condC)
+			condC := g.emitExpr(br.Cond)
+			g.line("if (v_truthy(%s)) {", condC)
 			g.indent++
 			for _, bs := range br.Body {
 				if err := g.emitStmt(bs); err != nil {
@@ -761,6 +756,10 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 			g.indent--
 		}
 		g.line("}")
+		for ; nested > 0; nested-- {
+			g.indent--
+			g.line("}")
+		}
 
 	case *ast.WhileStmt:
 		g.line("while (1) {")
@@ -813,49 +812,16 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 		}
 
 	case *ast.MatchStmt:
-		subjC := g.emitExpr(s.Subject)
-		subjTmp := g.freshTmp("subj")
-		g.line("AnimaVal %s = %s;", subjTmp, subjC)
-		for idx, arm := range s.Arms {
-			condC := g.emitPatternCond(arm.Pattern, subjTmp)
-			if arm.Guard != nil {
-				// Bind pattern var first inside block if needed
-				if idx == 0 {
-					g.line("if (%s) {", condC)
-				} else {
-					g.line("else if (%s) {", condC)
-				}
-				g.indent++
-				g.emitPatternBinds(arm.Pattern, subjTmp)
-				guardC := g.emitExpr(arm.Guard)
-				g.line("if (v_truthy(%s)) {", guardC)
-				g.indent++
-				for _, bs := range arm.Body {
+		return g.emitMatchArms(s.Subject, len(s.Arms),
+			func(i int) (ast.Pattern, ast.Expr) { return s.Arms[i].Pattern, s.Arms[i].Guard },
+			func(i int) error {
+				for _, bs := range s.Arms[i].Body {
 					if err := g.emitStmt(bs); err != nil {
 						return err
 					}
 				}
-				g.indent--
-				g.line("}")
-				g.indent--
-				g.line("}")
-			} else {
-				if idx == 0 {
-					g.line("if (%s) {", condC)
-				} else {
-					g.line("else if (%s) {", condC)
-				}
-				g.indent++
-				g.emitPatternBinds(arm.Pattern, subjTmp)
-				for _, bs := range arm.Body {
-					if err := g.emitStmt(bs); err != nil {
-						return err
-					}
-				}
-				g.indent--
-				g.line("}")
-			}
-		}
+				return nil
+			})
 
 	case *ast.ReturnStmt:
 		if s.Value == nil {
@@ -881,25 +847,46 @@ func (g *cgen) emitStmt(stmt ast.Stmt) error {
 	return nil
 }
 
-func (g *cgen) emitMatchExprAssign(me *ast.MatchExpr, dest string) error {
-	subjC := g.emitExpr(me.Subject)
+// emitMatchArms tries the arms in order and runs body for the first whose
+// pattern matches and whose guard holds; a failed guard falls through to the
+// next arm.
+func (g *cgen) emitMatchArms(subject ast.Expr, n int, arm func(i int) (ast.Pattern, ast.Expr), body func(i int) error) error {
+	subjC := g.emitExpr(subject)
 	subjTmp := g.freshTmp("msubj")
+	done := g.freshTmp("mdone")
 	g.line("AnimaVal %s = %s;", subjTmp, subjC)
-	for idx, arm := range me.Arms {
-		condC := g.emitPatternCond(arm.Pattern, subjTmp)
-		kw := "if"
-		if idx > 0 {
-			kw = "else if"
-		}
-		g.line("%s (%s) {", kw, condC)
+	g.line("bool %s = false;", done)
+	for i := 0; i < n; i++ {
+		pat, guard := arm(i)
+		g.line("if (!%s && %s) {", done, g.emitPatternCond(pat, subjTmp))
 		g.indent++
-		g.emitPatternBinds(arm.Pattern, subjTmp)
-		valC := g.emitExpr(arm.Value)
-		g.line("%s = %s;", dest, valC)
+		g.emitPatternBinds(pat, subjTmp)
+		if guard != nil {
+			guardC := g.emitExpr(guard)
+			g.line("if (v_truthy(%s)) {", guardC)
+			g.indent++
+		}
+		g.line("%s = true;", done)
+		if err := body(i); err != nil {
+			return err
+		}
+		if guard != nil {
+			g.indent--
+			g.line("}")
+		}
 		g.indent--
 		g.line("}")
 	}
 	return nil
+}
+
+func (g *cgen) emitMatchExprAssign(me *ast.MatchExpr, dest string) error {
+	return g.emitMatchArms(me.Subject, len(me.Arms),
+		func(i int) (ast.Pattern, ast.Expr) { return me.Arms[i].Pattern, me.Arms[i].Guard },
+		func(i int) error {
+			g.line("%s = %s;", dest, g.emitExpr(me.Arms[i].Value))
+			return nil
+		})
 }
 
 func (g *cgen) emitPatternCond(pat ast.Pattern, subj string) string {
@@ -939,21 +926,22 @@ func (g *cgen) emitPatternBinds(pat ast.Pattern, subj string) {
 	}
 }
 
-func isHandleCreator(expr ast.Expr) bool {
-	if te, ok := expr.(*ast.TryExpr); ok {
-		return isHandleCreator(te.Inner)
+// emitExpr returns a C expression for expr. Calls, workflow runs, and reads of
+// fields and elements a later call could change, are evaluated into a temporary right
+// here, so an expression runs once and in source order as it does on the VM:
+// C leaves the evaluation order of operands and arguments unspecified.
+func (g *cgen) emitExpr(expr ast.Expr) string {
+	c := g.emitExprInline(expr)
+	switch expr.(type) {
+	case *ast.CallExpr, *ast.RunWorkflowExpr, *ast.FieldExpr, *ast.IndexExpr:
+		tmp := g.freshTmp("val")
+		g.line("AnimaVal %s = %s;", tmp, c)
+		return tmp
 	}
-	ce, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "listen_tcp" || fe.Field == "connect_tcp" || fe.Field == "accept" || fe.Field == "open"
-	}
-	return false
+	return c
 }
 
-func (g *cgen) emitExpr(expr ast.Expr) string {
+func (g *cgen) emitExprInline(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.IntLit:
 		return fmt.Sprintf("v_int(%dLL)", e.Value)
@@ -1002,6 +990,28 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 		}
 	case *ast.BinaryExpr:
 		l := g.emitExpr(e.Left)
+		switch e.Op {
+		case "and", "or", "implies":
+			// The right operand may emit statements; run them only when it
+			// is evaluated.
+			res := g.freshTmp("sc")
+			if e.Op == "and" {
+				g.line("AnimaVal %s = v_bool(false);", res)
+				g.line("if (v_truthy(%s)) {", l)
+			} else if e.Op == "or" {
+				g.line("AnimaVal %s = v_bool(true);", res)
+				g.line("if (!v_truthy(%s)) {", l)
+			} else {
+				g.line("AnimaVal %s = v_bool(true);", res)
+				g.line("if (v_truthy(%s)) {", l)
+			}
+			g.indent++
+			r := g.emitExpr(e.Right)
+			g.line("%s = v_bool(v_truthy(%s));", res, r)
+			g.indent--
+			g.line("}")
+			return res
+		}
 		r := g.emitExpr(e.Right)
 		switch e.Op {
 		case "+":
@@ -1029,12 +1039,6 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 			return fmt.Sprintf("v_bool((%s).u.i > (%s).u.i)", l, r)
 		case ">=":
 			return fmt.Sprintf("v_bool((%s).u.i >= (%s).u.i)", l, r)
-		case "and":
-			return fmt.Sprintf("v_bool(v_truthy(%s) && v_truthy(%s))", l, r)
-		case "or":
-			return fmt.Sprintf("v_bool(v_truthy(%s) || v_truthy(%s))", l, r)
-		case "implies":
-			return fmt.Sprintf("v_bool(!v_truthy(%s) || v_truthy(%s))", l, r)
 		}
 	case *ast.ListLit:
 		if len(e.Elems) == 0 {
@@ -1062,10 +1066,7 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 	case *ast.IndexExpr:
 		lst := g.emitExpr(e.List)
 		idx := g.emitExpr(e.Index)
-		tmp := g.freshTmp("idxv")
-		g.line("AnimaVal %s = (%s.kind == VAL_LIST && %s.u.list && (%s).u.i >= 0 && (size_t)(%s).u.i < %s.u.list->len) ? %s.u.list->items[(%s).u.i] : v_none();",
-			tmp, lst, lst, idx, idx, lst, lst, idx)
-		return tmp
+		return fmt.Sprintf("v_index_get(%s, %s)", lst, idx)
 	case *ast.WithExpr:
 		base := g.emitExpr(e.Base)
 		cp := g.freshTmp("with")
@@ -1081,9 +1082,6 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 		g.line("AnimaVal %s = %s;", res, inner)
 		g.line("if (v_is_variant(%s, \"Err\") || v_is_variant(%s, \"None\") || %s.kind == VAL_NONE) {", res, res, res)
 		g.indent++
-		if g.hasHandles {
-			g.line("for (int __hi = 0; __hi < __n_owned; __hi++) hdl_close(__owned_hdls[__hi]);")
-		}
 		g.line("return %s;", res)
 		g.indent--
 		g.line("}")
@@ -1104,6 +1102,13 @@ func (g *cgen) emitExpr(expr ast.Expr) string {
 			args = append(args, g.emitExpr(a.Value))
 		}
 		return fmt.Sprintf("__wf_%s(%s)", e.Name, strings.Join(args, ", "))
+	case *ast.MatchExpr:
+		tmp := g.freshTmp("mexpr")
+		g.line("AnimaVal %s = v_none();", tmp)
+		if err := g.emitMatchExprAssign(e, tmp); err != nil {
+			return "v_void()"
+		}
+		return tmp
 	case *ast.CallExpr:
 		return g.emitCallExpr(e)
 	}
@@ -1128,12 +1133,10 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	prevCur := g.cur
 	prevVars := g.localVars
 	prevUp := g.upvalMap
-	prevHandles := g.hasHandles
 
 	g.cur = g.liftedFns
 	g.localVars = map[string]bool{}
 	g.upvalMap = map[string]int{}
-	g.hasHandles = false
 	for i, fv := range freeVars {
 		g.upvalMap[fv] = i
 	}
@@ -1152,7 +1155,6 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	g.cur = prevCur
 	g.localVars = prevVars
 	g.upvalMap = prevUp
-	g.hasHandles = prevHandles
 
 	if len(freeVars) == 0 {
 		return fmt.Sprintf("v_closure(%s, 0, NULL)", lname)
@@ -1385,11 +1387,6 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("conc_threadpool_new((%s).u.i, (%s).u.i)", args[0], args[1])
 	case "std.concurrent.Channel":
 		capC := "v_int(8)"
-		for _, a := range e.Args {
-			if a.Name == "cap" {
-				capC = g.emitExpr(a.Value)
-			}
-		}
 		if len(args) >= 1 {
 			capC = args[0]
 		}

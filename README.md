@@ -9,6 +9,7 @@
 2. **FSP / LTSA & Linear Typestate Verification**:
    - Compiles `monitor`, `machine`, and `workflow` synchronizations into explicit Labelled Transition Systems (`||` composition, relabeling, hiding, priority).
    - Verifies Safety (`property` `ERROR=-1`), Deadlock freedom, **Tarjan SCC Fair-Choice `progress` (starvation/livelock)**, bounded **FLTL**, and **Linear Socket/File/Port Typestate** (zero FD leaks & zero use-after-close).
+   - **Handle ownership** (`sock.TcpStream`, `sock.TcpListener`, `fs.File`): every handle has one owner, who must close it on every path. A handle parameter is borrowed (usable, but it cannot be closed or moved) unless declared `own`; `handle(own conn)`, `c2 = conn` and `return conn` move it, and a moved handle cannot be used again. `pool.submit(() => handle(own conn))` moves a connection into a worker thread; a stream or file cannot be shared between threads, while a listener can be lent to tasks and not closed until they are awaited or the pool is shut down. `?` is rejected while the function owns an open handle: `match` on the result and close the handle on the failure path, or do the fallible work in a function that borrows it. Handles cannot be stored in entities, lists or other values. See `examples/concurrent_http.anm`.
    - Exports standard `.fsp` compatible with Magee & Kramer's **LTSA**.
 3. **Petri Net & Workflow Soundness**:
    - Compiles `workflow` (`pool`, `fork`/`join` AND-split/join, `choice`/`merge` XOR-split/join) into Place/Transition WF-Nets.

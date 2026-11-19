@@ -1,0 +1,13 @@
+import std.socket as sock
+import std.concurrent as conc
+
+def read(conn: sock.TcpStream) -> int:
+    return 0
+
+# A stream cannot be used by two threads: it must be moved with `own`.
+def serve(pool: conc.ThreadPool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 9)?
+    fut = pool.submit(() => read(conn))
+    _ = fut.await()
+    conn.close()
+    return Ok(0)

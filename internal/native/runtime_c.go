@@ -228,6 +228,18 @@ static AnimaVal v_map_get(AnimaVal mv, const char *k) {
     return v_none();
 }
 
+// Element access for xs[i] and m[k]; a map key is the printed form of k.
+static AnimaVal v_index_get(AnimaVal c, AnimaVal i) {
+    if (c.kind == VAL_LIST && c.u.list && i.u.i >= 0 && (size_t)i.u.i < c.u.list->len) return c.u.list->items[i.u.i];
+    if (c.kind == VAL_MAP) { char *k = v_to_cstr(i); AnimaVal r = v_map_get(c, k); free(k); return r; }
+    return v_none();
+}
+
+static void v_index_set(AnimaVal c, AnimaVal i, AnimaVal val) {
+    if (c.kind == VAL_LIST && c.u.list && i.u.i >= 0 && (size_t)i.u.i < c.u.list->len) { c.u.list->items[i.u.i] = val; return; }
+    if (c.kind == VAL_MAP) { char *k = v_to_cstr(i); v_map_set(c, k, val); free(k); }
+}
+
 static AnimaVal v_entity_new(const char *tname) {
     AnimaEntity *e = calloc(1, sizeof(AnimaEntity));
     e->type_name = strdup(tname);

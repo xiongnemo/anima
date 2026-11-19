@@ -326,7 +326,12 @@ func (c *checker) checkProgram() error {
 				if err != nil {
 					return err
 				}
-				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
+				if p.Own {
+					if h, wrapped := LinearHandle(pt); h == nil || wrapped {
+						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, fs.File), got %s", p.Span, p.Name, pt)
+					}
+				}
+				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})
 			}
 			var ret Type = VoidType{}
 			if node.ReturnType != nil {
@@ -346,6 +351,9 @@ func (c *checker) checkProgram() error {
 				pt, err := c.resolveTypeExpr(p.Type)
 				if err != nil {
 					return err
+				}
+				if p.Own {
+					return fmt.Errorf("%s: workflow parameter %s cannot be 'own'", p.Span, p.Name)
 				}
 				wf.Params = append(wf.Params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
 			}
@@ -489,6 +497,9 @@ func (c *checker) resolveTypeExpr(te ast.TypeExpr) (Type, error) {
 			vt, err := c.resolveTypeExpr(t.Args[1])
 			if err != nil {
 				return nil, err
+			}
+			if !isMapKeyType(kt) {
+				return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", t.Span, kt)
 			}
 			return &MapType{Key: kt, Val: vt, Cap: t.Cap, HasCap: t.HasCap}, nil
 		case "Channel", "conc.Channel":
@@ -723,6 +734,21 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 								sc.defineLocal(la.Name, b)
 							}
 						}
+						// An element write or an in-place update changes the
+						// variable it reaches, like an assignment to it.
+						var written ast.Expr
+						switch st := op.Stmt.(type) {
+						case *ast.IndexAssignStmt:
+							written = st.List
+						case *ast.CompoundAssignStmt:
+							written = st.Target
+						}
+						if path, ok := elementOwnerPath(written); written != nil && ok {
+							if prevBr, dup := branchWrites[path]; dup && prevBr != br.Name {
+								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, path, prevBr, br.Name)
+							}
+							branchWrites[path] = br.Name
+						}
 					}
 				}
 			}
@@ -780,15 +806,23 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if err != nil {
 			return err
 		}
+		// The literal `{}` fits every map type: a declared one, or the one
+		// the variable already has. On its own it has str keys.
+		lit, _ := s.Value.(*ast.MapLit)
+		emptyMap := lit != nil && len(lit.Entries) == 0
 		if s.TypeAnno != nil {
 			annoTy, err := c.resolveTypeExpr(s.TypeAnno)
 			if err != nil {
 				return err
 			}
-			if !isAssignable(annoTy, valTy) {
+			if !isAssignable(annoTy, valTy) && !(emptyMap && annoTy.Kind() == KindMap) {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s)", s.Span, valTy, s.Name, annoTy)
 			}
 			valTy = annoTy
+		} else if emptyMap {
+			if prev, found := sc.lookup(s.Name); found && prev.ty != nil && prev.ty.Kind() == KindMap {
+				valTy = prev.ty
+			}
 		}
 		if c.curFuncInfo != nil {
 			c.addUnique(&c.curFuncInfo.Frame.Writes, s.Name)
@@ -808,7 +842,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if lhsTy.Kind() != KindInt || (rhsTy.Kind() != KindInt && rhsTy.Kind() != KindUnknown) {
 			return fmt.Errorf("%s: compound assignment %s requires int operands", s.Span, s.Op)
 		}
-		if root, ok := rootVarPath(s.Target); ok {
+		if root, ok := elementOwnerPath(s.Target); ok {
 			if err := c.ensureMutableTarget(root, sc, s.Span); err != nil {
 				return err
 			}
@@ -865,6 +899,24 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			}
 			if !isAssignable(lt.Elem, vty) {
 				return fmt.Errorf("%s: list element expects %s, got %s", s.Span, lt.Elem, vty)
+			}
+		}
+		if mt, ok := lty.(*MapType); ok {
+			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
+				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
+			}
+			if !isAssignable(mt.Val, vty) {
+				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
+			}
+		}
+		// Writing an element writes the list: a read-only parameter cannot
+		// be changed this way either.
+		if root, ok := elementOwnerPath(s.List); ok {
+			if err := c.ensureMutableTarget(root, sc, s.Span); err != nil {
+				return err
+			}
+			if c.curFuncInfo != nil {
+				c.addUnique(&c.curFuncInfo.Frame.Writes, root)
 			}
 		}
 		return nil
@@ -1195,7 +1247,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 
 	case *ast.MapLit:
 		var kt, vt Type = StrType{}, UnknownType{}
-		for _, ent := range e.Entries {
+		for i, ent := range e.Entries {
 			k, err := c.checkExpr(ent.Key, sc)
 			if err != nil {
 				return nil, err
@@ -1204,12 +1256,18 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
+			if i > 0 && !isAssignable(kt, k) {
+				return nil, fmt.Errorf("%s: map keys must have one type, got %s and %s", e.Span, kt, k)
+			}
 			kt = k
 			if vt.Kind() == KindUnknown {
 				vt = v
 			} else {
 				vt = unifyTypes(vt, v)
 			}
+		}
+		if !isMapKeyType(kt) {
+			return nil, fmt.Errorf("%s: a map key must be str, int or bool, got %s", e.Span, kt)
 		}
 		return &MapType{Key: kt, Val: vt}, nil
 
@@ -1355,7 +1413,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if len(e.Args) != len(wi.Params) {
 			return nil, fmt.Errorf("%s: workflow %s expects %d args, got %d", e.Span, e.Name, len(wi.Params), len(e.Args))
 		}
-		if err := c.checkCallAliasing(e.Args); err != nil {
+		if err := c.checkCallAliasing(e.Args, false); err != nil {
 			return nil, err
 		}
 		for i, arg := range e.Args {
@@ -1366,9 +1424,15 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if wi.Params[i].Mut && !arg.Mut {
 				return nil, fmt.Errorf("%s: argument %d to workflow %s must be marked 'mut'", arg.Span, i+1, e.Name)
 			}
+			if arg.Own {
+				return nil, fmt.Errorf("%s: unexpected 'own': a workflow cannot take ownership of a handle", arg.Span)
+			}
 			if !isAssignable(wi.Params[i].Type, at) {
 				return nil, fmt.Errorf("%s: workflow %s arg %d expects %s, got %s", arg.Span, e.Name, i+1, wi.Params[i].Type, at)
 			}
+		}
+		if err := c.checkCallAliasing(e.Args, true); err != nil {
+			return nil, err
 		}
 		return wi.Return, nil
 
@@ -1397,7 +1461,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 
 func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	// SPARK Anti-Aliasing rule on all call sites
-	if err := c.checkCallAliasing(e.Args); err != nil {
+	if err := c.checkCallAliasing(e.Args, false); err != nil {
 		return nil, err
 	}
 
@@ -1524,9 +1588,22 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				} else if a.Mut {
 					return nil, fmt.Errorf("%s: unexpected 'mut' on read-only parameter %d of %s", a.Span, i+1, id.Name)
 				}
+				if fi.Type.Params[i].Own {
+					if !a.Own {
+						return nil, fmt.Errorf("%s: argument %d to %s takes ownership and requires 'own'", a.Span, i+1, id.Name)
+					}
+					if _, ok := a.Value.(*ast.Ident); !ok {
+						return nil, fmt.Errorf("%s: 'own' argument must be a variable", a.Span)
+					}
+				} else if a.Own {
+					return nil, fmt.Errorf("%s: unexpected 'own' on borrowed parameter %d of %s", a.Span, i+1, id.Name)
+				}
 				if !isAssignable(fi.Type.Params[i].Type, at) {
 					return nil, fmt.Errorf("%s: arg %d of %s expects %s, got %s", a.Span, i+1, id.Name, fi.Type.Params[i].Type, at)
 				}
+			}
+			if err := c.checkCallAliasing(e.Args, true); err != nil {
+				return nil, err
 			}
 			if c.curFuncInfo != nil {
 				for _, pe := range fi.Frame.PortEffects {
@@ -1613,6 +1690,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		if _, err := c.checkExpr(a.Value, sc); err != nil {
 			return nil, err
 		}
+	}
+	if err := c.checkCallAliasing(e.Args, true); err != nil {
+		return nil, err
 	}
 	if ft, ok := calleeTy.(*FuncType); ok {
 		return ft.Return, nil
@@ -1833,7 +1913,11 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	return UnknownType{}, nil
 }
 
-func (c *checker) checkCallAliasing(args []ast.CallArg) error {
+// checkCallAliasing rejects a call whose mut argument overlaps another
+// argument. With elements set, which needs the arguments to be type-checked
+// already, an entity, list or map read out of a container counts as that
+// container.
+func (c *checker) checkCallAliasing(args []ast.CallArg, elements bool) error {
 	var mutRoots []struct {
 		root string
 		span ast.Span
@@ -1844,7 +1928,13 @@ func (c *checker) checkCallAliasing(args []ast.CallArg) error {
 		span ast.Span
 	}
 	for _, a := range args {
-		if root, ok := rootVarPath(a.Value); ok {
+		root, ok := rootVarPath(a.Value)
+		if !ok && elements && c.isSharedElement(a.Value) {
+			// An entity, list or map read out of a container is the same
+			// object the container holds.
+			root, ok = containerPath(a.Value)
+		}
+		if ok {
 			allRoots = append(allRoots, struct {
 				root string
 				mut  bool
@@ -1891,6 +1981,66 @@ func rootVarPath(e ast.Expr) (string, bool) {
 	}
 }
 
+// containerPath returns the variable path e is read from, ignoring indexes:
+// box.rows for box.rows[i], rows.inner for rows[i].inner.
+func containerPath(e ast.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name, true
+	case *ast.FieldExpr:
+		base, ok := containerPath(x.Object)
+		if !ok {
+			return "", false
+		}
+		return base + "." + x.Field, true
+	case *ast.IndexExpr:
+		return containerPath(x.List)
+	}
+	return "", false
+}
+
+// isSharedElement reports whether e reads, through an index, a value that is
+// passed by reference.
+func (c *checker) isSharedElement(e ast.Expr) bool {
+	switch e.(type) {
+	case *ast.IndexExpr, *ast.FieldExpr:
+	default:
+		return false
+	}
+	ty := c.info.ExprTypes[e]
+	if ty == nil {
+		return false
+	}
+	switch ty.Kind() {
+	case KindEntity, KindList, KindMap:
+		return true
+	}
+	return false
+}
+
+// isMapKeyType reports whether keys of type t are told apart by the runtimes,
+// which compare keys by their printed form.
+func isMapKeyType(t Type) bool {
+	switch t.Kind() {
+	case KindStr, KindInt, KindBool, KindUnknown:
+		return true
+	}
+	return false
+}
+
+// elementOwnerPath returns the variable path of the list or map that the
+// assignment target e is an element of (xs for xs[i], box.rows for
+// box.rows[i][j]); for any other target it is rootVarPath.
+func elementOwnerPath(e ast.Expr) (string, bool) {
+	for {
+		ix, ok := e.(*ast.IndexExpr)
+		if !ok {
+			return rootVarPath(e)
+		}
+		e = ix.List
+	}
+}
+
 func (c *checker) instantiateADT(name string, args []Type) *ADTType {
 	base := c.info.ADTs[name]
 	cp := *base
@@ -1905,7 +2055,7 @@ func (c *checker) funcSigToType(sig ast.FuncSig) (*FuncType, error) {
 		if err != nil {
 			return nil, err
 		}
-		ps = append(ps, FuncParamInfo{Name: p.Name, Mut: p.Mut, Type: pt})
+		ps = append(ps, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})
 	}
 	ret := Type(VoidType{})
 	if sig.ReturnType != nil {

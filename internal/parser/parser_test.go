@@ -153,3 +153,42 @@ def loop_demo(mut a: Acc, n: int[0..10]) -> int:
 		t.Fatalf("expected 2 decls, got %d", len(prog.Decls))
 	}
 }
+
+func TestParseOwnParamsAndArgs(t *testing.T) {
+	prog, err := Parse("own.anm", `
+import std.socket as sock
+
+def handle(own conn: sock.TcpStream, own: int) -> int:
+    conn.close()
+    return own
+
+def serve(conn: sock.TcpStream, own: int) -> int:
+    return handle(own conn, own) + handle(own conn, own + 1)
+`)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	var fns []*ast.FuncDecl
+	for _, d := range prog.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok {
+			fns = append(fns, fn)
+		}
+	}
+	if len(fns) != 2 {
+		t.Fatalf("expected 2 functions, got %d", len(fns))
+	}
+	ps := fns[0].Params
+	if !ps[0].Own || ps[0].Name != "conn" || ps[1].Own || ps[1].Name != "own" {
+		t.Fatalf("unexpected params: %+v", ps)
+	}
+	ret := fns[1].Body[0].(*ast.ReturnStmt).Value.(*ast.BinaryExpr)
+	for _, side := range []ast.Expr{ret.Left, ret.Right} {
+		args := side.(*ast.CallExpr).Args
+		if !args[0].Own || args[1].Own {
+			t.Fatalf("unexpected args: %+v", args)
+		}
+		if id, ok := args[0].Value.(*ast.Ident); !ok || id.Name != "conn" {
+			t.Fatalf("own argument is not the variable conn: %+v", args[0].Value)
+		}
+	}
+}

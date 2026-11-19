@@ -471,6 +471,13 @@ func (f *fnCompiler) declareLocal(name string) int {
 	return slot
 }
 
+// newTemp reserves a local slot that no source name can refer to.
+func (f *fnCompiler) newTemp() int {
+	slot := f.proto.NumLocals
+	f.proto.NumLocals++
+	return slot
+}
+
 func (f *fnCompiler) resolveVar(name string) (isLocal bool, isUpval bool, slot int) {
 	if s, ok := f.locals[name]; ok {
 		return true, false, s
@@ -550,6 +557,30 @@ func (f *fnCompiler) compileStmt(stmt ast.Stmt) error {
 			}
 			f.emit(EncodeImm(opCode, 0), s.Span.Line)
 			f.emit(EncodeImm(OpSetField, f.root.addStrConst(tgt.Field)), s.Span.Line)
+		case *ast.IndexExpr:
+			// list and index are evaluated once, the element is read, then
+			// the right-hand side runs.
+			line := s.Span.Line
+			if err := f.compileExpr(tgt.List); err != nil {
+				return err
+			}
+			listSlot := f.newTemp()
+			f.emit(EncodeImm(OpStoreLocal, uint32(listSlot)), line)
+			if err := f.compileExpr(tgt.Index); err != nil {
+				return err
+			}
+			idxSlot := f.newTemp()
+			f.emit(EncodeImm(OpStoreLocal, uint32(idxSlot)), line)
+			f.emit(EncodeImm(OpLoadLocal, uint32(listSlot)), line)
+			f.emit(EncodeImm(OpLoadLocal, uint32(idxSlot)), line)
+			f.emit(EncodeImm(OpLoadLocal, uint32(listSlot)), line)
+			f.emit(EncodeImm(OpLoadLocal, uint32(idxSlot)), line)
+			f.emit(EncodeImm(OpGetIndex, 0), line)
+			if err := f.compileExpr(s.Value); err != nil {
+				return err
+			}
+			f.emit(EncodeImm(opCode, 0), line)
+			f.emit(EncodeImm(OpSetIndex, 0), line)
 		}
 
 	case *ast.FieldAssignStmt:

@@ -1,0 +1,9 @@
+import std.socket as sock
+
+# `c2 = conn` moves the connection: conn can no longer be used.
+def serve() -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 9)?
+    c2 = conn
+    c2.close()
+    reply = conn.recv_text(16)
+    return Ok(0)

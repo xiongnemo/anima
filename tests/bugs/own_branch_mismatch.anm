@@ -1,0 +1,7 @@
+import std.socket as sock
+
+def serve(keep: bool) -> Result[int, str]:
+    conn = sock.connect_tcp("127.0.0.1", 9)?
+    if not keep:
+        conn.close()
+    return Ok(0)
