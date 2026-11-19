@@ -279,3 +279,14 @@ func (v *verifier) proveSharedEntity(obj ast.Expr, env *symEnv, scope string, sp
 		v.proveInvariants(et, id.Name, id.Name, span, env, scope, map[*sema.EntityType]bool{})
 	}
 }
+
+// checkWrittenObject rejects a field write on an object whose entity type
+// is not known (an element of an untyped map): which invariants the write
+// has to keep cannot be told.
+func (v *verifier) checkWrittenObject(obj ast.Expr, field string, scope string, span ast.Span) {
+	if _, ok := v.info.ExprTypes[obj].(*sema.EntityType); ok {
+		return
+	}
+	v.record(fmt.Sprintf("%s.field_%s_object_type", scope, field), scope, span, "the written object has a known entity type", VCFailed,
+		fmt.Sprintf("the type of the object whose field %s is written is not known, so its invariants cannot be checked; give it a type (`r: T = ...`)", field), nil)
+}

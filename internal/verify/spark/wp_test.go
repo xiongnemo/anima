@@ -1664,3 +1664,26 @@ func TestSPARKUnsharedEntityKeepsTwoStepUpdates(t *testing.T) {
 		t.Errorf("replaced in one branch: expected a failed entity_b_invariant_1, failed VCs:\n%s", failed)
 	}
 }
+
+// An untyped map (`m = {}`) gives its elements no type. Taking one into a
+// typed variable shares it, and a field write on an untyped one is rejected.
+func TestSPARKEntityInAnUntypedMap(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m = {}\n    m[\"k\"] = A(x=5, y=5)\n" + b + "\n    return use(m[\"k\"])\n"
+	}
+	rejected := map[string]string{
+		"typed variable":   "entity_r_invariant_1\x00    r: A = m[\"k\"]\n    r.x = 6",
+		"untyped variable": "field_x_object_type\x00    r = m[\"k\"]\n    r.x = 6",
+		"in place":         "field_x_object_type\x00    m[\"k\"].x = 6",
+	}
+	for name, c := range rejected {
+		vc, b, _ := strings.Cut(c, "\x00")
+		failed := strings.Join(failedVCs(verifySrc(t, body(b))), "\n")
+		if !strings.Contains(failed, vc) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, vc, failed)
+		}
+	}
+	if failed := failedVCs(verifySrc(t, body("    r: A = m[\"k\"]\n    r.x = 0"))); len(failed) != 0 {
+		t.Errorf("a write that keeps the invariant: expected every VC proved, failed VCs: %v", failed)
+	}
+}

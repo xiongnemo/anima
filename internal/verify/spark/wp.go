@@ -741,6 +741,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		if id, ok := s.Target.(*ast.Ident); ok {
 			env.intTerms[id.Name] = rhsTerm
 		} else if fe, ok := s.Target.(*ast.FieldExpr); ok {
+			v.checkWrittenObject(fe.Object, fe.Field, scope, s.Span)
 			if path, ok := mutArgPath(fe); ok {
 				env.intTerms[path] = rhsTerm
 				v.proveSharedEntity(fe.Object, env, scope, s.Span)
@@ -768,6 +769,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
 		v.proveEntityValue(s.Value, env, scope)
+		v.checkWrittenObject(s.Object, s.Field, scope, s.Span)
 		path := ""
 		if obj, ok := mutArgPath(s.Object); ok {
 			path = obj + "." + s.Field
