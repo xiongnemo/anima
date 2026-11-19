@@ -1973,3 +1973,52 @@ def zap(mut o: Ord) -> int:
 		}
 	}
 }
+
+// An invariant reads the entity's fields in every form of expression, and
+// sees a boolean write.
+func TestSPARKInvariantReadsFieldsUnderAnyExpression(t *testing.T) {
+	negated := `
+entity A:
+    x: int[0..10]
+    invariant: -x < 0
+
+def f(mut rows: list[A]) -> int:
+    if len(rows) > 0:
+        rows[0].x = 0
+    return 0
+
+def g(mut a: A) -> int:
+    a.x = 0
+    return 0
+
+def h(a: A) -> int:
+    x = 0
+    return 10 / a.x
+`
+	failed := strings.Join(failedVCs(verifySrc(t, negated)), "\n")
+	for _, vc := range []string{"f.entity_element_invariant_1", "g.mut_a_invariant"} {
+		if !strings.Contains(failed, vc) {
+			t.Errorf("invariant under a unary minus: expected a failed %s, failed VCs:\n%s", vc, failed)
+		}
+	}
+	if strings.Contains(failed, "h.div_nonzero") {
+		t.Errorf("the invariant should give h that a.x is not zero, whatever its local x is, failed VCs:\n%s", failed)
+	}
+	boolean := `
+entity A:
+    ready: bool
+    x: int[0..10]
+    invariant: ready
+
+def f(mut rows: list[A]) -> int:
+    if len(rows) > 0:
+        rows[0].ready = False
+    return 0
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, boolean)), "\n"); !strings.Contains(failed, "entity_element_invariant_1") {
+		t.Errorf("boolean field written false: expected a failed entity_element_invariant_1, failed VCs:\n%s", failed)
+	}
+	if failed := failedVCs(verifySrc(t, strings.Replace(boolean, "= False", "= True", 1))); len(failed) != 0 {
+		t.Errorf("boolean field written true: expected every VC proved, failed VCs: %v", failed)
+	}
+}
