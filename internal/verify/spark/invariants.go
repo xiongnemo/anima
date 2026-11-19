@@ -3,6 +3,7 @@ package spark
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -220,9 +221,19 @@ func (v *verifier) sharingOf(node any) (names []string, fresh string) {
 // sharedIn lists the variables that the code under node can make shared.
 func (v *verifier) sharedIn(node any) []string {
 	var out []string
-	visitNodes(reflect.ValueOf(node), func(n any) {
+	visitNodesUntil(reflect.ValueOf(node), func(n any) bool {
+		if lam, ok := n.(*ast.LambdaExpr); ok {
+			// A lambda's parameter is not the outer variable of that name.
+			for _, name := range v.sharedIn(lam.Body) {
+				if !slices.Contains(lam.Params, name) {
+					out = append(out, name)
+				}
+			}
+			return false
+		}
 		names, _ := v.sharingOf(n)
 		out = append(out, names...)
+		return true
 	})
 	return out
 }

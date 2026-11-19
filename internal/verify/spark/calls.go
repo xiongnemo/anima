@@ -55,26 +55,35 @@ func visitExprs(n reflect.Value, fn func(ast.Expr) bool) {
 
 // visitNodes calls fn on every syntax node under n: each pointer to a struct.
 func visitNodes(n reflect.Value, fn func(any)) {
+	visitNodesUntil(n, func(node any) bool {
+		fn(node)
+		return true
+	})
+}
+
+// visitNodesUntil is visitNodes, except that the nodes under one for which
+// fn returns false are skipped.
+func visitNodesUntil(n reflect.Value, fn func(any) bool) {
 	switch n.Kind() {
 	case reflect.Interface:
 		if !n.IsNil() {
-			visitNodes(n.Elem(), fn)
+			visitNodesUntil(n.Elem(), fn)
 		}
 	case reflect.Pointer:
 		if n.IsNil() {
 			return
 		}
-		if n.Elem().Kind() == reflect.Struct && n.CanInterface() {
-			fn(n.Interface())
+		if n.Elem().Kind() == reflect.Struct && n.CanInterface() && !fn(n.Interface()) {
+			return
 		}
-		visitNodes(n.Elem(), fn)
+		visitNodesUntil(n.Elem(), fn)
 	case reflect.Slice:
 		for i := 0; i < n.Len(); i++ {
-			visitNodes(n.Index(i), fn)
+			visitNodesUntil(n.Index(i), fn)
 		}
 	case reflect.Struct:
 		for i := 0; i < n.NumField(); i++ {
-			visitNodes(n.Field(i), fn)
+			visitNodesUntil(n.Field(i), fn)
 		}
 	}
 }
