@@ -90,3 +90,27 @@ def fetch() -> Result[req.HttpResponse, str]:
 		t.Fatalf("expected timeout_ms liveness contract error, got: %v", err)
 	}
 }
+
+// Writing an element of a list parameter needs `mut`, like writing a field.
+func TestSemaRejectsElementWriteToReadOnlyList(t *testing.T) {
+	for name, body := range map[string]string{
+		"assignment":          "    xs[0] = 1\n",
+		"compound assignment": "    xs[0] += 0\n",
+	} {
+		ro := "def f(xs: list[int[0..9]]) -> int:\n" + body + "    return 0\n"
+		prog, err := parser.Parse("ro.anm", ro)
+		if err != nil {
+			t.Fatalf("%s: parse error: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "read-only parameter") {
+			t.Errorf("%s: expected a read-only parameter error, got %v", name, err)
+		}
+		prog, err = parser.Parse("mut.anm", strings.Replace(ro, "def f(xs:", "def f(mut xs:", 1))
+		if err != nil {
+			t.Fatalf("%s: parse error: %v", name, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%s: a mut list parameter should be writable, got %v", name, err)
+		}
+	}
+}

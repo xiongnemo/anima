@@ -875,6 +875,16 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				return fmt.Errorf("%s: list element expects %s, got %s", s.Span, lt.Elem, vty)
 			}
 		}
+		// Writing an element writes the list: a read-only parameter cannot
+		// be changed this way either.
+		if root, ok := rootVarPath(s.List); ok {
+			if err := c.ensureMutableTarget(root, sc, s.Span); err != nil {
+				return err
+			}
+			if c.curFuncInfo != nil {
+				c.addUnique(&c.curFuncInfo.Frame.Writes, root)
+			}
+		}
 		return nil
 
 	case *ast.IfStmt:
@@ -1907,6 +1917,9 @@ func rootVarPath(e ast.Expr) (string, bool) {
 			return "", false
 		}
 		return base + "." + x.Field, true
+	case *ast.IndexExpr:
+		// An element belongs to its list.
+		return rootVarPath(x.List)
 	default:
 		return "", false
 	}
