@@ -128,6 +128,9 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_mut_call_not_alone.anm", "mut_call_alone"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
 		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
+		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},
+		{"../tests/bugs/spark_bool_equality_stale.anm", "div_nonzero"},
+		{"../tests/bugs/sema_compare_unlike.anm", "they are never equal"},
 		{"../tests/bugs/sema_function_as_value.anm", "function double is not a value"},
 		{"../tests/bugs/sema_unknown_method.anm", `has no member "upper"`},
 		{"../tests/bugs/sema_call_non_function.anm", "cannot be called"},
@@ -486,6 +489,48 @@ def main() -> int:
 
 // An arm that is not taken binds nothing: neither a pattern that fails
 // after one of its names was reached, nor one whose guard fails.
+// ==, <, in, and, or mean the same on both backends: lists, maps and
+// variants are equal by what they hold (a value that holds itself included),
+// an entity is equal to itself only, strings are ordered byte by byte.
+func TestE2EComparisonsParity(t *testing.T) {
+	runOnBothBackends(t, "comparisons", comparisonsSrc, "True False False True\nTrue False\nTrue False True\nFalse True True True\nTrue False True True\nTrue False True\nTrue False\nTrue False True True False True\nTrue False True False True False True\nTrue False True True\nFalse True True False False True\n")
+}
+
+const comparisonsSrc = `type P = Pair(a: int, b: str) | Zed
+type T = Node(kids: list[T]) | Leaf
+
+entity Box:
+    n: int[0..9]
+
+def main() -> int:
+    xs = [1, 2, 3]
+    ys = [1, 2, 3]
+    print(xs == ys, xs != ys, xs == [1, 2], xs == xs)
+    print([[1], [2, 3]] == [[1], [2, 3]], [[1], [2, 3]] == [[1], [2, 4]])
+    m1: map[str, int] = {"a": 1, "b": 2}
+    m2: map[str, int] = {"b": 2, "a": 1}
+    m3: map[str, int] = {"a": 1}
+    print(m1 == m2, m1 == m3, m1 != m3)
+    b1 = Box(n=1)
+    b2 = Box(n=1)
+    b3 = b1
+    print(b1 == b2, b1 == b1, b3 == b1, b1 != b2)
+    print(Pair(1, "x") == Pair(1, "x"), Pair(1, "x") == Pair(1, "y"), Zed == Zed, Zed != Pair(1, "x"))
+    print(Some([1]) == Some([1]), Some([b1]) == Some([b2]), Some([b1]) == Some([b3]))
+    ks = [Leaf]
+    ks[0] = Node(ks)
+    js = [Leaf]
+    js[0] = Node(js)
+    print(ks == js, ks == [Leaf])
+    print("a" < "b", "b" < "a", "ab" <= "ab", "abc" > "ab", "B" >= "a", "" < "a")
+    print(2 in xs, 5 in xs, "a" in m1, "z" in m1, "bc" in "abcd", "cb" in "abcd", "" in "")
+    print([1] in [[2], [1]], b2 in [b1], b3 in [b1], Zed in [Pair(1, "x"), Zed])
+    t = True
+    f = False
+    print(t and f, t or f, f implies t, t implies f, not t, t and t)
+    return 0
+`
+
 // Both backends write a value the same way, with map entries and entity
 // fields in the order of their keys, and have the same pipeline stages.
 func TestE2EPrintedValuesParity(t *testing.T) {

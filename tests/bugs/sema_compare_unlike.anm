@@ -1,0 +1,7 @@
+# A list is never equal to an integer; the backends did not agree on `<`
+# between a string and an integer either.
+def main() -> int:
+    xs = [1, 2]
+    if xs == 5:
+        print("equal")
+    return 0

@@ -1,0 +1,11 @@
+# A list was never equal to anything at run time, itself included, while
+# the contract kernel took `xs == xs` for true: the division was reached.
+# The kernel now says nothing about the equality of two lists.
+def f(xs: list[int]) -> int:
+    if xs == xs:
+        return 1
+    return 10 / 0
+
+def main() -> int:
+    print(f([1]))
+    return 0

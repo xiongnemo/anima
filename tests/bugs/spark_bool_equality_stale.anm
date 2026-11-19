@@ -1,0 +1,13 @@
+# The kernel read `d == c` as an equality of two integers that the
+# assignment to d never touched, and took the division for unreachable.
+def f(b: bool, c: bool) -> int:
+    d = b
+    if d == c:
+        d = not d
+        if d != c:
+            return 10 / 0
+    return 0
+
+def main() -> int:
+    print(f(True, True))
+    return 0

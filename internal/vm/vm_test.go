@@ -242,3 +242,46 @@ func TestValueStringIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Lists, maps and variants are equal by what they hold, an entity is equal
+// to itself only, and a value that holds itself is compared without looping.
+func TestValueEqualsByContent(t *testing.T) {
+	list := func(xs ...Value) Value { return VList(xs) }
+	ent := func() Value {
+		return Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: "Box", Fields: map[string]Value{"n": VInt(1)}}}
+	}
+	e1, e2 := ent(), ent()
+	cyclic := func() Value {
+		l := list(VInt(0))
+		(*l.List)[0] = Value{Kind: ValVariant, Variant: &VariantValue{Name: "Node", Fields: []Value{l}}}
+		return l
+	}
+	cases := []struct {
+		name string
+		a, b Value
+		want bool
+	}{
+		{"lists", list(VInt(1), VInt(2)), list(VInt(1), VInt(2)), true},
+		{"lists of other lengths", list(VInt(1)), list(VInt(1), VInt(2)), false},
+		{"empty lists", VList(nil), list(), true},
+		{"nested lists", list(list(VInt(1))), list(list(VInt(2))), false},
+		{"maps", VMap(map[string]Value{"a": VInt(1)}), VMap(map[string]Value{"a": VInt(1)}), true},
+		{"maps with other keys", VMap(map[string]Value{"a": VInt(1)}), VMap(map[string]Value{"b": VInt(1)}), false},
+		{"variants", VSome(list(VInt(1))), VSome(list(VInt(1))), true},
+		{"an entity and itself", e1, e1, true},
+		{"two entities with the same fields", e1, e2, false},
+		{"lists of the same entity", list(e1), list(e1), true},
+		{"lists of two entities", list(e1), list(e2), false},
+		{"an int and a bool", VInt(1), VBool(true), false},
+		{"values that hold themselves", cyclic(), cyclic(), true},
+		{"a value that holds itself and one that does not", cyclic(), list(VInt(0)), false},
+	}
+	for _, c := range cases {
+		if got := c.a.Equals(c.b); got != c.want {
+			t.Errorf("%s: %v == %v is %v, want %v", c.name, c.a.Kind, c.b.Kind, got, c.want)
+		}
+		if got := c.b.Equals(c.a); got != c.want {
+			t.Errorf("%s (swapped): got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
