@@ -1381,6 +1381,7 @@ def g(xs: list[int], c: int[0..3]) -> int:
 		"integer reads itself":           "    k = n\n    k = k + 1\n    return 10 / k",
 		"pipeline keeps the length":      "    ys = xs |> map(x => x + 1)\n    if len(xs) > 2:\n        return ys[2]\n    return 0",
 		"field set after a call":         "    s = make(n)\n    s.n = 4\n    return 10 / s.n",
+		"second name for a list":         "    ys = xs\n    if len(xs) > 2:\n        return ys[2]\n    return 0",
 		"same unknown length read twice": "    ys = one()\n    if len(ys) > 0:\n        return 10 / len(ys)\n    return 0",
 	}
 	for name, body := range precise {

@@ -999,6 +999,9 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			if ll, ok := rhs.(*ast.ListLit); ok {
 				lt := smt.Const(int64(len(ll.Elems)))
 				env.listLens[name] = lt
+			} else if id, ok := rhs.(*ast.Ident); ok {
+				// A list never changes its length, so a second name for it has the same one.
+				env.listLens[name] = env.lenOf(id.Name)
 			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
