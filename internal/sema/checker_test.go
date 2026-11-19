@@ -318,6 +318,30 @@ def f(mut rows: list[Row]) -> int:
 // keeps the type of its lists, maps and variants.
 func TestSemaElementRanges(t *testing.T) {
 	rejected := map[string]string{
+		"lambda parameter given to a bounded list": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    ys: list[int] = [0]
+    h = (v) => first(v)
+    print(h(ys))
+    return 0
+`,
+		"list of unknown elements": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    g = (v) => v - 1
+    ys = [1, 2] |> map(g)
+    print(first(ys))
+    return 0
+`,
 		"r11/a3": `
 def f(ys: list[int[1..9]]) -> int:
     if len(ys) > 0:
@@ -417,6 +441,21 @@ def main() -> int:
 		}
 	}
 	accepted := map[string]string{
+		"empty values": `
+def first(xs: list[int[1..9]]) -> int:
+    if len(xs) > 0:
+        return 10 / xs[0]
+    return 0
+
+def main() -> int:
+    es: list[int[1..9]] = []
+    print(first([]))
+    print(first(es))
+    o: Option[int[1..9]] = None
+    r: Result[int[1..9], str] = Err("x")
+    m: map[str, int[1..9]] = {}
+    return 0
+`,
 		"r11b/p1": `
 def main() -> int:
     xs: list[int[1..9]] = [5, 6]

@@ -119,6 +119,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_with_field_type.anm", "expects list[int[1..9]], got list[int]"},
 		{"../tests/bugs/spark_fold_not_a_sum.anm", "div_nonzero"},
 		{"../tests/bugs/spark_timeout_unbounded.anm", "timeout_bounds"},
+		{"../tests/bugs/sema_closure_argument_element_range.anm", "expects list[int[1..9]], got unknown"},
 		{"../tests/bugs/sema_variant_fields_out_of_order.anm", "the fields of a variant are given in order"},
 		{"../tests/bugs/spark_keyword_literal_range.anm", "list_elem_bounds"},
 		{"../tests/bugs/sema_piped_list_element_range.anm", "expects list[int[1..9]], got list[int]"},

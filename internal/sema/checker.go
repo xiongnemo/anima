@@ -2354,6 +2354,9 @@ func isAssignable(expected, actual Type) bool {
 func sameElemRange(expected, actual Type) bool {
 	e, ok := expected.(*IntType)
 	a, ok2 := actual.(*IntType)
+	if _, unknown := actual.(UnknownType); unknown && ok && e.IsBounded {
+		return false
+	}
 	if !ok || !ok2 {
 		return true
 	}
@@ -2369,6 +2372,9 @@ func sameElemRange(expected, actual Type) bool {
 func withinRange(expected, actual Type) bool {
 	e, ok := expected.(*IntType)
 	a, ok2 := actual.(*IntType)
+	if _, unknown := actual.(UnknownType); unknown && ok && e.IsBounded {
+		return false
+	}
 	if !ok || !ok2 || !e.IsBounded {
 		return true
 	}
@@ -2479,6 +2485,11 @@ func keepsType(t Type) bool {
 func (c *checker) assignable(expected, actual Type, expr ast.Expr) bool {
 	if expected == nil || actual == nil {
 		return true
+	}
+	// A value of unknown type (a lambda parameter) carries no element
+	// range for the kernel to rely on.
+	if _, unknown := actual.(UnknownType); unknown && keepsType(expected) && hasBoundedInt(expected) {
+		return false
 	}
 	switch lit := expr.(type) {
 	case *ast.ListLit:
