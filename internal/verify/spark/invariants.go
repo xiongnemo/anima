@@ -354,6 +354,10 @@ func mayHoldEntityIn(t sema.Type, depth int) bool {
 		// through one name is seen through every other.
 		return true
 	case *sema.ADTType:
+		if len(x.TypeArgs) < len(x.TypeParams) {
+			// A bare `Option`: what it carries is not known.
+			return true
+		}
 		for _, a := range x.TypeArgs {
 			if mayHoldEntityIn(a, depth+1) {
 				return true
