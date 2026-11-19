@@ -1418,3 +1418,64 @@ def g(xs: list[int]) -> int:
 		t.Errorf("a length is never negative, failed VCs: %v", failed)
 	}
 }
+
+const invariantPrelude = `
+entity A:
+    x: int[0..10]
+    y: int[0..10]
+    invariant: x + y <= 10
+
+entity Box:
+    inner: A
+    k: int[0..9]
+
+def use(a: A) -> int:
+    return 100 / (11 - a.x - a.y)
+
+def fresh() -> A:
+    return A(x=1, y=1)
+
+def open_box(bx: Box) -> int:
+    return use(bx.inner)
+`
+
+// An entity may break its invariant between two field updates, but not at
+// the point where it is handed to a call, returned, or put into another value.
+func TestSPARKEntityInvariantWhereAnEntityIsHandedOn(t *testing.T) {
+	body := func(b string) string {
+		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n" + b + "\n"
+	}
+	broken := "    b = A(x=5, y=5)\n    b.x = 6\n"
+	rejected := map[string]string{
+		"call argument":         body(broken + "    return use(b)"),
+		"list element":          body(broken + "    ys = [b]\n    return 0"),
+		"variant payload":       body(broken + "    p = Some(b)\n    return 0"),
+		"field of an entity":    body(broken + "    bx = Box(inner=b, k=1)\n    return 0"),
+		"copy with a field":     body("    b = A(x=5, y=5)\n    return use(b with {x: 6})"),
+		"field of an element":   body("    rs = [A(x=5, y=5)]\n    rs[0].x = 6\n    return 0"),
+		"returned":              invariantPrelude + "\ndef g() -> A:\n" + broken + "    return b\n",
+		"entity inside a field": invariantPrelude + "\ndef g() -> int:\n    bx = Box(inner=A(x=5, y=5), k=1)\n    bx.inner.x = 6\n    return open_box(bx)\n",
+	}
+	for name, src := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if !strings.Contains(failed, "_invariant_1") || !strings.Contains(failed, "entity_") {
+			t.Errorf("%s: expected a failed entity invariant, failed VCs:\n%s", name, failed)
+		}
+	}
+	accepted := map[string]string{
+		"parameter":                "    return use(a)",
+		"two-step update":          "    b = A(x=5, y=5)\n    b.x = 0\n    b.y = 10\n    return use(b)",
+		"restored before the call": broken + "    b.y = 4\n    return use(b)",
+		"second name":              "    b = A(x=5, y=5)\n    c = b\n    return use(c)",
+		"copy with a field":        "    b = A(x=5, y=5)\n    c = b with {x: 2}\n    return use(c)",
+		"loop element":             "    t: int = 0\n    for r in rows:\n        t = use(r)\n    return t",
+		"indexed element":          "    if len(rows) > 0:\n        return use(rows[0])\n    return 0",
+		"pattern payload":          "    match o:\n        Some(v) -> return use(v)\n        None -> return 0",
+		"result of a call":         "    return use(fresh())",
+	}
+	for name, b := range accepted {
+		if failed := failedVCs(verifySrc(t, body(b))); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
