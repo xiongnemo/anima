@@ -206,6 +206,12 @@ func (e *symEnv) rename(from, to string) {
 			e.listElems[nk] = iv
 		}
 	}
+	for k, si := range e.sumInfos {
+		if nk, ok := move(k); ok {
+			delete(e.sumInfos, k)
+			e.sumInfos[nk] = si
+		}
+	}
 }
 
 func (e *symEnv) assume(b smt.BoolExpr) {
@@ -883,7 +889,45 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	return false
 }
 
+// assignTarget stands for the assigned variable while the new value is
+// worked out, so that the right-hand side still reads the old one.
+const assignTarget = "\x00assigned"
+
+// assignSymbolic makes name hold the value of rhs. Nothing known about the
+// old value survives: what the kernel cannot work out about the new one is
+// an arbitrary value of its type.
 func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
+	v.assignValue(assignTarget, rhs, env, scope, span)
+	env.unbind(name)
+	ty := v.info.ExprTypes[rhs]
+	switch ty.(type) {
+	case *sema.EntityType, *sema.ListType:
+		// A constructor has just proved the invariants; any other entity
+		// value may be in the middle of an update.
+		saved := v.noInvariants
+		v.noInvariants = !v.isConstructorCall(rhs)
+		v.bindFresh(env, name, ty)
+		v.noInvariants = saved
+	}
+	env.rename(assignTarget, name)
+	_, isInt := env.intTerms[name]
+	_, isBool := env.boolTerms[name]
+	if _, isList := env.listLens[name]; !isInt && !isBool && !isList {
+		v.bindFresh(env, name, ty)
+	}
+}
+
+// isConstructorCall reports whether e builds a new entity.
+func (v *verifier) isConstructorCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Ident)
+	return ok && v.info.Entities[id.Name] != nil
+}
+
+func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
 	if me, ok := rhs.(*ast.MatchExpr); ok {
 		v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, span)
 	}
@@ -918,11 +962,15 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 			env.boolTerms[name] = v.evalBool(rhs, env, scope)
 			return
 		case *sema.EntityType:
-			if ce, ok := rhs.(*ast.CallExpr); ok {
-				for _, arg := range ce.Args {
-					if arg.Name != "" {
+			if ce, ok := rhs.(*ast.CallExpr); ok && v.isConstructorCall(rhs) {
+				for i, arg := range ce.Args {
+					field := arg.Name
+					if field == "" && i < len(rt.Fields) {
+						field = rt.Fields[i].Name
+					}
+					if field != "" {
 						if t := v.tryEvalInt(arg.Value, env); t != nil {
-							env.intTerms[name+"."+arg.Name] = *t
+							env.intTerms[name+"."+field] = *t
 						}
 					}
 				}
