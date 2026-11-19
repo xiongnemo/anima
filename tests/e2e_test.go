@@ -101,6 +101,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
 		{"../tests/bugs/spark_mut_call_stale_fact.anm", "div_nonzero"},
+		{"../tests/bugs/spark_match_assignment_lost.anm", "div_nonzero"},
+		{"../tests/bugs/spark_reassigned_entity.anm", "div_nonzero"},
 		{"../tests/bugs/spark_requires_in_condition.anm", "call_half_requires_1"},
 		{"../tests/bugs/spark_mut_call_not_alone.anm", "mut_call_alone"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},

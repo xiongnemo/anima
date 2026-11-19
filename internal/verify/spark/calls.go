@@ -337,7 +337,7 @@ func (v *verifier) havocLambdaMutArgs(node any, env *symEnv) {
 
 // stmtExprGroups returns the expressions a statement evaluates itself, not
 // those of nested statements. Each group is evaluated as one unit; the
-// conditions of an if and the guards of a match are units of their own.
+// conditions of an if are units of their own.
 func stmtExprGroups(stmt ast.Stmt) [][]ast.Expr {
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
@@ -355,13 +355,15 @@ func stmtExprGroups(stmt ast.Stmt) [][]ast.Expr {
 		}
 		return groups
 	case *ast.MatchStmt:
-		groups := [][]ast.Expr{{s.Subject}}
+		// The subject is evaluated once and then compared in every arm, so
+		// a guard must not change what it was read from.
+		unit := []ast.Expr{s.Subject}
 		for _, arm := range s.Arms {
 			if arm.Guard != nil {
-				groups = append(groups, []ast.Expr{arm.Guard})
+				unit = append(unit, arm.Guard)
 			}
 		}
-		return groups
+		return [][]ast.Expr{unit}
 	case *ast.ForStmt:
 		return [][]ast.Expr{{s.Iterable}}
 	case *ast.WhileStmt:

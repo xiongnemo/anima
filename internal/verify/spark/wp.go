@@ -206,6 +206,31 @@ func (e *symEnv) rename(from, to string) {
 			e.listElems[nk] = iv
 		}
 	}
+	for k, si := range e.sumInfos {
+		if nk, ok := move(k); ok {
+			delete(e.sumInfos, k)
+			e.sumInfos[nk] = si
+		}
+	}
+}
+
+// freshLen is a length nothing is known about.
+func (e *symEnv) freshLen(of string) smt.LinearTerm {
+	t := smt.Var(e.freshVar("len(" + of + ")"))
+	e.assume(smt.Ge(t, smt.Const(0)))
+	return t
+}
+
+// lenOf is the length of the list, string or byte view held by name. An
+// unknown length gets a symbol of its own, kept until name is assigned
+// again, so that it is never mistaken for the length of an earlier value.
+func (e *symEnv) lenOf(name string) smt.LinearTerm {
+	if t, ok := e.listLens[name]; ok {
+		return t
+	}
+	t := e.freshLen(name)
+	e.listLens[name] = t
+	return t
 }
 
 func (e *symEnv) assume(b smt.BoolExpr) {
@@ -746,106 +771,37 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 
 	case *ast.IfStmt:
 		curEnv := env.clone()
-		allTerm := true
-		type branchOut struct {
-			cond  smt.BoolExpr
-			terms map[string]smt.LinearTerm
-			bools map[string]smt.BoolExpr
-		}
-		var outs []branchOut
-
+		var outs []*symEnv
 		for _, br := range s.Branches {
 			v.checkArith(br.Cond, curEnv, scope)
 			v.evalSideEffects(br.Cond, curEnv, scope)
 			cond := v.evalBool(br.Cond, curEnv, scope)
 			thenEnv := curEnv.clone()
 			thenEnv.assume(cond)
-			term := v.execBlock(br.Body, thenEnv, scope)
-			if !term {
-				allTerm = false
-				outs = append(outs, branchOut{
-					// The whole path through the branch, so what the body
-					// learned (a callee's guarantees, a loop's exit) survives.
-					cond:  thenEnv.pathCond(),
-					terms: thenEnv.intTerms,
-					bools: thenEnv.boolTerms,
-				})
+			if !v.execBlock(br.Body, thenEnv, scope) {
+				outs = append(outs, thenEnv)
 			}
 			curEnv.assume(smt.Not(cond))
 		}
-		if len(s.Else) > 0 {
-			term := v.execBlock(s.Else, curEnv, scope)
-			if !term {
-				allTerm = false
-				outs = append(outs, branchOut{
-					cond:  curEnv.pathCond(),
-					terms: curEnv.intTerms,
-					bools: curEnv.boolTerms,
-				})
-			}
-		} else {
-			allTerm = false
-			outs = append(outs, branchOut{
-				cond:  curEnv.pathCond(),
-				terms: curEnv.intTerms,
-				bools: curEnv.boolTerms,
-			})
+		// curEnv is now the path on which no condition held.
+		if len(s.Else) == 0 || !v.execBlock(s.Else, curEnv, scope) {
+			outs = append(outs, curEnv)
 		}
-		if allTerm {
+		if len(outs) == 0 {
 			return true
 		}
-		if len(outs) == 1 {
-			env.intTerms = outs[0].terms
-			env.boolTerms = outs[0].bools
-			env.pc = []smt.BoolExpr{outs[0].cond}
-		} else if len(outs) > 1 {
-			var branchDisj []smt.BoolExpr
-			allKeys := map[string]bool{}
-			for _, o := range outs {
-				branchDisj = append(branchDisj, o.cond)
-				for k := range o.terms {
-					allKeys[k] = true
-				}
-			}
-			for k := range allKeys {
-				same := true
-				var firstStr string
-				for idx, o := range outs {
-					t, ok := o.terms[k]
-					if !ok {
-						same = false
-						break
-					}
-					if idx == 0 {
-						firstStr = t.String()
-					} else if t.String() != firstStr {
-						same = false
-						break
-					}
-				}
-				if same {
-					env.intTerms[k] = outs[0].terms[k]
-					continue
-				}
-				mv := smt.Var(env.freshVar("phi_" + k))
-				env.intTerms[k] = mv
-				for _, o := range outs {
-					if t, ok := o.terms[k]; ok {
-						env.assume(smt.Implies(o.cond, smt.Eq(mv, t)))
-					}
-				}
-			}
-			env.assume(smt.Or(branchDisj...))
-		}
+		v.joinBranches(env, outs)
 
 	case *ast.MatchStmt:
 		v.checkArith(s.Subject, env, scope)
 		v.evalSideEffects(s.Subject, env, scope)
-		v.verifyMatchExhaustive(s.Subject, extractMatchArmsFromStmt(s.Arms), env, scope, s.Span)
+		arms := extractMatchArmsFromStmt(s.Arms)
+		v.verifyMatchExhaustive(s.Subject, arms, env, scope, s.Span)
 		// A guard may run, and change what it is given as mut, without its arm.
 		for _, arm := range s.Arms {
 			v.havocMutArgs(arm.Guard, env)
 		}
+		var outs []*symEnv
 		for _, arm := range s.Arms {
 			armEnv := env.clone()
 			v.assumePattern(arm.Pattern, s.Subject, armEnv, scope)
@@ -854,8 +810,17 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 				v.evalSideEffects(arm.Guard, armEnv, scope)
 				armEnv.assume(v.evalBool(arm.Guard, armEnv, scope))
 			}
-			v.execBlock(arm.Body, armEnv, scope)
+			if !v.execBlock(arm.Body, armEnv, scope) {
+				outs = append(outs, armEnv)
+			}
 		}
+		if !v.matchIsTotal(s.Subject, arms) {
+			outs = append(outs, env.clone())
+		}
+		if len(outs) == 0 {
+			return true
+		}
+		v.joinBranches(env, outs)
 
 	case *ast.WhileStmt:
 		// 1. Prove invariant holds at entry
@@ -943,7 +908,45 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 	return false
 }
 
+// assignTarget stands for the assigned variable while the new value is
+// worked out, so that the right-hand side still reads the old one.
+const assignTarget = "\x00assigned"
+
+// assignSymbolic makes name hold the value of rhs. Nothing known about the
+// old value survives: what the kernel cannot work out about the new one is
+// an arbitrary value of its type.
 func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
+	v.assignValue(assignTarget, rhs, env, scope, span)
+	env.unbind(name)
+	ty := v.info.ExprTypes[rhs]
+	switch ty.(type) {
+	case *sema.EntityType, *sema.ListType:
+		// A constructor has just proved the invariants; any other entity
+		// value may be in the middle of an update.
+		saved := v.noInvariants
+		v.noInvariants = !v.isConstructorCall(rhs)
+		v.bindFresh(env, name, ty)
+		v.noInvariants = saved
+	}
+	env.rename(assignTarget, name)
+	_, isInt := env.intTerms[name]
+	_, isBool := env.boolTerms[name]
+	if _, isList := env.listLens[name]; !isInt && !isBool && !isList {
+		v.bindFresh(env, name, ty)
+	}
+}
+
+// isConstructorCall reports whether e builds a new entity.
+func (v *verifier) isConstructorCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Ident)
+	return ok && v.info.Entities[id.Name] != nil
+}
+
+func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope string, span ast.Span) {
 	if me, ok := rhs.(*ast.MatchExpr); ok {
 		v.verifyMatchExhaustive(me.Subject, extractMatchArmsFromExpr(me.Arms), env, scope, span)
 	}
@@ -978,11 +981,15 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 			env.boolTerms[name] = v.evalBool(rhs, env, scope)
 			return
 		case *sema.EntityType:
-			if ce, ok := rhs.(*ast.CallExpr); ok {
-				for _, arg := range ce.Args {
-					if arg.Name != "" {
+			if ce, ok := rhs.(*ast.CallExpr); ok && v.isConstructorCall(rhs) {
+				for i, arg := range ce.Args {
+					field := arg.Name
+					if field == "" && i < len(rt.Fields) {
+						field = rt.Fields[i].Name
+					}
+					if field != "" {
 						if t := v.tryEvalInt(arg.Value, env); t != nil {
-							env.intTerms[name+"."+arg.Name] = *t
+							env.intTerms[name+"."+field] = *t
 						}
 					}
 				}
@@ -992,6 +999,9 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 			if ll, ok := rhs.(*ast.ListLit); ok {
 				lt := smt.Const(int64(len(ll.Elems)))
 				env.listLens[name] = lt
+			} else if id, ok := rhs.(*ast.Ident); ok {
+				// A list never changes its length, so a second name for it has the same one.
+				env.listLens[name] = env.lenOf(id.Name)
 			}
 		case *sema.HandleType:
 			if rt.Name == "bytes.ByteView" {
@@ -1026,13 +1036,13 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 			break
 		}
 	}
-	baseTermLen := smt.Var("len(" + targetVar + ")")
+	var baseTermLen smt.LinearTerm
 	if id, ok := cur.(*ast.Ident); ok {
-		if lt, exists := env.listLens[id.Name]; exists {
-			baseTermLen = lt
-		}
+		baseTermLen = env.lenOf(id.Name)
 	} else if ll, ok := cur.(*ast.ListLit); ok {
 		baseTermLen = smt.Const(int64(len(ll.Elems)))
+	} else {
+		baseTermLen = env.freshLen("pipe")
 	}
 
 	curLen := baseTermLen
@@ -1283,13 +1293,11 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					}
 					if width > 0 {
 						off := v.evalInt(e.Args[0].Value, env, scope, true)
-						bvLen := smt.Var("len(bytes)")
+						var bvLen smt.LinearTerm
 						if id, ok := fe.Object.(*ast.Ident); ok {
-							if l, exists := env.listLens[id.Name]; exists {
-								bvLen = l
-							} else {
-								bvLen = smt.Var("len(" + id.Name + ")")
-							}
+							bvLen = env.lenOf(id.Name)
+						} else {
+							bvLen = env.freshLen("bytes")
 						}
 						v.prove(scope+".byteview_bounds", scope, e.Span, env,
 							smt.And(smt.Ge(off, smt.Const(0)), smt.Le(off.Add(smt.Const(width)), bvLen)))
@@ -1978,10 +1986,7 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 	case *ast.CallExpr:
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			if argID, ok := e.Args[0].Value.(*ast.Ident); ok {
-				if lt, exists := env.listLens[argID.Name]; exists {
-					return lt
-				}
-				return smt.Var("len(" + argID.Name + ")")
+				return env.lenOf(argID.Name)
 			}
 		}
 	}
@@ -2151,23 +2156,15 @@ func (v *verifier) verifyMatchExhaustive(subj ast.Expr, arms []matchArmDesc, env
 	switch t := subjTy.(type) {
 	case *sema.IntType:
 		st := v.evalInt(subj, env, scope, false)
+		// The subject is known to lie in its range type; a length is not
+		// negative; any other int can be any value.
 		var dom smt.BoolExpr = smt.BoolConst{Val: true}
-		var dParts []smt.BoolExpr
 		if t.IsBounded {
-			dParts = append(dParts, smt.Ge(st, smt.Const(t.Lo)), smt.Le(st, smt.Const(t.Hi)))
-		} else {
-			dParts = append(dParts, smt.Ge(st, smt.Const(0))) // assume >=0 for len() unless negative allowed
-		}
-		// Wait: if subject is len(...) specifically, len >= 0
-		if call, ok := subj.(*ast.CallExpr); ok {
+			dom = smt.And(smt.Ge(st, smt.Const(t.Lo)), smt.Le(st, smt.Const(t.Hi)))
+		} else if call, ok := subj.(*ast.CallExpr); ok {
 			if id, ok := call.Callee.(*ast.Ident); ok && id.Name == "len" {
-				dParts = []smt.BoolExpr{smt.Ge(st, smt.Const(0))}
+				dom = smt.Ge(st, smt.Const(0))
 			}
-		} else if !t.IsBounded {
-			dParts = nil
-		}
-		if len(dParts) > 0 {
-			dom = smt.And(dParts...)
 		}
 
 		var covered []smt.BoolExpr

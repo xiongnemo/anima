@@ -1,0 +1,14 @@
+# An assignment replaces everything known about a variable. After
+# `s = make_zero()` nothing is left of `S(n=5)`, so `10 / s.n` is not proved.
+
+entity S:
+    n: int[0..9]
+
+def make_zero() -> S:
+    return S(n=0)
+
+def main() -> int:
+    s = S(n=5)
+    s = make_zero()
+    print(10 / s.n)
+    return 0

@@ -956,14 +956,15 @@ func TestSPARKMutCallAssumesEnsures(t *testing.T) {
 // the order of its reads and the call never decides a result.
 func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 	rejected := map[string]string{
-		"read beside the call":  "    y = s.n + five(mut s)\n    return 0",
-		"compound assignment":   "    s.n += five(mut s)\n    return 0",
-		"two calls":             "    y = five(mut s) + five(mut s)\n    return 0",
-		"guard before the call": "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
-		"field assignment":      "    s.n = five(mut s)\n    return 0",
-		"read inside a lambda":  "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
-		"condition of an if":    "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
-		"condition of a while":  "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
+		"read beside the call":            "    y = s.n + five(mut s)\n    return 0",
+		"compound assignment":             "    s.n += five(mut s)\n    return 0",
+		"two calls":                       "    y = five(mut s) + five(mut s)\n    return 0",
+		"guard before the call":           "    ok = s.n != 0 and clear(mut s) and 10 / s.n > 1\n    return 0",
+		"field assignment":                "    s.n = five(mut s)\n    return 0",
+		"read inside a lambda":            "    ys = xs |> map(x => s.n + five(mut s))\n    return 0",
+		"guard changes the match subject": "    match s.n:\n        5 if clear(mut s) -> return 1\n        5 -> return 10 / s.n\n        _ -> return 0",
+		"condition of an if":              "    if s.n > 0 and clear(mut s):\n        return 1\n    return 0",
+		"condition of a while":            "    while s.n > 0 and clear(mut s):\n        invariant: s.n >= 0\n        s.n = 0\n    return 0",
 	}
 	for name, body := range rejected {
 		if failed := mutCallVCs(t, body); !strings.Contains(failed, "mut_call_alone") {
@@ -971,12 +972,13 @@ func TestSPARKMutCallIsAloneInItsStatement(t *testing.T) {
 		}
 	}
 	accepted := map[string]string{
-		"statement":               "    y = five(mut s)\n    return 0",
-		"operand":                 "    y = 1 + five(mut s)\n    return 0",
-		"condition":               "    if clear(mut s) and a:\n        return 1\n    return 0",
-		"next statement reads":    "    y = five(mut s)\n    z = s.n + y\n    return 0",
-		"while with invariant":    "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
-		"two different variables": "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
+		"statement":                          "    y = five(mut s)\n    return 0",
+		"operand":                            "    y = 1 + five(mut s)\n    return 0",
+		"condition":                          "    if clear(mut s) and a:\n        return 1\n    return 0",
+		"guard of a match on something else": "    match len(xs):\n        0 if clear(mut s) -> return 1\n        _ -> return 0",
+		"next statement reads":               "    y = five(mut s)\n    z = s.n + y\n    return 0",
+		"while with invariant":               "    i: int = 0\n    while clear(mut s) and i < 3:\n        invariant: s.n >= 0 and i >= 0\n        i += 1\n    return 0",
+		"two different variables":            "    t = S(n=1)\n    y = five(mut s) + five(mut t)\n    return 0",
 	}
 	for name, body := range accepted {
 		if failed := mutCallVCs(t, body); strings.Contains(failed, "mut_call_alone") {
@@ -1214,5 +1216,205 @@ def divide(a: int[0..9], b: int[0..9]) -> int:
 		if tc.wantFailed != "" && !strings.Contains(failed, tc.wantFailed) {
 			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
 		}
+	}
+}
+
+const joinPrelude = `
+entity S:
+    n: int[0..9]
+
+def make(k: int[0..9]) -> S:
+    return S(n=k)
+
+def one() -> list[int]:
+    return [1]
+
+def name_of(k: int[0..9]) -> str:
+    return "a"
+`
+
+// joinVCs verifies body as a function body and returns the VCs not proved.
+func joinVCs(t *testing.T, body string) string {
+	t.Helper()
+	src := joinPrelude + "\ndef f(o: Option[int[1..9]], n: int[0..9], c: bool, xs: list[int[0..9]]) -> int:\n" + body + "\n"
+	return strings.Join(failedVCs(verifySrc(t, src)), "\n")
+}
+
+// What a branch or an arm assigns is the value after the if or the match.
+func TestSPARKStateAfterIfAndMatch(t *testing.T) {
+	stale := map[string]string{
+		"match arms assign": `
+    x = 1
+    match o:
+        Some(v) -> x = 0
+        None -> x = 0
+    return 10 / x`,
+		"one match arm assigns": `
+    x = 5
+    match o:
+        Some(v) -> x = 0
+        None -> x = 7
+    return 10 / x`,
+		"loop inside a match arm": `
+    x = 5
+    match o:
+        Some(v) ->
+            for y in xs:
+                x = 0
+        None -> x = 7
+    return 10 / x`,
+		"match that may run no arm": `
+    t = name_of(n)
+    x = 0
+    match t:
+        "a" -> x = 2
+        "b" -> x = 3
+    return 10 / x`,
+		"boolean assigned in both branches": `
+    safe = False
+    if n == 0:
+        safe = True
+    else:
+        safe = True
+    if safe:
+        return 10 / n
+    return 1`,
+		"entity reassigned in a branch": `
+    s = S(n=3)
+    if c:
+        s = make(0)
+    return 10 / s.n`,
+	}
+	for name, body := range stale {
+		if failed := joinVCs(t, body); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	if failed := joinVCs(t, "    ys = [1, 2, 3]\n    if c:\n        ys = [1]\n    return ys[2]"); !strings.Contains(failed, "index_bounds") {
+		t.Errorf("list reassigned in a branch: expected a failed index_bounds, failed VCs:\n%s", failed)
+	}
+	precise := map[string]string{
+		"every arm assigns a nonzero value": `
+    x = 0
+    match o:
+        Some(v) -> x = 5
+        None -> x = 7
+    return 10 / x`,
+		"arm assigns the bound field": `
+    x = 0
+    match o:
+        Some(v) -> x = v
+        None -> x = 7
+    return 10 / x`,
+		"boolean records the test": `
+    ok = False
+    if n > 0:
+        ok = True
+    if ok:
+        return 10 / n
+    return 0`,
+		"nested if and match": `
+    x = 1
+    if c:
+        match o:
+            Some(v) -> x = 2
+            None -> x = 3
+    else:
+        if n > 3:
+            x = 4
+    return 10 / x`,
+		"match that may run no arm keeps a safe value": `
+    t = name_of(n)
+    x = 1
+    match t:
+        "a" -> x = 2
+        "b" -> x = 3
+    return 10 / x`,
+		"guarded arm with a catch-all": `
+    x = 1
+    match n:
+        k if k > 5 -> x = 2
+        _ -> x = 3
+    return 10 / x`,
+		"every arm returns": `
+    match o:
+        Some(v) -> return 10 / v
+        None -> return 0`,
+	}
+	for name, body := range precise {
+		if failed := joinVCs(t, body); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// An assignment replaces everything known about the variable.
+func TestSPARKAssignmentForgetsTheOldValue(t *testing.T) {
+	stale := map[string]string{
+		"entity from a call":         "    s = S(n=5)\n    s = make(0)\n    return 10 / s.n",
+		"entity from a variable":     "    s = S(n=5)\n    z = S(n=0)\n    s = z\n    return 10 / s.n",
+		"positional constructor":     "    s = S(n=5)\n    s = S(0)\n    return 10 / s.n",
+		"length of an earlier value": "    ys = one()\n    k = len(ys)\n    ys = one()\n    return 10 / (len(ys) - k + 1)",
+	}
+	for name, body := range stale {
+		if failed := joinVCs(t, body); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	if failed := joinVCs(t, "    ys = [1, 2, 3]\n    ys = one()\n    return ys[2]"); !strings.Contains(failed, "index_bounds") {
+		t.Errorf("list from a call: expected a failed index_bounds, failed VCs:\n%s", failed)
+	}
+	loop := `
+def g(xs: list[int], c: int[0..3]) -> int:
+    requires: len(xs) >= 3
+    i: int = 0
+    while i < c:
+        invariant: i >= 0
+        decreases: c - i
+        xs = []
+        i += 1
+    return 10 / len(xs)
+`
+	if failed := strings.Join(failedVCs(verifySrc(t, loop)), "\n"); !strings.Contains(failed, "div_nonzero") {
+		t.Errorf("list parameter reassigned in a loop: expected a failed div_nonzero, failed VCs:\n%s", failed)
+	}
+	precise := map[string]string{
+		"new value reads the old one":    "    s = S(n=3)\n    s = S(n=s.n + 1)\n    return 10 / (s.n - 3)",
+		"integer reads itself":           "    k = n\n    k = k + 1\n    return 10 / k",
+		"pipeline keeps the length":      "    ys = xs |> map(x => x + 1)\n    if len(xs) > 2:\n        return ys[2]\n    return 0",
+		"field set after a call":         "    s = make(n)\n    s.n = 4\n    return 10 / s.n",
+		"second name for a list":         "    ys = xs\n    if len(xs) > 2:\n        return ys[2]\n    return 0",
+		"same unknown length read twice": "    ys = one()\n    if len(ys) > 0:\n        return 10 / len(ys)\n    return 0",
+	}
+	for name, body := range precise {
+		if failed := joinVCs(t, body); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+}
+
+// A match on an int that a call returns must cover the negative values too:
+// nothing says the result is not negative.
+func TestSPARKMatchOnCallResultCoversNegatives(t *testing.T) {
+	src := `
+def neg() -> int:
+    return 0 - 5
+
+def g() -> int:
+    match neg():
+        k if k >= 0 -> return 1
+    return 10 / 0
+`
+	failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+	if !strings.Contains(failed, "match_exhaustive") {
+		t.Errorf("expected a failed match_exhaustive, failed VCs:\n%s", failed)
+	}
+	ok := `
+def g(xs: list[int]) -> int:
+    match len(xs):
+        k if k >= 0 -> return 1
+`
+	if failed := failedVCs(verifySrc(t, ok)); len(failed) != 0 {
+		t.Errorf("a length is never negative, failed VCs: %v", failed)
 	}
 }
