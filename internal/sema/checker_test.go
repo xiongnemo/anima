@@ -252,3 +252,19 @@ def f(mut rows: list[Row]) -> int:
 		}
 	}
 }
+
+// Keys are stored by their printed form, so one map cannot mix key types.
+func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
+	for name, body := range map[string]string{
+		"writes to an empty map": "    m = {}\n    m[1] = 1\n    m[\"1\"] = 2\n",
+		"literal":                "    m = {1: 1, \"1\": 2}\n",
+	} {
+		prog, err := parser.Parse("mixed.anm", "def f() -> int:\n"+body+"    return 0\n")
+		if err != nil {
+			t.Fatalf("%s: parse error: %v", name, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "map key") {
+			t.Errorf("%s: expected a map key error, got %v", name, err)
+		}
+	}
+}

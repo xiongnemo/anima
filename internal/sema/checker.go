@@ -897,6 +897,11 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !isAssignable(mt.Key, ity) || !isMapKeyType(ity) {
 				return fmt.Errorf("%s: map key expects %s, got %s", s.Span, mt.Key, ity)
 			}
+			// The first write to `{}` decides its key type: keys are stored
+			// by their printed form, so 1 and "1" would be the same entry.
+			if mt.Key.Kind() == KindUnknown && ity.Kind() != KindUnknown {
+				mt.Key = ity
+			}
 			if !isAssignable(mt.Val, vty) {
 				return fmt.Errorf("%s: map value expects %s, got %s", s.Span, mt.Val, vty)
 			}
@@ -1248,6 +1253,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			v, err := c.checkExpr(ent.Value, sc)
 			if err != nil {
 				return nil, err
+			}
+			if !isAssignable(kt, k) {
+				return nil, fmt.Errorf("%s: map keys must have one type, got %s and %s", e.Span, kt, k)
 			}
 			kt = k
 			if vt.Kind() == KindUnknown {
