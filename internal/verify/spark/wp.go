@@ -739,6 +739,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.evalSideEffects(s.Index, env, scope)
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
+		v.proveEntityValue(s.Value, env, scope)
 
 	case *ast.CallStmt:
 		if s.Call != nil {
@@ -751,11 +752,23 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 		v.evalSideEffects(s.Object, env, scope)
 		v.checkArith(s.Value, env, scope)
 		v.evalSideEffects(s.Value, env, scope)
+		v.proveEntityValue(s.Value, env, scope)
 		path := ""
-		if objID, ok := s.Object.(*ast.Ident); ok {
-			path = objID.Name + "." + s.Field
+		if obj, ok := mutArgPath(s.Object); ok {
+			path = obj + "." + s.Field
 		}
 		rhsTerm := v.evalInt(s.Value, env, scope, true)
+		// The object has no name (rows[i].x = v): it stays inside its
+		// container, so its invariants must hold with this one field known.
+		if et, ok := v.info.ExprTypes[s.Object].(*sema.EntityType); ok && path == "" && hasInvariants(et, nil) {
+			probe := env.clone()
+			saved := v.noInvariants
+			v.noInvariants = true
+			v.bindFresh(probe, entityProbe, et)
+			v.noInvariants = saved
+			probe.intTerms[entityProbe+"."+s.Field] = rhsTerm
+			v.proveInvariants(et, entityProbe, "element", s.Span, probe, scope, map[*sema.EntityType]bool{})
+		}
 		if objTy, ok := v.info.ExprTypes[s.Object]; ok {
 			if et, ok := objTy.(*sema.EntityType); ok {
 				if ft, ok := et.FieldMap[s.Field]; ok {
@@ -891,6 +904,7 @@ func (v *verifier) execStmt(stmt ast.Stmt, env *symEnv, scope string) bool {
 			}
 			v.checkArith(s.Value, env, scope)
 			v.evalSideEffects(s.Value, env, scope)
+			v.proveEntityValue(s.Value, env, scope)
 			if rTerm := v.tryEvalInt(s.Value, env); rTerm != nil {
 				env.intTerms["result"] = *rTerm
 			}
@@ -921,10 +935,10 @@ func (v *verifier) assignSymbolic(name string, rhs ast.Expr, env *symEnv, scope 
 	ty := v.info.ExprTypes[rhs]
 	switch ty.(type) {
 	case *sema.EntityType, *sema.ListType:
-		// A constructor has just proved the invariants; any other entity
-		// value may be in the middle of an update.
+		// The invariants are assumed for a value whose producer proved
+		// them; another variable's entity may be in the middle of an update.
 		saved := v.noInvariants
-		v.noInvariants = !v.isConstructorCall(rhs)
+		v.noInvariants = !v.entityHolds(rhs)
 		v.bindFresh(env, name, ty)
 		v.noInvariants = saved
 	}
@@ -981,6 +995,25 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 			env.boolTerms[name] = v.evalBool(rhs, env, scope)
 			return
 		case *sema.EntityType:
+			// A second name for an entity, or a copy with some fields
+			// replaced, starts from what is known of the original.
+			src := rhs
+			with, isWith := rhs.(*ast.WithExpr)
+			if isWith {
+				src = with.Base
+			}
+			if from, ok := mutArgPath(src); ok {
+				env.copyEntityFacts(from, name)
+			}
+			if isWith {
+				for _, f := range with.Fields {
+					if t := v.tryEvalInt(f.Value, env); t != nil {
+						env.intTerms[name+"."+f.Name] = *t
+					} else {
+						delete(env.intTerms, name+"."+f.Name)
+					}
+				}
+			}
 			if ce, ok := rhs.(*ast.CallExpr); ok && v.isConstructorCall(rhs) {
 				for i, arg := range ce.Args {
 					field := arg.Name
@@ -1179,6 +1212,13 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				}
 			}
 		}()
+		// An entity handed to a function of the program, or put into a new
+		// entity or variant value, satisfies its invariants.
+		if id, ok := e.Callee.(*ast.Ident); ok && (v.info.Funcs[id.Name] != nil || v.info.Entities[id.Name] != nil || v.isVariantConstructor(e)) {
+			for _, a := range e.Args {
+				v.proveEntityValue(a.Value, env, scope)
+			}
+		}
 		// Check entity constructor bounds & invariants
 		if id, ok := e.Callee.(*ast.Ident); ok {
 			if et, isEnt := v.info.Entities[id.Name]; isEnt {
@@ -1317,6 +1357,9 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			v.evalSideEffects(a.Value, env, scope)
 		}
 		for _, a := range e.Args {
+			v.proveEntityValue(a.Value, env, scope)
+		}
+		for _, a := range e.Args {
 			if a.Mut {
 				v.havocMutArg(a, env, v.info.Workflows[e.Name] != nil)
 			}
@@ -1357,11 +1400,13 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 	case *ast.ListLit:
 		for _, el := range e.Elems {
 			v.evalSideEffects(el, env, scope)
+			v.proveEntityValue(el, env, scope)
 		}
 	case *ast.MapLit:
 		for _, en := range e.Entries {
 			v.evalSideEffects(en.Key, env, scope)
 			v.evalSideEffects(en.Value, env, scope)
+			v.proveEntityValue(en.Value, env, scope)
 		}
 	case *ast.FStrExpr:
 		for _, part := range e.Parts {
