@@ -678,7 +678,7 @@ func (v *verifier) checkFunctionExitContracts(env *symEnv, scope string, span as
 			rt := v.evalInt(retVal, env, scope, true)
 			v.checkIntRange(rt, retVal, env, it, scope+".return_range", scope, span)
 		}
-		if adt, ok := v.curRetType.(*sema.ADTType); ok {
+		if adt, ok := v.curRetType.(*sema.ADTType); ok && !v.makesVariant(retVal) {
 			v.checkADTConstructionRange(retVal, env, adt, scope, span)
 		}
 	}
@@ -1373,6 +1373,16 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		v.evalSideEffects(e.Callee, env, scope)
 		for _, a := range e.Args {
 			v.evalSideEffects(a.Value, env, scope)
+		}
+		// A variant is made with its fields in their declared ranges.
+		if v.isVariantConstructor(e) {
+			ty := v.info.LiteralTargets[e]
+			if ty == nil {
+				ty = v.info.ExprTypes[e]
+			}
+			if adt, ok := ty.(*sema.ADTType); ok {
+				v.checkADTConstructionRange(e, env, adt, scope, e.Span)
+			}
 		}
 		// A callee the kernel has no contract for may do anything to its
 		// mut arguments.
@@ -2132,6 +2142,13 @@ func (v *verifier) checkIntRange(term smt.LinearTerm, expr ast.Expr, env *symEnv
 	v.prove(vcName, scope, span, env, smt.And(smt.Ge(term, smt.Const(target.Lo)), smt.Le(term, smt.Const(target.Hi))))
 }
 
+// makesVariant reports whether e makes a variant, whose fields
+// evalSideEffects proves in range.
+func (v *verifier) makesVariant(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	return ok && v.isVariantConstructor(call)
+}
+
 func (v *verifier) checkADTConstructionRange(expr ast.Expr, env *symEnv, adt *sema.ADTType, scope string, span ast.Span) {
 	ce, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -2156,6 +2173,14 @@ func (v *verifier) checkADTConstructionRange(expr ast.Expr, env *symEnv, adt *se
 			}
 		} else if i < len(vi.Fields) {
 			fty = vi.Fields[i].Type
+		}
+		// Some(x) given to an Option[int[1..9]]: the field is the type argument.
+		if tv, ok := fty.(sema.TypeVar); ok {
+			for j, tp := range adt.TypeParams {
+				if tp == tv.Name && j < len(adt.TypeArgs) {
+					fty = adt.TypeArgs[j]
+				}
+			}
 		}
 		if it, ok := fty.(*sema.IntType); ok && it.IsBounded {
 			t := v.evalInt(arg.Value, env, scope, true)
