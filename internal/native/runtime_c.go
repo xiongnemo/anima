@@ -232,6 +232,14 @@ static AnimaVal v_map_get(AnimaVal mv, const char *k) {
 static AnimaVal v_index_get(AnimaVal c, AnimaVal i) {
     if (c.kind == VAL_LIST && c.u.list && i.u.i >= 0 && (size_t)i.u.i < c.u.list->len) return c.u.list->items[i.u.i];
     if (c.kind == VAL_MAP) { char *k = v_to_cstr(i); AnimaVal r = v_map_get(c, k); free(k); return r; }
+    if (c.kind == VAL_STR && c.u.s && i.u.i >= 0 && (size_t)i.u.i < strlen(c.u.s)) {
+        // One byte of the string as a character, as the VM gives it.
+        unsigned char b = (unsigned char)c.u.s[i.u.i];
+        char out[3] = {0};
+        if (b < 0x80) { out[0] = (char)b; }
+        else { out[0] = (char)(0xC0 | (b >> 6)); out[1] = (char)(0x80 | (b & 0x3F)); }
+        return v_str(out);
+    }
     return v_none();
 }
 

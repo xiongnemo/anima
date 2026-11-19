@@ -490,7 +490,7 @@ def main() -> int:
 // fields in the order of their keys, and have the same pipeline stages.
 func TestE2EPrintedValuesParity(t *testing.T) {
 	runOnBothBackends(t, "printed_values", printedValuesSrc, "[1, 2, 3]\n[True, False]\n[a, b]\n{\"a\": 1, \"b\": 2}\nSome(1)\nNone\nOk(x)\nCircle(2)\nDot\nBox(n=1, tag=t)\n[Some(1), None]\n[[1], [2, 3]]\n[1, 2, 3] {\"a\": 1, \"b\": 2} Box(n=1, tag=t)\n[1, 2, 3]\nTrue\nFalse\nSome(2)\n[2, 3]\n[2, 4, 6]\n[1, 2]\n[3]\n6\n3\n[1, 1, 2, 2, 3, 3]\n3 2\n1 a True\n-5\n\n")
-	runOnBothBackends(t, "printed_edges", printedEdgesSrc, "\nPair(1, x) Zed\n[] [1, 2, 3] []\n[1, 2, 3] [] [1, 2, 3]\nNone False True\n[] False True None\n{}\n{\"Z\": 3, \"a\\nb\": 2, \"b\\\"q\": 1}\n{\"10\": x, \"9\": y}\nOuter(a=[1], z=Inner(k=1))\nOuter(a=[1], z=Inner(k=1)) Pair(2, y)\nTrue [2, 3]\n")
+	runOnBothBackends(t, "printed_edges", printedEdgesSrc, "\nPair(1, x) Zed\n[] [1, 2, 3] []\n[1, 2, 3] [] [1, 2, 3]\nNone False True\n[] False True None\n{}\n{\"Z\": 3, \"a\\nb\": 2, \"b\\\"q\": 1}\n{\"10\": x, \"9\": y}\nOuter(a=[1], z=Inner(k=1))\nOuter(a=[1], z=Inner(k=1)) Pair(2, y)\nTrue [2, 3]\nh o\n")
 }
 
 const printedValuesSrc = `type Shape = Circle(r: int) | Dot
@@ -566,6 +566,8 @@ def main() -> int:
     print(f"{o} {p}")
     g = (v) => v > 1
     print(xs |> any(g), xs |> filter(g))
+    s = "hello"
+    print(s[0], s[4])
     return 0
 `
 
