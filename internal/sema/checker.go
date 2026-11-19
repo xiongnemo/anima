@@ -1236,12 +1236,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			if elem.Kind() == KindUnknown {
-				elem = et
-			} else if et.Kind() != KindUnknown && !elem.Equals(et) {
-				// Allow Ok/Err variants of Result or Option unification
-				elem = unifyTypes(elem, et)
-			}
+			// The element type covers every element: the ranges of ints
+			// are joined, as are the arguments of Result and Option.
+			elem = unifyTypes(elem, et)
 		}
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
@@ -2269,6 +2266,31 @@ func unifyTypes(a, b Type) Type {
 	}
 	if b == nil || b.Kind() == KindUnknown {
 		return a
+	}
+	switch x := a.(type) {
+	case *IntType:
+		// The smallest range that holds the values of both.
+		y, ok := b.(*IntType)
+		if !ok {
+			return a
+		}
+		if !x.IsBounded || !y.IsBounded {
+			return NewUnboundedInt()
+		}
+		if x.Lo == y.Lo && x.Hi == y.Hi {
+			return a
+		}
+		return NewIntRange(min(x.Lo, y.Lo), max(x.Hi, y.Hi), "")
+	case *ListType:
+		if y, ok := b.(*ListType); ok {
+			cp := *x
+			cp.Elem = unifyTypes(x.Elem, y.Elem)
+			return &cp
+		}
+	case *MapType:
+		if y, ok := b.(*MapType); ok {
+			return &MapType{Key: unifyTypes(x.Key, y.Key), Val: unifyTypes(x.Val, y.Val)}
+		}
 	}
 	if aa, ok := a.(*ADTType); ok {
 		if ba, ok := b.(*ADTType); ok && aa.Name == ba.Name {
