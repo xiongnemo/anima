@@ -528,3 +528,29 @@ func (v *verifier) proveElementWrite(obj ast.Expr, field string, value ast.Expr,
 	}
 	v.proveInvariants(et, entityProbe, "element", span, probe, scope, map[*sema.EntityType]bool{})
 }
+
+// proveMutInvariants proves, where the function gives its mut entities back
+// to its caller, their invariants and those of the entities in their
+// fields: the caller assumes all of them.
+func (v *verifier) proveMutInvariants(env *symEnv, scope string, span ast.Span) {
+	var walk func(et *sema.EntityType, path string, seen map[*sema.EntityType]bool)
+	walk = func(et *sema.EntityType, path string, seen map[*sema.EntityType]bool) {
+		if seen[et] {
+			return
+		}
+		seen[et] = true
+		for _, inv := range et.Invariants {
+			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, path), scope, span, env,
+				v.evalBoolWithPrefix(inv, env, path+"."))
+		}
+		for _, f := range et.Fields {
+			if ft, ok := f.Type.(*sema.EntityType); ok {
+				walk(ft, path+"."+f.Name, seen)
+			}
+		}
+		delete(seen, et)
+	}
+	for _, me := range v.curMutEnts {
+		walk(me.ent, me.varName, map[*sema.EntityType]bool{})
+	}
+}

@@ -133,12 +133,7 @@ func (v *verifier) checkParamsNotRebound(params []sema.FuncParamInfo, body any, 
 // current function: the invariants of its mut entities and the ensures
 // clauses that do not speak about the result.
 func (v *verifier) checkTryExit(env *symEnv, scope string, span ast.Span) {
-	for _, me := range v.curMutEnts {
-		for _, inv := range me.ent.Invariants {
-			b := v.evalBoolWithPrefix(inv, env, me.varName+".")
-			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, me.varName), scope, span, env, b)
-		}
-	}
+	v.proveMutInvariants(env, scope, span)
 	for idx, ens := range v.curEnsures {
 		if mentionsOutside(reflect.ValueOf(ens), "result", nil) {
 			continue

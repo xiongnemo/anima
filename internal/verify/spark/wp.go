@@ -677,12 +677,7 @@ func (v *verifier) checkFunctionExitContracts(env *symEnv, scope string, span as
 		}
 	}
 	// 2. Mutable entity invariants preserved
-	for _, me := range v.curMutEnts {
-		for _, inv := range me.ent.Invariants {
-			b := v.evalBoolWithPrefix(inv, env, me.varName+".")
-			v.prove(fmt.Sprintf("%s.mut_%s_invariant", v.curFuncName, me.varName), scope, span, env, b)
-		}
-	}
+	v.proveMutInvariants(env, scope, span)
 	// 3. Ensures postconditions
 	for idx, ens := range v.curEnsures {
 		b := v.evalBool(ens, env, scope)
