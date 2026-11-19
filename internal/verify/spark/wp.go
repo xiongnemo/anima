@@ -1195,12 +1195,19 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				// Arguments are evaluated in the caller's env before it is cloned, so the call env
 				// inherits their assumptions and never reuses one of their fresh names.
 				var binds []func(*symEnv)
-				for i, a := range e.Args {
-					if i >= len(fi.Type.Params) {
-						break
-					}
-					p := fi.Type.Params[i]
+				argParam, twice := argParams(fi.Type.Params, e.Args)
+				if twice != "" {
+					v.record(fmt.Sprintf("%s.call_%s_args", scope, id.Name), scope, e.Span, "each parameter is given once", VCFailed,
+						fmt.Sprintf("parameter %q of %s is given more than once", twice, id.Name), nil)
+				}
+				for _, p := range fi.Type.Params {
 					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
+				}
+				for i, a := range e.Args {
+					if argParam[i] < 0 {
+						continue
+					}
+					p := fi.Type.Params[argParam[i]]
 					switch pt := p.Type.(type) {
 					case *sema.IntType:
 						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
@@ -1257,7 +1264,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					recDec := v.evalInt(v.curDecExpr, callEnv, scope, false)
 					v.prove(scope+".rec_decreases_strict", scope, e.Span, callEnv, smt.Lt(recDec, v.curDecTerm))
 				}
-				v.applyCallEffects(fi, e.Args, env, callEnv, scope)
+				v.applyCallEffects(fi, e.Args, argParam, env, callEnv, scope)
 				modelled = true
 			}
 		}

@@ -205,6 +205,37 @@ func (v *verifier) pipedCall(pe *ast.PipeExpr) *ast.CallExpr {
 	return nil
 }
 
+// argParams maps each argument of a call to the index of the parameter it
+// is bound to, or -1: a keyword argument by its name, the others in order.
+// twice names a parameter that more than one argument is bound to.
+func argParams(params []sema.FuncParamInfo, args []ast.CallArg) (idx []int, twice string) {
+	taken := map[int]bool{}
+	next := 0
+	for _, a := range args {
+		pi := -1
+		if a.Name == "" {
+			if next < len(params) {
+				pi = next
+			}
+			next++
+		} else {
+			for i, p := range params {
+				if p.Name == a.Name {
+					pi = i
+				}
+			}
+		}
+		if pi >= 0 && taken[pi] && twice == "" {
+			twice = params[pi].Name
+		}
+		if pi >= 0 {
+			taken[pi] = true
+		}
+		idx = append(idx, pi)
+	}
+	return idx, twice
+}
+
 // callArgs returns the arguments of a call or run_workflow expression.
 func callArgs(e ast.Expr) ([]ast.CallArg, bool) {
 	switch c := e.(type) {
@@ -413,7 +444,7 @@ func mentionsOutside(n reflect.Value, root string, owner ast.Expr) bool {
 // every mut argument is rebound to an arbitrary value of its type, and the
 // ensures clauses of fi that only speak about its parameters are assumed.
 // callEnv is the caller's state before the call with the parameters bound.
-func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, callEnv *symEnv, scope string) {
+func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, argParam []int, env, callEnv *symEnv, scope string) {
 	changed := false
 	for _, a := range args {
 		if a.Mut {
@@ -429,6 +460,12 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 	// clauses about it are not used.
 	post := env.clone()
 	rebound := reboundNames(fi.Decl.Body)
+	argOf := map[int]ast.CallArg{}
+	for i, pi := range argParam {
+		if pi >= 0 {
+			argOf[pi] = args[i]
+		}
+	}
 	params := map[string]bool{}
 	ints := map[string]smt.LinearTerm{}
 	bools := map[string]smt.BoolExpr{}
@@ -440,8 +477,8 @@ func (v *verifier) applyCallEffects(fi *sema.FuncInfo, args []ast.CallArg, env, 
 			continue
 		}
 		from, src := p.Name, callEnv
-		if i < len(args) && args[i].Mut {
-			path, ok := mutArgPath(args[i].Value)
+		if a, given := argOf[i]; given && a.Mut {
+			path, ok := mutArgPath(a.Value)
 			if !ok {
 				continue
 			}

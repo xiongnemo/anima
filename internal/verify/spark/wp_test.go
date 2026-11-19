@@ -1185,3 +1185,29 @@ def g(mut s: S) -> int:
 		t.Errorf("expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// A keyword argument is bound to the parameter it names.
+func TestSPARKKeywordArgumentsBindByName(t *testing.T) {
+	prelude := `
+def divide(a: int[0..9], b: int[0..9]) -> int:
+    requires: a != 0
+    return b / a
+`
+	cases := []struct{ name, call, wantFailed string }{
+		{"reordered, safe", "divide(b=0, a=2)", ""},
+		{"reordered, zero divisor", "divide(b=1, a=0)", "call_divide_requires_1"},
+		{"piped and reordered", "2 |> divide(b=0)", ""},
+		{"parameter given twice", "divide(4, a=6)", "call_divide_args"},
+		{"piped value and keyword for the same parameter", "0 |> divide(b=1, a=0)", "call_divide_args"},
+	}
+	for _, tc := range cases {
+		src := prelude + "\ndef g() -> int:\n    y = " + tc.call + "\n    return 0\n"
+		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
+		if tc.wantFailed == "" && failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", tc.name, failed)
+		}
+		if tc.wantFailed != "" && !strings.Contains(failed, tc.wantFailed) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", tc.name, tc.wantFailed, failed)
+		}
+	}
+}
