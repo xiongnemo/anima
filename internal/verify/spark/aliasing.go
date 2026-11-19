@@ -25,8 +25,9 @@ func (v *verifier) holds(env *symEnv, goal smt.BoolExpr) bool {
 
 // forgetEntity keeps of the entity variable name only what its type says:
 // the ranges of its fields. Its invariants are kept too when they are known
-// to hold now and the entity is flat: every write that could have reached
-// it has proved them again (proveSharedEntity, a callee's exit).
+// to hold now and the entity is flat, and so are those of the flat entities
+// in its fields: every write that could have reached one has proved them
+// again (proveSharedEntity, a callee's exit).
 func (v *verifier) forgetEntity(env *symEnv, name string) {
 	et := env.entTypes[name]
 	if et == nil {
@@ -50,10 +51,56 @@ func (v *verifier) forgetEntity(env *symEnv, name string) {
 	for _, inv := range et.Invariants {
 		valid = valid && v.holds(env, v.evalBoolWithPrefix(inv, env, name+"."))
 	}
+	var parts []flatPart
+	if !valid {
+		parts = v.validFlatParts(env, et, name, map[*sema.EntityType]bool{})
+	}
 	saved := v.noInvariants
 	v.noInvariants = !valid
 	v.bindFresh(env, name, et)
 	v.noInvariants = saved
+	for _, part := range parts {
+		for _, inv := range part.et.Invariants {
+			env.assume(v.evalBoolWithPrefix(inv, env, part.path+"."))
+		}
+	}
+}
+
+// flatPart is a flat entity in a field, at any depth, of an entity variable.
+type flatPart struct {
+	path string
+	et   *sema.EntityType
+}
+
+// validFlatParts lists the flat entities inside the entity at path whose
+// invariants are known to hold now. They still hold after a write made some
+// other way, for the same reason as those of a flat variable.
+func (v *verifier) validFlatParts(env *symEnv, et *sema.EntityType, path string, seen map[*sema.EntityType]bool) []flatPart {
+	if seen[et] {
+		return nil
+	}
+	seen[et] = true
+	defer delete(seen, et)
+	var out []flatPart
+	for _, f := range et.Fields {
+		ft, ok := f.Type.(*sema.EntityType)
+		if !ok {
+			continue
+		}
+		sub := path + "." + f.Name
+		if !v.isFlatEntity(ft) {
+			out = append(out, v.validFlatParts(env, ft, sub, seen)...)
+			continue
+		}
+		valid := len(ft.Invariants) > 0
+		for _, inv := range ft.Invariants {
+			valid = valid && v.holds(env, v.evalBoolWithPrefix(inv, env, sub+"."))
+		}
+		if valid {
+			out = append(out, flatPart{sub, ft})
+		}
+	}
+	return out
 }
 
 // forgetAliases is called when the entity obj evaluates to has been written,
