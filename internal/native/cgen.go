@@ -188,6 +188,8 @@ func (g *cgen) generate() error {
 	g.cur = g.bodyOut
 	g.line("int main(int argc, char **argv) {")
 	g.indent++
+	// A send to a peer that has gone is an Err, as on the VM, not a signal.
+	g.line("signal(SIGPIPE, SIG_IGN);")
 	g.line("g_argc = argc; g_argv = argv;")
 	if _, hasMain := g.info.Funcs["main"]; hasMain {
 		g.line("AnimaVal r = __fn_main();")

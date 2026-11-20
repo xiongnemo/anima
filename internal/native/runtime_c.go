@@ -12,6 +12,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -564,10 +565,22 @@ static int64_t anima_len(AnimaVal v) {
     return 0;
 }
 
+// SIGPIPE is ignored (see main), so that a write to a socket whose peer has
+// gone is an Err and not the end of the program. Standard output is the
+// exception, as in Go: when nobody reads it any more the program ends by
+// that signal.
+static void print_line(const char *s) {
+    // A line longer than the buffer of stdout is written by printf itself:
+    // its failure counts as much as that of the flush.
+    if ((printf("%s\n", s) < 0 || fflush(stdout) != 0) && errno == EPIPE) {
+        signal(SIGPIPE, SIG_DFL);
+        raise(SIGPIPE);
+    }
+}
+
 static AnimaVal anima_print(AnimaVal v) {
     char *s = v_to_cstr(v);
-    printf("%s\n", s);
-    fflush(stdout);
+    print_line(s);
     free(s);
     return v_void();
 }
@@ -581,8 +594,7 @@ static AnimaVal anima_print_n(int argc, AnimaVal *argv) {
         if (i > 0) buf_put(&b, " ");
         v_fmt(&b, argv[i]);
     }
-    printf("%s\n", b.p);
-    fflush(stdout);
+    print_line(b.p);
     free(b.p);
     return v_void();
 }

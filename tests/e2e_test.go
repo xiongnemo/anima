@@ -1430,3 +1430,83 @@ def main() -> int:
 `, "PORT", port)
 	runOnBothBackends(t, "http_long_body", src, "16 200 16 16 true\n8192 200 8192 8192 true\n131072 200 131072 131072 true\n")
 }
+
+// A send to a peer that has gone is an Err on both backends. The native
+// program was ended by SIGPIPE: one client that left took a server down.
+func TestE2ESendToAPeerThatLeft(t *testing.T) {
+	runOnBothBackends(t, "send_after_close", `import std.socket as sock
+import std.concurrent as conc
+import std.time as time
+
+def knock(port: int) -> int:
+    match sock.connect_tcp("127.0.0.1", port):
+        Ok(c) -> c.close()
+        Err(e) -> print("no connect")
+    return 0
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            port = ln.port()
+            pool = conc.ThreadPool(1, 2)
+            _ = pool.submit(() => knock(port))
+            match ln.accept(timeout_ms=3000):
+                Ok(conn) ->
+                    time.sleep_ms(300)
+                    match conn.send_text("one"):
+                        Ok(n) -> print("first sent")
+                        Err(e) -> print("first failed")
+                    time.sleep_ms(300)
+                    match conn.send_text("two"):
+                        Ok(n) -> print("second sent")
+                        Err(e) -> print("second failed")
+                    conn.close()
+                Err(e) -> print("no client")
+            pool.shutdown()
+            ln.close()
+        Err(e) -> print("no listener")
+    print("done")
+    return 0
+`, "first sent\nsecond failed\ndone\n")
+}
+
+// Standard output is the exception, as it is in Go: a program whose output
+// nobody reads any more is ended by SIGPIPE on both backends.
+func TestE2EPrintToAClosedPipe(t *testing.T) {
+	printToAClosedPipe(t, false)
+	printToAClosedPipe(t, true)
+}
+
+func printToAClosedPipe(t *testing.T, long bool) {
+	t.Helper()
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	path := filepath.Join(tmp, "prints.anm")
+	// Many short lines, then one longer than the buffer of standard output.
+	src := "def main() -> int:\n    for i in 0..200000:\n        print(\"line\")\n    return 0\n"
+	if long {
+		src = "def grow(n: int[0..20]) -> str:\n    s = \"x\"\n    for i in 0..n:\n        s = s + s\n    return s\n\n" +
+			"def main() -> int:\n    print(grow(17))\n    return 0\n"
+	}
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeBin := filepath.Join(tmp, "prints")
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	for name, cmd := range map[string]*exec.Cmd{"VM": exec.Command(animaBin, "run", path), "native": exec.Command(nativeBin)} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Close()
+		cmd.Stdout = w
+		err = cmd.Run()
+		w.Close()
+		ee, ok := err.(*exec.ExitError)
+		if !ok || !strings.Contains(ee.String(), "broken pipe") {
+			t.Errorf("%s (one long line: %t): want the program ended by SIGPIPE, got %v", name, long, err)
+		}
+	}
+}
