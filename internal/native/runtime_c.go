@@ -8,6 +8,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
@@ -122,7 +123,7 @@ struct AnimaHandle {
     HandleKind kind;
     bool closed;
     int fd;
-    FILE *fp;
+    char *path; // of a file, for its error messages
     uint8_t *bytes;
     size_t bytes_len;
     // Mutex / Semaphore / Channel / Pool / Future
@@ -709,6 +710,23 @@ static AnimaVal bytes_from_hex(const char *hx) {
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h; return v;
 }
 
+// slice(lo, hi): the bytes lo..hi-1 of the view, the ends brought inside
+// it. The bytes are shared: a view is never written.
+static AnimaVal bytes_slice(AnimaVal hv, int64_t lo, int64_t hi) {
+    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
+    h->kind = HDL_BYTEVIEW;
+    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
+    if (hv.kind != VAL_HANDLE || !hv.u.hdl || hv.u.hdl->kind != HDL_BYTEVIEW) return v;
+    int64_t n = (int64_t)hv.u.hdl->bytes_len;
+    if (hi > n) hi = n;
+    if (hi < 0) hi = 0;
+    if (lo < 0) lo = 0;
+    if (lo > hi) lo = hi;
+    h->bytes = hv.u.hdl->bytes + lo;
+    h->bytes_len = (size_t)(hi - lo);
+    return v;
+}
+
 static AnimaVal crypto_sha256(const char *s) {
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int out_len = 0;
@@ -820,6 +838,38 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
 }
 
 // ─── std.requests (HTTP/HTTPS over POSIX + OpenSSL) ───
+// Whether raw holds a whole answer: its head, and as many bytes of body as
+// its Content-Length says. One without that header ends when the server
+// closes the connection.
+static bool http_complete(const char *raw, size_t total) {
+    const char *head_end = strstr(raw, "\r\n\r\n");
+    if (!head_end) return false;
+    size_t head_len = (size_t)(head_end - raw) + 4;
+    for (const char *line = strstr(raw, "\r\n"); line && line < head_end; line = strstr(line + 2, "\r\n")) {
+        const char *h = line + 2;
+        if (strncasecmp(h, "Content-Length:", 15) == 0) {
+            long long want = atoll(h + 15);
+            return want >= 0 && total >= head_len + (size_t)want;
+        }
+    }
+    return false;
+}
+
+// A request that fails reads as on the VM: Get "url": why.
+static AnimaVal http_err(const char *method, const char *url, const char *why, const char *more) {
+    AnimaBuf b = {0};
+    buf_put(&b, method[0] == 'P' ? "Post \"" : "Get \"");
+    buf_put(&b, url); buf_put(&b, "\": "); buf_put(&b, why);
+    if (more) {
+        size_t at = b.len;
+        buf_put(&b, more);
+        if (b.len > at) b.p[at] = (char)tolower((unsigned char)b.p[at]);
+    }
+    AnimaVal r = v_err(b.p);
+    free(b.p);
+    return r;
+}
+
 static AnimaVal http_do(const char *method, const char *url, const char *body, int64_t timeout_ms) {
     bool is_https = strncmp(url, "https://", 8) == 0;
     const char *rest = is_https ? url + 8 : (strncmp(url, "http://", 7) == 0 ? url + 7 : url);
@@ -848,12 +898,22 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     struct addrinfo hints = {0}, *res = NULL;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return v_err("http dns failed");
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
+        char why[320];
+        snprintf(why, sizeof(why), "dial tcp: lookup %s: no such host", host);
+        return http_err(method, url, why, NULL);
+    }
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return v_err(strerror(errno)); }
+    if (fd < 0) { int e = errno; freeaddrinfo(res); return http_err(method, url, "dial tcp: socket: ", strerror(e)); }
     set_fd_timeout(fd, timeout_ms > 0 ? timeout_ms : 5000);
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        int e = errno; close(fd); freeaddrinfo(res); return v_err(strerror(e));
+        int e = errno;
+        char ip[INET6_ADDRSTRLEN] = {0}, why[400];
+        if (res->ai_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, ip, sizeof(ip));
+        else if (res->ai_family == AF_INET6) inet_ntop(AF_INET6, &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr, ip, sizeof(ip));
+        snprintf(why, sizeof(why), res->ai_family == AF_INET6 ? "dial tcp [%s]:%s: connect: " : "dial tcp %s:%s: connect: ", ip, port);
+        close(fd); freeaddrinfo(res);
+        return http_err(method, url, why, strerror(e));
     }
     freeaddrinfo(res);
 
@@ -866,7 +926,7 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         SSL_set_fd(ssl, fd);
         if (SSL_connect(ssl) <= 0) {
             SSL_free(ssl); SSL_CTX_free(ctx); close(fd);
-            return v_err("tls handshake failed");
+            return http_err(method, url, "tls handshake failed", NULL);
         }
     }
 
@@ -886,15 +946,37 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
 
     size_t cap = 8192, total = 0;
     char *raw = malloc(cap);
+    bool timed_out = false;
     for (;;) {
-        if (total + 2048 > cap) { cap *= 2; raw = realloc(raw, cap); }
+        // Room for one more read and the terminator after it.
+        if (total + 2048 + 1 > cap) { cap *= 2; raw = realloc(raw, cap); }
         ssize_t n = ssl ? SSL_read(ssl, raw + total, 2048) : recv(fd, raw + total, 2048, 0);
-        if (n <= 0) break;
+        if (n < 0 && !ssl && errno == EINTR) continue;
+        if (n <= 0) {
+            if (ssl) timed_out = n < 0 && SSL_get_error(ssl, (int)n) == SSL_ERROR_WANT_READ;
+            else timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+            break;
+        }
         total += (size_t)n;
+        // An answer that says how long it is ends there: the server may
+        // keep the connection open after it.
+        raw[total] = '\0';
+        if (http_complete(raw, total)) break;
     }
     raw[total] = '\0';
     if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
     close(fd);
+
+    // No answer is an error, as on the VM: not a response with status 200.
+    char *head_end = strstr(raw, "\r\n\r\n");
+    if (timed_out) {
+        free(raw);
+        return http_err(method, url, head_end
+            ? "context deadline exceeded (Client.Timeout or context cancellation while reading body)"
+            : "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
+    }
+    if (total == 0) { free(raw); return http_err(method, url, "EOF", NULL); }
+    if (strncmp(raw, "HTTP/", 5) != 0) { free(raw); return http_err(method, url, "malformed HTTP response", NULL); }
 
     int status = 200;
     if (strncmp(raw, "HTTP/", 5) == 0) {
@@ -1081,6 +1163,52 @@ static AnimaVal conc_mutex_new(AnimaVal initv) {
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h; return v;
 }
 
+// with_lock(f): the mutex holds f(what it held), set under the lock.
+static void conc_mutex_with_lock(AnimaVal hv, AnimaVal fn) {
+    if (hv.kind != VAL_HANDLE || !hv.u.hdl || hv.u.hdl->kind != HDL_MUTEX) return;
+    AnimaHandle *h = hv.u.hdl;
+    pthread_mutex_lock(&h->mu);
+    AnimaVal held = h->cell_val;
+    h->cell_val = v_call_clos(fn, 1, &held);
+    pthread_mutex_unlock(&h->mu);
+}
+
+// parallel_map(xs, f): f of every element, each on a thread of its own,
+// in the order of xs.
+typedef struct { AnimaVal fn; AnimaVal arg; AnimaVal out; } ParMapJob;
+
+static void *conc_parmap_run(void *p) {
+    ParMapJob *j = p;
+    j->out = v_call_clos(j->fn, 1, &j->arg);
+    return NULL;
+}
+
+static AnimaVal conc_parallel_map(AnimaVal listv, AnimaVal fn) {
+    AnimaVal out = v_list_new(0, NULL);
+    if (listv.kind != VAL_LIST || !listv.u.list) return out;
+    size_t n = listv.u.list->len;
+    if (n == 0) return out;
+    ParMapJob *jobs = calloc(n, sizeof(ParMapJob));
+    pthread_t *ths = calloc(n, sizeof(pthread_t));
+    for (size_t i = 0; i < n; i++) {
+        jobs[i].fn = fn;
+        jobs[i].arg = listv.u.list->items[i];
+        int rc = pthread_create(&ths[i], NULL, conc_parmap_run, &jobs[i]);
+        if (rc != 0) {
+            // The calls run beside each other or not at all: one of them may
+            // wait for what another gives, so none can be run here in turn.
+            fprintf(stderr, "runtime error: parallel_map: cannot start a thread: %s\n", strerror(rc));
+            exit(1);
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        pthread_join(ths[i], NULL);
+        v_list_push(out, jobs[i].out);
+    }
+    free(jobs); free(ths);
+    return out;
+}
+
 static AnimaVal conc_sem_new(int64_t n) {
     AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
     h->kind = HDL_SEMAPHORE;
@@ -1116,7 +1244,7 @@ static void hdl_close(AnimaVal hv) {
             break;
         case HDL_FILE:
             h->closed = true;
-            if (h->fp) fclose(h->fp);
+            if (h->fd >= 0) close(h->fd);
             break;
         case HDL_THREADPOOL:
             pthread_mutex_lock(&h->mu);
@@ -1140,28 +1268,121 @@ static void hdl_close(AnimaVal hv) {
 }
 
 // ─── std.fs & std.cli & std.time ───
+static void buf_putn(AnimaBuf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->p = realloc(b->p, b->cap);
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+// An error of the file system reads as on the VM: "open /p: no such file
+// or directory".
+static AnimaVal fs_err(const char *op, const char *path, int e) {
+    AnimaBuf b = {0};
+    buf_put(&b, op); buf_put(&b, " "); buf_put(&b, path); buf_put(&b, ": ");
+    size_t at = b.len;
+    buf_put(&b, strerror(e));
+    if (b.len > at) b.p[at] = (char)tolower((unsigned char)b.p[at]);
+    AnimaVal r = v_err(b.p);
+    free(b.p);
+    return r;
+}
+
+// "w" creates or empties the file and may read what it wrote; anything
+// else opens it to read.
 static AnimaVal fs_open(const char *path, const char *mode) {
-    FILE *fp = fopen(path, (mode && strchr(mode, 'w')) ? "wb" : "rb");
-    if (!fp) return v_err(strerror(errno));
+    int fd = (mode && strchr(mode, 'w')) ? open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0666)
+                                         : open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return fs_err("open", path, errno);
     AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
-    h->kind = HDL_FILE; h->fp = fp;
+    h->kind = HDL_FILE; h->fd = fd; h->path = strdup(path);
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
     return v_ok(v);
 }
 
-static AnimaVal fs_read_text(const char *path) {
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return v_err(strerror(errno));
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    char *buf = malloc((size_t)sz + 1);
-    size_t nr = fread(buf, 1, (size_t)sz, fp);
-    buf[nr] = '\0';
-    fclose(fp);
-    AnimaVal r = v_ok(v_str(buf));
-    free(buf);
+// What is left to read of fd, as Ok(str).
+static AnimaVal fs_read_rest(int fd, const char *path) {
+    AnimaBuf b = {0};
+    char chunk[4096];
+    for (;;) {
+        ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { int e = errno; free(b.p); return fs_err("read", path, e); }
+        if (n == 0) break;
+        buf_putn(&b, chunk, (size_t)n);
+    }
+    AnimaVal r = v_ok(v_str(b.p ? b.p : ""));
+    free(b.p);
     return r;
+}
+
+static bool fs_write_all(int fd, const char *text, size_t len) {
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(fd, text + done, len - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return false;
+        done += (size_t)n;
+    }
+    return true;
+}
+
+static AnimaVal fs_read_text(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return fs_err("open", path, errno);
+    AnimaVal r = fs_read_rest(fd, path);
+    close(fd);
+    return r;
+}
+
+static AnimaVal fs_file_read_text(AnimaVal hv) {
+    AnimaHandle *h = hv.u.hdl;
+    if (hv.kind != VAL_HANDLE || !h || h->kind != HDL_FILE) return v_err("not a file");
+    if (h->closed) return fs_err("read", h->path, EBADF);
+    return fs_read_rest(h->fd, h->path);
+}
+
+static AnimaVal fs_file_write_text(AnimaVal hv, const char *text) {
+    AnimaHandle *h = hv.u.hdl;
+    if (hv.kind != VAL_HANDLE || !h || h->kind != HDL_FILE) return v_err("not a file");
+    if (h->closed) return fs_err("write", h->path, EBADF);
+    size_t len = strlen(text);
+    if (!fs_write_all(h->fd, text, len)) return fs_err("write", h->path, errno);
+    return v_ok(v_int((int64_t)len));
+}
+
+// The text goes to a new file beside path, which then takes its name: a
+// reader sees the old text or the new, never a part of it.
+static AnimaVal fs_write_atomic(const char *path, const char *text) {
+    const char *slash = strrchr(path, '/');
+    AnimaBuf t = {0};
+    if (!slash) buf_put(&t, ".");
+    else if (slash == path) buf_put(&t, "");
+    else buf_putn(&t, path, (size_t)(slash - path));
+    buf_put(&t, "/.anima-tmp-XXXXXX");
+    int fd = mkstemp(t.p);
+    if (fd < 0) { AnimaVal r = fs_err("open", t.p, errno); free(t.p); return r; }
+    size_t len = strlen(text);
+    bool ok = fs_write_all(fd, text, len);
+    if (close(fd) != 0) ok = false;
+    if (!ok) { unlink(t.p); free(t.p); return v_err("write failed"); }
+    if (rename(t.p, path) != 0) {
+        int e = errno;
+        unlink(t.p);
+        AnimaBuf m = {0};
+        buf_put(&m, "rename "); buf_put(&m, t.p); buf_put(&m, " "); buf_put(&m, path); buf_put(&m, ": ");
+        size_t at = m.len;
+        buf_put(&m, strerror(e));
+        if (m.len > at) m.p[at] = (char)tolower((unsigned char)m.p[at]);
+        AnimaVal r = v_err(m.p);
+        free(m.p); free(t.p);
+        return r;
+    }
+    free(t.p);
+    return v_ok(v_int((int64_t)len));
 }
 
 static AnimaVal time_now_ms(void) {

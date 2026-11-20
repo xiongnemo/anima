@@ -25,7 +25,7 @@
    - Exports ISO `.pnml` XML.
 4. **OCaml-Style Dual Execution Backends + 8 Formally Verified Standard Libraries**:
    - **Bytecode VM (`anima run`)**: Compiles to 32-bit fixed-width `.anbc` bytecode with deterministic workflow/fiber scheduling, CLI `--animate`, and `--replay` counterexample reproduction.
-   - **Native ELF Backend (`anima build`)**: Transpiles verified models to standalone C11 (`pthreads` + POSIX sockets + OpenSSL 3.0) and invokes `gcc -O2` to emit native executables.
+   - **Native ELF Backend (`anima build`)**: Transpiles verified models to standalone C11 (`pthreads` + POSIX sockets + OpenSSL 3.0) and invokes `gcc -O2` to emit native executables. Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`).
    - **Embedded Dark Material Studio (`anima studio`)**: Single-binary Orchis-dark web studio projecting UML Class, Statechart, Petri Token Animation, and Counterexample Sequence diagrams.
 
 ## Quick Start
@@ -59,5 +59,5 @@ CGO_ENABLED=0 go build -o anima ./cmd/anima
 - `std.socket` — Typestate-verified `TcpListener` & `TcpStream` (compile-time FD leak & use-after-close prevention)
 - `std.requests` — Sync/async HTTP(S) `get`, `post`, `Session`, `gather` with mandatory bounded `timeout_ms: int[1..300_000]` (as for `accept` on a `std.socket` listener; the kernel proves the value in range, `timeout_bounds`)
 - `std.json` — Boundary-sanitized `json.decode[EntityType]` enforcing refinement bounds & compiled entity invariants
-- `std.bytes` & `std.crypto` — Bounds-checked `ByteView` (`read_u8`, `read_u16_be`, `read_u32_be`) + `sha256`, `hmac_sha256`, `constant_time_eq`
+- `std.bytes` & `std.crypto` — Bounds-checked `ByteView` (`read_u8`, `read_u16_be`, `read_u32_be`; `slice(lo, hi)` brings its ends inside the view) + `sha256`, `hmac_sha256`, `constant_time_eq`
 - `std.fs`, `std.cli`, `std.time` — Typestate-checked `File`, `write_atomic`, `cli.args`, `time.now_ms`
