@@ -1,0 +1,10 @@
+# A bare return gives () as well.
+def pick(n: int) -> int[1..9]:
+    if n > 0:
+        return 1
+    return
+
+def main() -> int:
+    x = pick(0)
+    print(10 / x)
+    return 0

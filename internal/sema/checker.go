@@ -621,6 +621,9 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 			return err
 		}
 	}
+	if ret := fi.Type.Return; ret != nil && ret.Kind() != KindVoid && !alwaysReturns(fn.Body) {
+		return fmt.Errorf("%s: function %s can end without a return, and it returns %s", fn.Span, fn.Name, ret)
+	}
 	// Check ensures with result & old()
 	ensScope := newScope(sc)
 	ensScope.defineLocal("result", varBinding{ty: fi.Type.Return, span: fn.Span})
@@ -634,6 +637,45 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 		}
 	}
 	return nil
+}
+
+// alwaysReturns reports whether every way through the statements ends in a
+// return. A function that returns a value must: one that ends without a
+// return gives (), which is of no type, and its caller is told the declared
+// one. A match counts when each arm returns, the kernel proving that some arm
+// is taken; a loop counts only as `while True`, which nothing leaves but a
+// return.
+func alwaysReturns(body []ast.Stmt) bool {
+	for _, st := range body {
+		switch s := st.(type) {
+		case *ast.ReturnStmt:
+			return true
+		case *ast.IfStmt:
+			if s.Else == nil || !alwaysReturns(s.Else) {
+				continue
+			}
+			all := true
+			for _, br := range s.Branches {
+				all = all && alwaysReturns(br.Body)
+			}
+			if all {
+				return true
+			}
+		case *ast.MatchStmt:
+			all := len(s.Arms) > 0
+			for _, arm := range s.Arms {
+				all = all && alwaysReturns(arm.Body)
+			}
+			if all {
+				return true
+			}
+		case *ast.WhileStmt:
+			if lit, ok := s.Cond.(*ast.BoolLit); ok && lit.Value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *checker) checkMachine(m *ast.MachineDecl) error {
@@ -1089,6 +1131,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 
 	case *ast.ReturnStmt:
 		if s.Value == nil {
+			if c.curReturn != nil && c.curReturn.Kind() != KindVoid {
+				return fmt.Errorf("%s: return needs a value of type %s", s.Span, c.curReturn)
+			}
 			return nil
 		}
 		vty, err := c.checkExpr(s.Value, sc)

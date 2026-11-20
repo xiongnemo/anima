@@ -1,0 +1,10 @@
+# A function that ends without a return gives (), whatever type it says it
+# returns: the caller is told int[1..9] and divides by what is not one.
+def pick(n: int) -> int[1..9]:
+    if n > 0:
+        return 1
+
+def main() -> int:
+    x = pick(0)
+    print(10 / x)
+    return 0
