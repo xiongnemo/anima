@@ -1561,3 +1561,65 @@ def main() -> int:
     print(run_workflow W(3))
     return 0
 `
+
+// A merge node is where the branches of a choice come together. The VM
+// stopped there and gave (), the native backend did not build.
+func TestE2EWorkflowMergeParity(t *testing.T) {
+	runOnBothBackends(t, "workflow_merge", workflowMergeSrc, "no\nyes\n3 16\nno\nyes\nend\n")
+}
+
+const workflowMergeSrc = `workflow W(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+        d = 1
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step no -> m:
+        d = 2
+        print("no")
+    step yes -> m:
+        d = 5
+        print("yes")
+
+    merge m after yes, no
+
+    step fin after m:
+        d = d + 1
+    choice after fin:
+        when d > 3 -> big
+        else -> small
+
+    step big -> done:
+        return 100 / d
+    step small -> done:
+        return 10 / d
+
+workflow V(n: int):
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step no -> m:
+        print("no")
+    step yes -> m:
+        print("yes")
+
+    merge m after yes, no -> done
+
+def main() -> int:
+    print(run_workflow W(0), run_workflow W(5))
+    run_workflow V(0)
+    run_workflow V(5)
+    print("end")
+    return 0
+`

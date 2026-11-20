@@ -502,6 +502,21 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 			}
 		}
 	}
+	// A merge is where the branches of a choice come together: it does
+	// nothing itself.
+	flow := ast.NewFlow(wf)
+	for _, n := range wf.Nodes {
+		mn, ok := n.(*ast.MergeNode)
+		if !ok || flow.Merge(mn.Name) != mn {
+			continue
+		}
+		g.line("wf_lbl_%s: ;", mn.Name)
+		next := flow.AfterMerge(mn)
+		if flow.Ends(next) {
+			next = "done"
+		}
+		g.line("goto wf_lbl_%s;", next)
+	}
 	g.line("wf_lbl_done: ;")
 	g.line("wf_lbl_END: ;")
 	g.line("return v_void();")

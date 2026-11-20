@@ -9,6 +9,7 @@ type Flow struct {
 	choices   map[string]*ChoiceNode // by the node it comes after, or else by its name
 	forks     map[string]*ForkNode
 	joins     map[string]*JoinNode
+	merges    map[string]*MergeNode
 	forkAfter map[string]string
 	stepAfter map[string]string
 	firstJoin string
@@ -20,6 +21,7 @@ func NewFlow(wf *WorkflowDecl) *Flow {
 		choices:   map[string]*ChoiceNode{},
 		forks:     map[string]*ForkNode{},
 		joins:     map[string]*JoinNode{},
+		merges:    map[string]*MergeNode{},
 		forkAfter: map[string]string{},
 		stepAfter: map[string]string{},
 	}
@@ -50,6 +52,8 @@ func NewFlow(wf *WorkflowDecl) *Flow {
 			if f.firstJoin == "" {
 				f.firstJoin = x.Name
 			}
+		case *MergeNode:
+			f.merges[x.Name] = x
 		}
 	}
 	return f
@@ -61,10 +65,10 @@ func (f *Flow) Ends(name string) bool {
 	if name == "" || name == "done" || name == "END" {
 		return true
 	}
-	return f.steps[name] == nil && f.choices[name] == nil && f.forks[name] == nil && f.joins[name] == nil
+	return f.steps[name] == nil && f.choices[name] == nil && f.forks[name] == nil && f.joins[name] == nil && f.merges[name] == nil
 }
 
-// Step, Choice, Fork and Join give the node a name stands for. A name is
+// Step, Choice, Fork, Join and Merge give the node a name stands for. A name is
 // looked up in that order, so each is nil when an earlier one is not.
 func (f *Flow) Step(name string) *StepNode { return f.steps[name] }
 
@@ -87,6 +91,13 @@ func (f *Flow) Join(name string) *JoinNode {
 		return nil
 	}
 	return f.joins[name]
+}
+
+func (f *Flow) Merge(name string) *MergeNode {
+	if f.steps[name] != nil || f.choices[name] != nil || f.forks[name] != nil || f.joins[name] != nil {
+		return nil
+	}
+	return f.merges[name]
 }
 
 // AfterStep is where the workflow goes once the body of a step has run
@@ -114,4 +125,13 @@ func (f *Flow) AfterJoin(jn *JoinNode) string {
 		return jn.Target
 	}
 	return f.stepAfter[jn.Name]
+}
+
+// AfterMerge is where the workflow goes from a merge, the node the branches
+// of a choice come together at: it does nothing itself.
+func (f *Flow) AfterMerge(mn *MergeNode) string {
+	if mn.Target != "" {
+		return mn.Target
+	}
+	return f.stepAfter[mn.Name]
 }

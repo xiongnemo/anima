@@ -32,11 +32,29 @@ func TestSPARKWorkflowIsVerifiedAlongItsPaths(t *testing.T) {
 			"    start -> a:\n        d = 0\n\n    choice after a:\n        when n > 0 -> pos\n        else -> done\n\n" +
 				"    step pos -> done:\n        return 1\n",
 			"workflow:W.returns"},
-		{"a merge is run by neither backend",
+		{"a merge passes on what each path to it knows",
 			"    start -> a:\n        d = 1\n\n" + choice +
 				"    step pos -> m:\n        d = 2\n    step zero -> m:\n        d = 3\n\n    merge m after pos, zero -> fin\n\n" +
 				"    step fin -> done:\n        return 10 / d\n",
+			""},
+		{"and fails for the path that is wrong",
+			"    start -> a:\n        d = 1\n\n" + choice +
+				"    step pos -> m:\n        d = 2\n    step zero -> m:\n        d = 0\n\n    merge m after pos, zero -> fin\n\n" +
+				"    step fin -> done:\n        return 10 / d\n",
+			"workflow:W.div_nonzero"},
+		{"a merge with no target goes to the step after it",
+			"    start -> a:\n        d = 1\n\n" + choice +
+				"    step pos -> m:\n        d = 2\n    step zero -> m:\n        d = 0\n\n    merge m after pos, zero\n\n" +
+				"    step fin after m -> done:\n        return 10 / d\n",
+			"workflow:W.div_nonzero"},
+		{"a merge that goes to done returns nothing",
+			"    start -> a:\n        d = 1\n\n" + choice +
+				"    step pos -> m:\n        d = 2\n    step zero -> m:\n        d = 3\n\n    merge m after pos, zero -> done\n",
 			"workflow:W.returns"},
+		{"a merge that goes back",
+			"    start -> a:\n        d = 1\n\n" + choice +
+				"    step pos -> m:\n        d = 2\n    step zero -> m:\n        d = 3\n\n    merge m after pos, zero -> a\n",
+			"workflow:W.acyclic"},
 		{"a workflow that comes back to a step",
 			"    start -> a:\n        d = 5\n\n    step a -> b:\n        d = d - 1\n    choice after b:\n        when d > 0 -> a\n        else -> fin\n\n" +
 				"    step fin -> done:\n        return d\n",
