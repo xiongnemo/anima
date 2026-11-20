@@ -1,66 +1,126 @@
 # Anima (`.anm` / `.anbc`)
 
-**Anima** is a single-binary, Python-readable, UML-native, **100% self-verified** general-purpose modeling and systems programming language. It unifies four historically fragmented engineering artifacts into one source language with zero external theorem-prover dependencies:
+Anima is a general-purpose language in which the model of a program and the program are one source file. Data contracts, state machines, concurrency and workflows are written next to the code, and three verification kernels check them before anything runs. `anima run` and `anima build` refuse a program that `anima check` does not pass.
 
-1. **Ada / SPARK-Level Data & Contract Proofs (Self-Built `AnimaSMT`)**:
-   - Refinement range types (`int[0..1_000_000]`), `requires` / `ensures` / `old(...)`, entity `invariant`s, `mut` exclusive anti-aliasing, loop/recursion `decreases` termination, and SMT-verified exhaustive `match` + `choice` completeness/exclusivity.
-   - `int` is a signed 64-bit integer at run time, in both backends, while proofs reason over unbounded integers. Every `+`, `-`, `*`, unary `-`, `/`, `%`, `sum` and `fold` therefore gets an `int64_overflow` proof obligation, and `anima check` fails when one cannot be proved. A product of two non-constant operands needs bounds on both (a range type or a `requires`). Inside and after a loop, a variable the loop assigns is known only through the loop's `invariant`s and its range type. An assignment replaces everything known about the variable (an entity or list the prover cannot follow becomes an arbitrary value of its type), and after an `if` or a `match` each variable holds the value of whichever branch ran.
-   - **Entity invariants**: a function may break an entity's `invariant` between two field updates, but the invariant is proved wherever the entity is handed on: as an argument of a call, as a returned value, or as an element or field of another value. That is what lets a function assume the invariants of its parameters, of list elements and of matched payloads. The room between two updates only exists for an entity that one variable alone can reach. Once it is shared (a loop variable, a matched payload, `r = rows[i]`, a second name `c = b`, or a variable that was put into a list, map, variant or entity), every field write has to leave the invariant true. Writing a field of an element in place (`rows[i].x = v`, `rows[i].x += v`) has to leave the element's invariant true at once, knowing only that it held before and what the one field becomes; otherwise build the new element and assign it. A field write on an object whose entity type is not known (an element of an untyped `m = {}`) is rejected: give the map a type (`m: map[str, T] = {}`).
-   - **Aliases**: entities, lists and maps are references, so `c = b` gives one entity two names. The kernel tracks which variables are *shared*, meaning their entity can be reached another way: a second name, a loop variable or `r = rows[i]` and the list it comes from, a matched payload and the matched value, a variable put into a list, map, variant or entity, an argument a call may keep (inside a `mut` argument with room for it, or through a channel or pool) and the result of a call that was given an entity. A write through a shared variable, in place (`rows[i].x = v`), or by a callee given it as `mut`, makes the kernel forget what it knew about the fields of every other shared variable; a variable that is the only way to reach its entity keeps its facts. Two rules keep this sound across calls: a value received through a parameter that is not `mut` cannot be written through another name either (`c = a; c.x = 0`, `for r in rows: r.x = 0` fail `readonly_<name>`), and a `mut` argument may not be reachable from another argument of the same call (`c = b; g(mut b, c)` fails `call_g_mut_alias`), since a function is verified with its parameters taken for separate values.
-   - **Element ranges**: the range of the elements of a list, of the values of a map and of the fields of a variant is part of the type, and is proved wherever such a value is made or written: each element of a literal given to a `list[int[1..9]]` (`list_elem_bounds`, `map_value_bounds`), each `xs[i] = v` and `m[k] = v` (`elem_assign_bounds`), each field of a constructed variant, including `Some(x)` given to an `Option[int[1..9]]` (`variant_<Name>_range`), and what the lambda of a `map` stage yields when the result is given a bounded list type. Because lists and maps are references, `list[int]` and `list[int[1..9]]` are different types in both directions; `Option[int[1..9]]` is accepted where an `Option[int]` is expected, not the reverse. A literal, `Some` / `Ok` / `Err` or a `map` stage takes the type of the place it is given to; on its own it holds plain `int`, as does a variable assigned an int without an annotation, so a range has to be declared to be relied on. A variable keeps the type of its list, map or variant when it is assigned again. For an un-annotated list literal the kernel still knows the hull of its elements until the list may have been written. Only `fold(init, (a, x) => a + x)` is bounded as a sum.
-   - **Calls**: a callee's `requires` is proved wherever the call is written. Arguments are type-checked against the parameters they are bound to: a keyword argument by its name, the piped value of `x |> f(a)` first. The fields of a variant and the arguments of `run_workflow` are bound by position, so a keyword there has to name the one at its place. What is called has to exist when the program runs: only a function or a variable holding a lambda can be called, a function that is not called is not a value (write `(v) => f(v)` to pass one on), a name that is both a variable and a function cannot be called (both backends would call the variable; rename it), a value has no members but the ones its type has (`s.upper()` is an error), and a variant is made with all of its fields. A lambda, a built-in function (`abs`, `min`, `max`, `str`, `len`, `assert`) and a pipeline stage are given exactly the arguments they take, by position, and a stage's function has one parameter (`fold`: two): an argument that is not given would be `None` when the program runs. `fp.take(xs, 2)` is `xs |> take(2)`, and `x |> g(a)` is `g(x, a)` for a lambda or a built-in function too; an entity or a variant is made by a call, not by a stage. `unwrap_or` gives what the variant holds or the default, so an int has the range of both and a list, a map or a variant default has the very type of what is held (`fold` likewise: what it starts with or what its function gives); the function of `and_then` gives the same kind of variant as it is given. A call may change what it receives as `mut`: afterwards the caller knows the argument's type, an entity's `invariant`, and the callee's `ensures` clauses over its parameters (clauses about `result` are not used). So that the order of a read and the change never decides a result, a variable passed as `mut` cannot be used elsewhere in the same statement (`total = box.v + reset(mut box)` is rejected; put the call in a statement of its own). The same holds for another name of what is passed: after `c = b`, `if b.n == 0 or zero(mut c):` is rejected, since the callee may write the field the condition has read. A `mut` parameter cannot be assigned a new value, a `?` has to leave the function's `ensures` and `mut` invariants true like any other return, and only a pipeline stage (`xs |> map(x => f(mut s))`) may pass an outer variable as `mut` from a lambda. A function of a standard module or a method of a standard handle (`time.sleep_ms(5)`, `conn.send_text("x")`, `pool.submit(() => f())`) takes its arguments by position and exactly those it reads, each of the kind it reads; a keyword may only name the parameter in that place (`conc.ThreadPool(workers=2, queue_cap=4)`), and `timeout_ms=` comes last. A `conc.Channel[T]` and a `conc.Mutex` give back what they were given, and the kernel does not follow a value through them, so `send`, `set` and the function of `with_lock` take a value whose type is already `T`: for `Channel[int[1..9]]` a literal in the range or a variable declared `int[1..9]`, not an `int`. `conc.Mutex(5)` holds an `int`. Piped, `x |> o.f(a)` is `o.f(x, a)` and is checked as that call. Such a function is only there to be called: `g = time.sleep_ms` is rejected, write `(ms) => time.sleep_ms(ms)`. A value whose type nothing says (what `recv` gives on a `conc.Channel(cap=1)` made without a type, what `json.decode` gives without one, what an `Option` or `Result` written without its type holds, the parameter of a lambda that is neither named nor given to a stage) is only bound, passed on, printed, wrapped and matched: a condition, an operator, an index, a member, a call, a `for`, `len`, a pipeline stage, and every parameter, field, element, return and declaration that has a type refuse it, since both backends would run the operation on whatever the value is. What a function with no return type gives is refused the same way, and a variable keeps its sort here too: one that is an `int` is not given such a value by an assignment, a loop or a pattern, nor the other way round. A lambda with parameters that is given a name (`g = (v) => v > 1`) takes the types of its first use, a call or a stage, and its body is checked with them; every later use gives it those types, so the first use has to say them whole (`g(None)` or `g([])` first is refused: use it first with a value of a declared type), and the name is only called or given to a stage (`xs |> filter(g)`), not stored, passed or assigned again. `pool.submit(task)` gives a `Future` of what the task gives, `conc.parallel_map(xs, f)` a list of what `f` gives for an element of `xs`, and the function of `with_lock` is checked with what the mutex holds. A `conc.Channel`, a `conc.Mutex` and a `Future` are references, so one is passed, returned and assigned only as a handle of the very type it holds: a `Channel[int[1..9]]` is not a `Channel[int]`. A variable that holds one keeps the type of what it holds: `f = pool.submit(() => 5)` is not given a `Future` of a `str` later. `req.gather` gives a list of a type only when its futures all give the very same one, ranges included. `None`, `[]`, `{}` and `Ok(1)` leave a part of their type open, which no value has typed yet. A variable keeps an open part as it is: `o = None` is not given `Some(0)` later, by an assignment, a loop or a pattern, since a read placed before that in a loop would take `o` for an `Option` of any type; write `o: Option[int] = None`. And a variable does not hold something that is written to with an open part inside (`m = {}`, `xs = [None]`, `conc.Mutex(None)`, a gathered list of `Ok`s): declare its type, as in `m: map[str, int] = {}`. `xs = []` and `o = None` that stay so need no type.
-   - **Total matches**: every `match` has an arm for every value. Patterns nest (`Some(Some(1))`, `Set("a", True)`), and the kernel names a value no arm takes (`no arm for Some(Some(_))`). A literal inside a variant matches only that value; a match on a string, or on an int or a string inside a variant, needs an arm with `_` or a name; an arm with a guard covers nothing. A pattern has the type of what it is matched against and a variant pattern names every field of its variant (`Circle(r, _)`): anything else is an error, not an arm that never runs.
-   - **Returns**: a function that returns a value does so on every path, with `return value`. One that ended without a `return`, or with a bare one, gave `()` whatever type it declared, and the kernel told its caller the declared one (`def f(n: int) -> int[1..9]` with one `return 1` under an `if`, then `10 / f(0)`). An `if` counts when it has an `else` and each branch returns, a `match` when each arm does, a loop only as `while True`.
-   - **Workflows**: a workflow is verified one path at a time, as it runs: a step is checked with what is known on the way to it, each branch of a `choice` with its guard (and the earlier guards false). The kernel used to run the bodies of all nodes one after the other in the order they are written, so a step saw what the step written above it assigned though no run goes from one to the other. A workflow that returns a value returns one on every path (`workflow:W.returns`); a `merge` node is where the branches of a `choice` come together and does nothing itself: the step after it is checked once for each path that reaches it. A workflow that comes back to a node is refused (`acyclic`): a loop needs an invariant, so it is written in a function. The branches of a `fork` run at the same time, on the VM each on a copy of the variables and natively as threads on the variables themselves, so a branch only assigns variables that no other branch names (what each assigned is there after the join), and writes nothing in place: no field, no element, no `mut` argument, since another branch may reach the entity or list by another name. In-place work goes in a step; handles (channels, mutexes) are what branches share. A `return` in a branch is refused, the workflow returns from a step. A variable of a workflow is read only where every path to the read has assigned it, in the start or on each path: on a path that has not, it would be `()`.
-   - **Comparisons**: `==` and `!=` compare two values of one sort: lists, maps and variants by what they hold, an entity is equal to itself only. `<`, `<=`, `>`, `>=` order two integers or two strings (byte by byte). `and`, `or`, `implies` and `not` take booleans. `x in xs` looks for an element of a list, a key of a map or a part of a string. Anything else (`xs == 5`, `"a" < 5`, `1 and 2`) is an error. The kernel reasons about the equality of integers, strings and booleans; of lists, maps, entities and variants it assumes nothing, as they change in place.
-   - **Variables**: a variable holds values of one sort from its first assignment on: `x = 5` and later `x = "five"`, `x = True` or `x = [1]` is an error, as is a loop variable or a name in a pattern that would write a variable of another sort (`for x in names:` after `x = 5`). A list, a map or a variant keeps the type of its elements the same way. What a variable holds after an `if`, a loop or a `match` is then of the one type, whichever branch ran. A name first assigned inside a branch or a loop body ends with it. A name in a pattern writes the variable of that name when its arm matches, so `x = 5` followed by `match o: Some(x) -> ...` leaves in `x` what `o` held; the kernel forgets the old value, in a match statement and a match expression alike. An int variable with a range, from its declaration (`y: int[1..9] = 5`), its parameter, or the list or variant a loop or a pattern takes it from, keeps the range: the kernel proves every later value in it (`y = n` needs `n` in 1..9), and a second declaration, a loop variable or a pattern name must have the very range. In return a loop that assigns the variable knows it is in its range on every pass, so `i: int[0..10] = 0` followed by `while i < 10: i = i + 1` is proved without overflow. A variable first assigned without a type has no range.
-   - **Indexes**: out of range, a read `xs[i]` or `s[i]` gives `None` whatever the element type says, and a write `xs[i] = v` is dropped. So every index into a list or a string is proved inside it (`index_bounds`), reads and writes alike, a string by its bytes. The kernel knows the length of a literal and of what a variable or a field of one holds (`len(xs)`, `len(b.items)`, `len(s)`), so `if i >= 0 and i < len(b.items): b.items[i] = 0` is proved, as is `for i in 0..len(xs): xs[i]`. Any other list or string has to be given a name first: `row = rows[i]` and then `row[j]` under `len(row) > j`, not `rows[i][j]` or `f()[0]`. Of what a pipeline gives, the kernel knows what its last stage says: `map` keeps the length, `filter`, `take` and `drop` give a list no longer than theirs with elements of the same range, `sum` and `fold(init, (a, x) => a + x)` are bounded by the elements; after any other stage (a `fold` to a list, `flat_map`, a function of your own) the length and the elements are unknown, so `ys = xs |> take(1)` is indexed under `len(ys) > i`. A map is keyed: a write `m[k] = v` makes the key, and a read `m[k]` of a key that is not there gives `None` too. So every read of a map is proved to find its key (`key_present`): under `if k in m:`, after `m[k] = v`, or for a key written in the literal the map was made from. The kernel follows a key that is a literal, an integer or a string variable, in a map that a variable or a field of one holds; anything else is given a name first (`k = f"user:{id}"`, then `if k in m: m[k]`). A map only gains keys, so what was found stays found; `requires: k in m` is proved at a call from what the caller knows of the map it passes.
-   - **Byte views**: a read past the end of a `ByteView` is a panic on the VM and whatever lies there natively, so every `read_u8`, `read_u16_be`, `read_u32_be` is proved inside its view (`byteview_bounds`), also when the offset is piped (`off |> bv.read_u8()`). A view never changes, and the kernel knows its length: `bv.len()` is that length, so `if bv.len() >= 4: bv.read_u32_be(0)` is proved, a `requires: bv.len() >= 20` is proved at the call, and `while rest.len() >= 2: ...; rest = rest.slice(2, rest.len())` eats a view to its end. The length is known from `from_str` of a string (its bytes), `from_hex` of a literal (an empty view when the literal is not pairs of hex digits), another name for a view (`w = bv`, a field `p.body`), and a slice. `bv.slice(lo, hi)` is proved to have `0 <= lo <= hi <= bv.len()`, and is then `hi - lo` long: both backends would bring ends outside the view inside it, and the program would go on with a shorter view than it asked for. A view that is not held by a variable or a field of one (`bv.slice(0, 2).read_u8(0)`, `vs[0]`) has to be given a name first, and so has the parameter of a lambda that sema has no type for. Every length, of a view, a list or a string, is known to fit an int64, so `n <= len(xs) - 4` is arithmetic the kernel can follow.
-   - 100% pure-Go prover: **Interval/Octagon Abstract Domain (Floyd-Warshall)** + **CDCL SAT (2-watched literals + 1-UIP)** + **Exact Rational Dutertre-de Moura Simplex (`math/big.Rat`)** + **Integer Branch-and-Bound**.
-2. **FSP / LTSA & Linear Typestate Verification**:
-   - Compiles `monitor`, `machine`, and `workflow` synchronizations into explicit Labelled Transition Systems (`||` composition, relabeling, hiding, priority).
-   - Verifies Safety (`property` `ERROR=-1`), Deadlock freedom, **Tarjan SCC Fair-Choice `progress` (starvation/livelock)**, bounded **FLTL**, and **Linear Socket/File/Port Typestate** (zero FD leaks & zero use-after-close).
-   - **Handle ownership** (`sock.TcpStream`, `sock.TcpListener`, `fs.File`, `conc.ThreadPool`): every handle has one owner, who must close it (shut the pool down) on every path. A handle parameter is borrowed (usable, but it cannot be closed or moved) unless declared `own`; `handle(own conn)`, `c2 = conn` and `return conn` move it, and a moved handle cannot be used again. `pool.submit(() => handle(own conn))` moves a connection into a worker thread; a stream or file cannot be shared between threads, while a listener can be lent to tasks and not closed until they are awaited or the pool is shut down. `?` is rejected while the function owns an open handle: `match` on the result and close the handle on the failure path, or do the fallible work in a function that borrows it. Handles cannot be stored in entities, lists or other values. A thread pool is such a handle: after `pool.shutdown()` it takes no task, a function that borrows it cannot shut it down, and a task may borrow it (to submit more) until it is awaited. Shutting a pool down waits for its tasks, so the future of a task need not be awaited: one given a name is awaited or gathered somewhere in the function (not in a closure), and one that is not wanted is written `_ = pool.submit(...)`. Nothing but its await waits for a request started with `get_async`: it is started where its future is given a name (`f = sess.get_async(...)`), and that future is awaited or gathered on every path, before the function returns (a `?` included) and before the last name that holds it is given another value. Only an await the statement always runs counts: not one on the right of `and` or `or`, in an arm of a `match` expression, or in a loop for a request started before it; one in the guard of a `match` arm counts in that arm. Where a statement has a `?`, only an await inside what the `?` is applied to (`f.await()?`) has run by then: await in a statement of its own before it. See `examples/concurrent_http.anm`. A `?` that returns early closes nothing on either backend: a channel, a mutex or a session a function holds may be the caller's under another name, and the handles that must be closed are the ones `?` is refused for. In a workflow the handles are followed along each path it can run, as the contract kernel follows it: a step finds them as the way to it left them, whatever is written above it, and every way out of the workflow must leave them closed.
-   - Exports standard `.fsp` compatible with Magee & Kramer's **LTSA**.
-3. **Petri Net & Workflow Soundness**:
-   - Compiles `workflow` (`pool`, `fork`/`join` AND-split/join, `choice`/`merge` XOR-split/join) into Place/Transition WF-Nets.
-   - Verifies **Karp-Miller Coverability** (`1_safe`, boundedness), **van der Aalst Soundness** (*Option to complete*, *Proper completion*, *No dead transitions*), and cross-checks via the **Short-Circuit Theorem ($\overline{N}$ bounded & $L_4$-live)**.
-   - Exports ISO `.pnml` XML.
-4. **OCaml-Style Dual Execution Backends + 8 Formally Verified Standard Libraries**:
-   - **Bytecode VM (`anima run`)**: Compiles to 32-bit fixed-width `.anbc` bytecode with deterministic workflow/fiber scheduling, CLI `--animate`, and `--replay` counterexample reproduction.
-   - **Native ELF Backend (`anima build`)**: Transpiles verified models to standalone C11 (`pthreads` + POSIX sockets + OpenSSL 3.0) and invokes `gcc -O2` to emit native executables. Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`). A division or modulo by zero, which no verified program reaches, stops a native program with the VM's message and exit code 1 rather than a signal. Its HTTP client frames an answer as Go's does: a chunked body is decoded, a body is exactly as long as its `Content-Length` (`unexpected EOF` when the server stops short), 204 and 304 have none, and `timeout_ms` is for the whole request, not for each read. A request is sent whole whatever the length of its body. A send to a peer that has gone is an `Err`, not a `SIGPIPE` that ends the program; only standard output keeps that signal, as in Go.
-   - **Embedded Dark Material Studio (`anima studio`)**: Single-binary Orchis-dark web studio projecting UML Class, Statechart, Petri Token Animation, and Counterexample Sequence diagrams.
+The verifier is written in Go with no external solver, and the whole toolchain is one static binary.
 
-## Quick Start
+```
+type Money = int[0..1_000_000]
+
+entity Account:
+    balance: Money
+    escrow:  Money
+    invariant: balance + escrow <= 1_000_000
+
+def lock_funds(mut acc: Account, amt: int[1..10_000]) -> bool:
+    ensures: acc.balance + acc.escrow == old(acc.balance) + old(acc.escrow)
+    if acc.balance >= amt:
+        acc.balance = acc.balance - amt
+        acc.escrow = acc.escrow + amt
+        return True
+    return False
+
+def main() -> int:
+    acc = Account(balance=500, escrow=0)
+    ok = lock_funds(mut acc, 120)
+    print(ok, acc.balance, acc.escrow)
+    return 0
+```
+
+`anima check` proves the ranges, the invariant, the `ensures` and that no operation overflows; the program prints `True 380 120` on both backends. Write `acc.escrow + amt + 1` instead and the check fails with a counterexample (`acc.balance=1, acc.escrow=999999, amt=1`).
+
+## What is checked
+
+| Kernel | Checks | Details |
+|---|---|---|
+| **Contracts** (SPARK-style weakest preconditions, own SMT solver) | range types `int[lo..hi]`, `requires` / `ensures` / `old(...)`, entity `invariant`s, int64 overflow, index, map-key and byte-view bounds, exhaustive `match`, loop and recursion termination (`decreases`) | [docs/contracts.md](docs/contracts.md) |
+| **FSP / LTS and ownership** | `monitor`, `machine` and `property` as labelled transition systems: safety, deadlock freedom, `progress`, bounded FLTL; one owner for every socket, file and thread pool, closed on every path | [docs/concurrency.md](docs/concurrency.md), [docs/ownership.md](docs/ownership.md) |
+| **Petri / WF-net** | a `workflow` as a workflow net: boundedness, 1-safety, soundness (option to complete, proper completion, no dead transitions) | [docs/workflows.md](docs/workflows.md) |
+
+Before the kernels, the semantic checker settles the type of every value and refuses what the backends could not run as written: [docs/language.md](docs/language.md).
+
+A verified program runs on a bytecode VM (`anima run`) or is compiled through C11 to a native executable (`anima build`). Both do the same thing, and tests run the same sources on both: [docs/backends.md](docs/backends.md).
+
+## Quick start
 
 ```bash
-# Build single static Go binary (zero external Go deps)
+# Build the single static binary (no Go dependencies outside the standard library)
 CGO_ENABLED=0 go build -o anima ./cmd/anima
 
-# Run all 3 formal verification kernels with detailed proof explanation
+# Run the three kernels, with the proofs explained
 ./anima check --explain examples/escrow_service.anm
 
-# Run on built-in 32-bit Bytecode VM
+# Run on the bytecode VM
 ./anima run examples/secure_gateway.anm
 
-# Compile to standalone native ELF binary (OCamlopt-style C11 backend)
+# Compile to a native executable (needs gcc and OpenSSL 3 headers)
 ./anima build -o /tmp/gateway examples/secure_gateway.anm && /tmp/gateway
 
-# Inspect 32-bit bytecode disassembly, UML Mermaid/DOT views, or FSP/PNML exports
+# Bytecode disassembly, UML views, FSP / PNML exports
 ./anima disasm examples/escrow_service.anm
 ./anima uml --format mermaid examples/escrow_service.anm
 ./anima export --fsp /tmp/escrow.fsp --pnml /tmp/escrow.pnml examples/escrow_service.anm
 
-# Launch embedded Orchis-dark Studio & interactive Animator
+# Web studio with diagrams and an animator
 ./anima studio examples/escrow_service.anm
 ```
 
-## Standard Library (8 Verified Modules)
+## Documentation
 
-- `std.fp` & `prelude` — Total-terminating pipelines (`|>`, `map`, `filter`, `fold`, `filter_ok`, `unwrap_or`) with length/sum refinement inference
-- `std.concurrent` — `ThreadPool`, bounded `Channel`, `Mutex`, `Semaphore`, `parallel_map`
-- `std.socket` — Typestate-verified `TcpListener` & `TcpStream` (compile-time FD leak & use-after-close prevention)
-- `std.requests` — Sync/async HTTP(S) `get`, `post`, `Session`, `gather` with mandatory bounded `timeout_ms: int[1..300_000]` (as for `accept` on a `std.socket` listener; the kernel proves the value in range, `timeout_bounds`)
-- `std.json` — Boundary-sanitized `json.decode[EntityType]` enforcing refinement bounds & compiled entity invariants
-- `std.bytes` & `std.crypto` — Bounds-checked `ByteView` (`read_u8`, `read_u16_be`, `read_u32_be`; `slice(lo, hi)`, `len()`) + `sha256`, `hmac_sha256`, `constant_time_eq`
-- `std.fs`, `std.cli`, `std.time` — Typestate-checked `File`, `write_atomic`, `cli.args`, `time.now_ms`
+| Document | What it covers |
+|---|---|
+| [docs/language.md](docs/language.md) | variables, comparisons, calls, lambdas, values of unknown or open type, returns, `match` |
+| [docs/contracts.md](docs/contracts.md) | what the contract kernel proves and what it knows: overflow, entities and aliases, element ranges, indexes, map keys, pipelines, byte views |
+| [docs/ownership.md](docs/ownership.md) | handles: sockets, files, thread pools, futures, and `?` |
+| [docs/concurrency.md](docs/concurrency.md) | monitors, machines, properties, progress |
+| [docs/workflows.md](docs/workflows.md) | workflows: paths, `choice` / `merge`, `fork` / `join`, soundness |
+| [docs/stdlib.md](docs/stdlib.md) | the standard modules and how they are called |
+| [docs/backends.md](docs/backends.md) | the VM, the native backend, what "the same on both" covers, the studio, the CLI |
+| [docs/design.md](docs/design.md) | why the language exists and the decisions behind it |
+
+## Examples
+
+| File | Shows |
+|---|---|
+| `examples/escrow_service.anm` | entities with invariants, a port protocol, a monitor with a safety property and progress, a sound workflow |
+| `examples/secure_gateway.anm` | a network service: sockets, JSON decoding into entities, byte views, pipelines |
+| `examples/concurrent_http.anm` | a concurrent HTTP server: each connection is moved into a worker of a thread pool |
+| `examples/agent_sandbox.anm` | a reference monitor for an LLM agent: budgets, an unreachable unapproved shell call, a sound tool workflow |
+| `examples/dining_philosophers_safe.anm` | the asymmetric, deadlock-free dining philosophers |
+| `examples/single_lane_bridge.anm` | the single-lane bridge: safety and progress |
+
+## Status
+
+The six programs the language is being built towards:
+
+| Program | Status |
+|---|---|
+| Concurrent HTTP server | done (`examples/concurrent_http.anm`) |
+| STUN NAT detection | not started |
+| Mini Redis, then Raft replication | not started |
+| DNS server | not started |
+| TFTP server | not started |
+| Peer-to-peer chat node | not started |
+
+## Repository
+
+```
+cmd/anima          the command-line tool
+internal/lexer     tokens
+internal/parser    syntax tree (internal/ast)
+internal/sema      names, types, calls, workflow paths
+internal/verify    the kernels: smt (solver), spark (contracts), lts (FSP and ownership), petri (workflow nets)
+internal/vm        bytecode compiler and virtual machine
+internal/native    C11 generator and its runtime
+internal/stdlib    catalog of the standard modules
+internal/studio    web studio
+examples           six verified programs
+tests              end-to-end tests; tests/bugs holds programs that must be refused
+```
+
+```bash
+go vet ./...
+go test -race -short ./...
+```
+
+Each program in `tests/bugs` has a fault a checker is there to find (many were accepted once and went wrong when run); `tests/e2e_test.go` holds each one to the error it must give.
