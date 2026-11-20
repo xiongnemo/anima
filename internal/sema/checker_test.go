@@ -979,7 +979,7 @@ def f(n: int, p: int[1..9], xs: list[int], rs: list[int[1..9]], o: Option[int], 
 // they take: both backends read arguments by position without counting
 // them, and an argument that is not given is None when the program runs.
 func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
-	const head = "import std.fp as fp\n\ntype Shape = Circle(r: int[1..9]) | Dot\n\nentity Box:\n    n: int[1..9]\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n    ol: Option[list[int]] = None\n    ow: Option[list[int[1..9]]] = None\n    rl: Result[int, list[int[1..9]]] = Err(xs)\n"
+	const head = "import std.fp as fp\n\ntype Shape = Circle(r: int[1..9]) | Dot\n\nentity Box:\n    n: int[1..9]\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n    ol: Option[list[int]] = None\n    on: Option[Option[int[1..9]]] = None\n    ow: Option[list[int[1..9]]] = None\n    rl: Result[int, list[int[1..9]]] = Err(xs)\n"
 	rejected := map[string]string{
 		"g = (a, b) => b\n    n = g(1)":          "this function takes 2 arguments, got 1",
 		"g = (a) => a\n    n = g(1, 2)":          "this function takes 1 argument, got 2",
@@ -1023,6 +1023,7 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"n = abs(\"a\")":                         "argument 1 of abs() is an int, got str",
 		"n = min(\"a\", \"b\")":                  "argument 1 of min() is an int, got str",
 		"n = len(5)":                             "len() takes a list, a map or a string, got",
+		"oz: Option[int] = Some(0)\n    a = on |> unwrap_or(oz)":     "takes a default that is Option[int[1..9]], got Option[int]",
 		"zs: list[int] = [0]\n    ys = zs |> fold(xs, (a, x) => zs)": "the function of fold gives list[int[1..9]] as fold starts with, got list[int]",
 		"n = xs |> fold(0, (a, x) => \"s\")":                         "the function of fold gives int[0..0] as fold starts with, got str",
 		"ys = ol |> unwrap_or(xs)":                                   "unwrap_or on Option[list[int]] takes a default that is list[int], got list[int[1..9]]",
@@ -1073,6 +1074,7 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"p = o |> and_then(v => Some(v))\n    q = o |> and_then(v => None)",
 		"u = r |> and_then(v => Ok(\"s\"))\n    e = r |> and_then(v => Err(\"bad\"))\n    n = r |> unwrap_or(0)",
 		"k: int[0..9] = w |> unwrap_or(0)\n    j: int[0..9] = fp.unwrap_or(w, 0)",
+		"a = on |> unwrap_or(Some(1))\n    b = on |> unwrap_or(None)\n    c = on |> unwrap_or(w)",
 		"ys = ow |> unwrap_or(xs)\n    zs = ow |> unwrap_or([])\n    ws = ow |> unwrap_or([1, 2])\n    q = rl |> and_then(v => Err(xs))",
 		"oo: Option[Option[int]] = None\n    om: Option[map[str, int]] = None\n    a = oo |> unwrap_or(None)\n    b = oo |> unwrap_or(Some(1))\n    c = om |> unwrap_or({})",
 	}

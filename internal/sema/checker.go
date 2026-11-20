@@ -2424,13 +2424,11 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 				held = adt.TypeArgs[0]
 			}
 			ty, ok := eitherOf(held, dt)
-			// A list or map literal is a new value: it takes the type of
-			// what the variant holds, and the kernel proves its elements.
-			switch callArgs[0].Value.(type) {
-			case *ast.ListLit, *ast.MapLit:
-				if knownType(held) && c.assignable(held, dt, callArgs[0].Value) {
-					ty, ok = held, true
-				}
+			// The default is given to what the variant holds as a value is
+			// to a variable of that type: a literal or a constructor call is
+			// a new value that takes the type, and the kernel proves it.
+			if keepsType(held) && c.assignable(held, dt, callArgs[0].Value) {
+				ty, ok = held, true
 			}
 			if !ok {
 				return nil, fmt.Errorf("%s: unwrap_or on %s takes a default that is %s, got %s", callArgs[0].Value.GetSpan(), lhsTy, held, dt)
