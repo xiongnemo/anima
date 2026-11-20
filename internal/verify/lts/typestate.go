@@ -479,12 +479,13 @@ func (t *typestateChecker) walkWorkflow(wf *ast.WorkflowDecl, flow *ast.Flow, cu
 			}
 		}
 		if choice != nil {
+			// The backends try the guards in order and take the first
+			// that holds: a branch has run its own guard and those
+			// before it, not the ones after.
 			for _, br := range choice.Branches {
 				if br.Guard != nil {
 					t.evalExpr(br.Guard, env, false)
 				}
-			}
-			for _, br := range choice.Branches {
 				path := make(map[string]bool, len(onPath))
 				for k := range onPath {
 					path[k] = true

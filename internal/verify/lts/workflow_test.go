@@ -13,6 +13,10 @@ func TestOwnershipFollowsTheWorkflow(t *testing.T) {
 def work(x: int[0..100]) -> int:
     return x
 
+def shut(own p: conc.ThreadPool) -> bool:
+    p.shutdown()
+    return True
+
 workflow W(n: int) -> int:
     start -> a:
         ok = n > 0
@@ -72,6 +76,15 @@ workflow W(n: int) -> int:
         pool.shutdown()
         return r
 `, "use-after-close"},
+		{"a guard that takes the pool is not run for the branch before it", `
+    choice after a:
+        when ok -> yes
+        when shut(own pool) -> no
+    step yes -> done:
+        return 1
+    step no -> done:
+        return 2
+`, "resource handle leak"},
 		{"a log left open on one path", choice + `
     step yes -> fin:
         AuditLog.open_log()
