@@ -141,9 +141,8 @@ func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 			switch {
 			case i == 0:
 				elem = ht.Elem
-			// A part no value has typed is any type to sameHeld: what
-			// `Err("e")` leaves open is not what `Ok("s")` gives.
-			case !knownType(elem) || !knownType(ht.Elem) || hasGap(elem) || hasGap(ht.Elem) || !sameHeld(elem, ht.Elem):
+			// What `Err("e")` leaves open is not what `Ok("s")` gives.
+			case !knownType(elem) || !knownType(ht.Elem) || !sameWhole(elem, ht.Elem):
 				elem = UnknownType{}
 			}
 		}
