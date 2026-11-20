@@ -188,6 +188,21 @@ func TestSemaUnknownValueIsOnlyPassedOn(t *testing.T) {
 		{"a channel of anything given one of ints", `    c = conc.Channel(cap=1)
     c = conc.Channel[int](cap=1)
     print(c.recv())`, "c is a conc.Channel[unknown] and cannot be given a conc.Channel[int]"},
+		{"futures of two types left to their pool", `    pool = conc.ThreadPool(1, 2)
+    _ = pool.submit(() => 5)
+    _ = pool.submit(() => "s")
+    pool.shutdown()`, ""},
+		{"an Err and an Ok gathered", `    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => Err("no"))
+    f2 = pool.submit(() => Ok("s"))
+    rs = req.gather([f1, f2])
+    pool.shutdown()
+    for r in rs:
+        match r:
+            Ok(v) ->
+                k: int = v
+                print(k)
+            Err(e) -> print(e)`, "cannot assign unknown to k (int)"},
 		// Futures gathered into one list give one type, ranges included.
 		{"futures of two ranges gathered", `    pool = conc.ThreadPool(2, 2)
     f1 = pool.submit(() => inRange())

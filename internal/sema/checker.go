@@ -1776,7 +1776,8 @@ func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
 	// A handle is read as a handle of what its variable holds, whichever
 	// path gave it, and a lambda that names the variable keeps the handle it
 	// had: the variable keeps the type of what its handle holds.
-	if _, ok := prev.ty.(*HandleType); ok && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
+	// `_` leaves a handle to itself: a future given to it is never read.
+	if _, ok := prev.ty.(*HandleType); ok && name != "_" && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of what its handle holds", span, name, prev.ty, ty)
 	}
 	// Nor is it of a type on one path and of none on another.
