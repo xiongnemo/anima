@@ -1,0 +1,8 @@
+# A mutex made with 5 holds an int, not the int 5: set() gives it another.
+import std.concurrent as conc
+
+def main() -> int:
+    m = conc.Mutex(5)
+    m.set(0)
+    print(10 / m.get())
+    return 0

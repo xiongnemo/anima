@@ -44,6 +44,7 @@ type checker struct {
 	info        *ProgramInfo
 	curReturn   Type
 	curFuncInfo *FuncInfo
+	callee      ast.Expr // the callee of the call being checked
 }
 
 type scope struct {
@@ -104,11 +105,9 @@ func defaultStdHandles() map[string]*TypestateSpec {
 			AcceptStates: []string{"Closed"},
 			Transitions: map[string]map[string]string{
 				"Open": {
-					"send_text":  "Open",
-					"recv_text":  "Open",
-					"send_bytes": "Open",
-					"recv_bytes": "Open",
-					"close":      "Closed",
+					"send_text": "Open",
+					"recv_text": "Open",
+					"close":     "Closed",
 				},
 			},
 		},
@@ -128,9 +127,8 @@ func defaultStdHandles() map[string]*TypestateSpec {
 			AcceptStates: []string{"Shutdown"},
 			Transitions: map[string]map[string]string{
 				"Running": {
-					"submit":       "Running",
-					"map_parallel": "Running",
-					"shutdown":     "Shutdown",
+					"submit":   "Running",
+					"shutdown": "Shutdown",
 				},
 			},
 		},
@@ -1378,6 +1376,10 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return baseTy, nil
 
 	case *ast.FieldExpr:
+		// A function of a standard module or a method of a standard handle
+		// is only there to be called: neither backend has it as a value.
+		called := c.callee == ast.Expr(e)
+		c.callee = nil
 		objTy, err := c.checkExpr(e.Object, sc)
 		if err != nil {
 			return nil, err
@@ -1385,6 +1387,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if mt, ok := objTy.(*ModuleType); ok {
 			if c.curFuncInfo != nil {
 				c.addUnique(&c.curFuncInfo.Frame.PortEffects, mt.Path+"."+e.Field)
+			}
+			if !called {
+				return nil, fmt.Errorf("%s: %s.%s is not a value: call it, or write a lambda that does", e.Span, mt.Path, e.Field)
 			}
 			return c.lookupModuleMemberType(mt.Path, e.Field, e.Span)
 		}
@@ -1422,6 +1427,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, fmt.Errorf("%s: entity %s has no field %q", e.Span, et.Name, e.Field)
 		}
 		if ht, ok := objTy.(*HandleType); ok {
+			if !called {
+				return nil, fmt.Errorf("%s: %s() of a %s is not a value: call it, or write a lambda that does", e.Span, e.Field, ht.Name)
+			}
 			return c.lookupHandleMethod(ht, e.Field, e.Span)
 		}
 		if objTy.Kind() == KindList && e.Field == "len" {
@@ -1903,6 +1911,9 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 					return nil, err
 				}
 			}
+			if err := c.checkStdCall(e, fe); err != nil {
+				return nil, err
+			}
 			var targetTy Type = UnknownType{}
 			if len(e.TypeArgs) == 1 {
 				var err error
@@ -1920,30 +1931,37 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 					return nil, err
 				}
 			}
+			if err := c.checkStdCall(e, fe); err != nil {
+				return nil, err
+			}
 			switch fe.Field {
 			case "Channel":
 				var elem Type = UnknownType{}
 				if len(e.TypeArgs) == 1 {
-					elem, _ = c.resolveTypeExpr(e.TypeArgs[0])
+					var err error
+					if elem, err = c.resolveTypeExpr(e.TypeArgs[0]); err != nil {
+						return nil, err
+					}
 				}
 				return &HandleType{Name: "conc.Channel", Elem: elem, Protocol: c.info.StdHandles["conc.Channel"]}, nil
 			case "ThreadPool":
 				return &HandleType{Name: "conc.ThreadPool", Protocol: c.info.StdHandles["conc.ThreadPool"]}, nil
 			case "Mutex":
-				var elem Type = UnknownType{}
-				if len(e.Args) >= 1 {
-					elem, _ = c.checkExpr(e.Args[0].Value, sc)
-				}
-				return &HandleType{Name: "conc.Mutex", Elem: elem}, nil
+				// The mutex holds values of the type of its first one, not
+				// of that one's range: set() gives it others.
+				return &HandleType{Name: "conc.Mutex", Elem: widenInt(c.info.ExprTypes[e.Args[0].Value])}, nil
 			case "Semaphore":
 				return &HandleType{Name: "conc.Semaphore"}, nil
 			case "parallel_map":
 				return &ListType{Elem: UnknownType{}}, nil
 			}
+			return nil, fmt.Errorf("%s: module std.concurrent has no member %q", e.Span, fe.Field)
 		}
 	}
 
+	c.callee = e.Callee
 	calleeTy, err := c.checkExpr(e.Callee, sc)
+	c.callee = nil
 	if err != nil {
 		return nil, err
 	}
@@ -1968,6 +1986,10 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if len(e.Args) != len(ft.Params) {
 				return nil, fmt.Errorf("%s: this function takes %s, got %d", e.Span, plural(len(ft.Params), "argument"), len(e.Args))
 			}
+		} else if err := c.checkStdCall(e, e.Callee.(*ast.FieldExpr)); err != nil {
+			return nil, err
+		} else if mt, ok := c.info.ExprTypes[e.Callee.(*ast.FieldExpr).Object].(*ModuleType); ok && mt.Path == "std.requests" && e.Callee.(*ast.FieldExpr).Field == "gather" {
+			return c.gatherType(e)
 		}
 		return ft.Return, nil
 	}
@@ -2694,8 +2716,6 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 			return &FuncType{Return: &HandleType{Name: "req.Session", Protocol: c.info.StdHandles["req.Session"]}}, nil
 		case "gather":
 			return &FuncType{Return: &ListType{Elem: c.instantiateADT("Result", []Type{c.info.Entities["HttpResponse"], StrType{}})}}, nil
-		case "serve_once":
-			return &FuncType{Return: c.instantiateADT("Result", []Type{intTy, StrType{}})}, nil
 		}
 	case "std.json":
 		switch member {
@@ -2739,8 +2759,6 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 		case "sleep_ms":
 			return &FuncType{Return: VoidType{}}, nil
 		}
-	case "std.concurrent":
-		return &FuncType{Return: UnknownType{}}, nil
 	case "std.fp":
 		if _, ok := stageShapes[member]; ok {
 			return &FuncType{Return: UnknownType{}}, nil
@@ -2762,7 +2780,7 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 		}
 	case "sock.TcpStream":
 		switch method {
-		case "send_text", "send_bytes":
+		case "send_text":
 			return &FuncType{Return: c.instantiateADT("Result", []Type{NewUnboundedInt(), StrType{}})}, nil
 		case "recv_text":
 			return &FuncType{Return: c.instantiateADT("Result", []Type{StrType{}, StrType{}})}, nil
@@ -2791,8 +2809,6 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 		switch method {
 		case "submit":
 			return &FuncType{Return: &HandleType{Name: "Future", Elem: UnknownType{}}}, nil
-		case "map_parallel":
-			return &FuncType{Return: &ListType{Elem: UnknownType{}}}, nil
 		case "shutdown":
 			return &FuncType{Return: VoidType{}}, nil
 		}
@@ -2816,9 +2832,11 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 		case "set", "with_lock":
 			return &FuncType{Return: VoidType{}}, nil
 		}
-		return &FuncType{Return: VoidType{}}, nil
 	case "conc.Semaphore":
-		return &FuncType{Return: VoidType{}}, nil
+		switch method {
+		case "acquire", "release":
+			return &FuncType{Return: VoidType{}}, nil
+		}
 	case "Future":
 		if method == "await" {
 			return &FuncType{Return: ht.Elem}, nil

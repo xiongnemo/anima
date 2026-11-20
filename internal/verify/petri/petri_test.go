@@ -138,6 +138,7 @@ workflow BadPoolLeak:
 func TestTaskFuturesAreAwaitedOrLeftToTheirPool(t *testing.T) {
 	const head = `
 import std.concurrent as conc
+import std.requests as req
 
 def main() -> int:
     pool = conc.ThreadPool(2, 4)
@@ -165,7 +166,7 @@ def main() -> int:
 		"awaited in a loop":         "    f = pool.submit(() => 1)\n    for i in 0..2:\n        r = f.await()\n",
 		"awaited in an f-string":    "    f = pool.submit(() => 1)\n    print(f\"got {f.await()}\")\n",
 		"awaited in an expression":  "    f = pool.submit(() => 1)\n    xs = [f.await()]\n",
-		"gathered":                  "    f = pool.submit(() => 1)\n    g = pool.submit(() => 2)\n    rs = conc.gather([f, g])\n",
+		"gathered":                  "    f = pool.submit(() => 1)\n    g = pool.submit(() => 2)\n    rs = req.gather([f, g])\n",
 		"left to the pool":          "    _ = pool.submit(() => 1)\n    for i in 0..3:\n        _ = pool.submit(() => i)\n",
 		"made in both branches":     "    f = pool.submit(() => 0)\n    r = f.await()\n    if c == 1:\n        f = pool.submit(() => 1)\n    else:\n        f = pool.submit(() => 2)\n    r = f.await()\n",
 		"made again after an await": "    f = pool.submit(() => 1)\n    r = f.await()\n    f = pool.submit(() => 2)\n",

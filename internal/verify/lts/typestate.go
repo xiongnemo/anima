@@ -1234,7 +1234,7 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 				env.release(func(l loan) bool { return l.fut == name })
 			}
 		case *sema.ModuleType:
-			if objTy.Path == "std.concurrent" && callee.Field == "gather" && !t.deferred() {
+			if objTy.Path == "std.requests" && callee.Field == "gather" && !t.deferred() {
 				for _, a := range e.Args {
 					if ll, ok := a.Value.(*ast.ListLit); ok {
 						for _, el := range ll.Elems {

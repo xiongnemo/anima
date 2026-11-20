@@ -1,0 +1,11 @@
+# What a channel gives back is what it was sent: a value outside the range
+# of its element type comes out as one inside it.
+import std.concurrent as conc
+
+def main() -> int:
+    ch = conc.Channel[int[1..9]](cap=2)
+    ok = ch.send(0)
+    match ch.recv():
+        Some(v) -> print(10 / v)
+        None -> print(0)
+    return 0

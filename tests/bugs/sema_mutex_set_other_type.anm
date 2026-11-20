@@ -1,0 +1,10 @@
+# A mutex holds values of one type: a string read back as an int adds as text
+# on the VM and as an address natively.
+import std.concurrent as conc
+
+def main() -> int:
+    m = conc.Mutex(5)
+    m.set("s")
+    n = m.get()
+    print(n + 1)
+    return 0
