@@ -1308,3 +1308,16 @@ func TestSemaEveryPathReturns(t *testing.T) {
 		}
 	}
 }
+
+// A workflow has one start: the backends run the last one written and the
+// kernel walks from one of them.
+func TestSemaWorkflowHasOneStart(t *testing.T) {
+	src := "workflow W(n: int) -> int:\n    verify: sound\n\n    start -> done:\n        return 1\n\n    start -> done:\n        return 10 / n\n"
+	prog, err := parser.Parse("wf.anm", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "more than one start") {
+		t.Errorf("expected an error about a second start, got %v", err)
+	}
+}

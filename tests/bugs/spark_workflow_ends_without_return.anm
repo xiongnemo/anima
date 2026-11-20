@@ -1,0 +1,21 @@
+# A workflow that ends without a return gives (), whatever type it says it
+# returns: the step `no` goes to done with nothing to give.
+workflow W(n: int) -> int[1..9]:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> done:
+        return 1
+    step no -> done:
+        print("no")
+
+def main() -> int:
+    x = run_workflow W(0)
+    print(10 / x)
+    return 0
