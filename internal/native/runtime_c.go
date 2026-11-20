@@ -465,10 +465,31 @@ static int v_entry_cmp(const void *a, const void *b) {
     return strcmp((*(AnimaMapEntry *const *)a)->key, (*(AnimaMapEntry *const *)b)->key);
 }
 
-static void v_fmt(AnimaBuf *b, AnimaVal v);
+// A list, map, entity or variant being written, and those it is inside of.
+// One met again inside itself is written "...": they are references, so one
+// can hold itself, and its text would have no end. The VM writes the same.
+typedef struct BoxOpen { const void *box; const struct BoxOpen *up; } BoxOpen;
+
+static const void *v_box(AnimaVal v) {
+    switch (v.kind) {
+        case VAL_LIST: return v.u.list;
+        case VAL_MAP: return v.u.map;
+        case VAL_ENTITY: return v.u.ent;
+        case VAL_VARIANT: return v.u.var;
+        default: return NULL;
+    }
+}
+
+static bool box_open(const void *box, const BoxOpen *up) {
+    for (; box && up; up = up->up) if (up->box == box) return true;
+    return false;
+}
+
+static void v_fmt_in(AnimaBuf *b, AnimaVal v, const BoxOpen *up);
+static void v_fmt(AnimaBuf *b, AnimaVal v) { v_fmt_in(b, v, NULL); }
 
 // The entries of a map or the fields of an entity, sorted by key.
-static void v_fmt_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, bool quoted) {
+static void v_fmt_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, bool quoted, const BoxOpen *up) {
     AnimaMapEntry **order = malloc((len ? len : 1) * sizeof(*order));
     for (size_t i = 0; i < len; i++) order[i] = &entries[i];
     qsort(order, len, sizeof(*order), v_entry_cmp);
@@ -476,13 +497,16 @@ static void v_fmt_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, bool 
         if (i > 0) buf_put(b, ", ");
         if (quoted) { v_fmt_key(b, order[i]->key); buf_put(b, ": "); }
         else { buf_put(b, order[i]->key); buf_put(b, "="); }
-        v_fmt(b, order[i]->val);
+        v_fmt_in(b, order[i]->val, up);
     }
     free(order);
 }
 
-static void v_fmt(AnimaBuf *b, AnimaVal v) {
+static void v_fmt_in(AnimaBuf *b, AnimaVal v, const BoxOpen *up) {
     char num[32];
+    BoxOpen here = { v_box(v), up };
+    if (box_open(here.box, up)) { buf_put(b, "..."); return; }
+    up = &here;
     switch (v.kind) {
         case VAL_VOID: buf_put(b, "()"); break;
         case VAL_NONE: buf_put(b, "None"); break;
@@ -493,19 +517,19 @@ static void v_fmt(AnimaBuf *b, AnimaVal v) {
             buf_put(b, "[");
             for (size_t i = 0; v.u.list && i < v.u.list->len; i++) {
                 if (i > 0) buf_put(b, ", ");
-                v_fmt(b, v.u.list->items[i]);
+                v_fmt_in(b, v.u.list->items[i], up);
             }
             buf_put(b, "]");
             break;
         case VAL_MAP:
             buf_put(b, "{");
-            if (v.u.map) v_fmt_entries(b, v.u.map->entries, v.u.map->len, true);
+            if (v.u.map) v_fmt_entries(b, v.u.map->entries, v.u.map->len, true, up);
             buf_put(b, "}");
             break;
         case VAL_ENTITY:
             buf_put(b, v.u.ent && v.u.ent->type_name ? v.u.ent->type_name : "");
             buf_put(b, "(");
-            if (v.u.ent) v_fmt_entries(b, v.u.ent->fields, v.u.ent->len, false);
+            if (v.u.ent) v_fmt_entries(b, v.u.ent->fields, v.u.ent->len, false, up);
             buf_put(b, ")");
             break;
         case VAL_VARIANT:
@@ -515,7 +539,7 @@ static void v_fmt(AnimaBuf *b, AnimaVal v) {
             buf_put(b, "(");
             for (size_t i = 0; i < v.u.var->len; i++) {
                 if (i > 0) buf_put(b, ", ");
-                v_fmt(b, v.u.var->fields[i]);
+                v_fmt_in(b, v.u.var->fields[i], up);
             }
             buf_put(b, ")");
             break;
@@ -1654,7 +1678,14 @@ static AnimaVal json_parse_val(const char **p, bool *ok) {
     return v_none();
 }
 
-static AnimaVal json_encode(AnimaVal v) {
+static AnimaVal json_encode_in(AnimaVal v, const BoxOpen *up);
+static AnimaVal json_encode(AnimaVal v) { return json_encode_in(v, NULL); }
+
+// A value met again inside itself is null, as on the VM.
+static AnimaVal json_encode_in(AnimaVal v, const BoxOpen *up) {
+    BoxOpen here = { v_box(v), up };
+    if (box_open(here.box, up)) return v_str("null");
+    up = &here;
     if (v.kind == VAL_INT) { char b[64]; snprintf(b, sizeof(b), "%lld", (long long)v.u.i); return v_str(b); }
     if (v.kind == VAL_BOOL) return v_str(v.u.b ? "true" : "false");
     if (v.kind == VAL_STR) {
@@ -1673,9 +1704,9 @@ static AnimaVal json_encode(AnimaVal v) {
         AnimaVal acc = v_str("{");
         for (size_t i = 0; i < v.u.map->len; i++) {
             if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode(v_str(v.u.map->entries[i].key)));
+            acc = v_str_cat(acc, json_encode_in(v_str(v.u.map->entries[i].key), up));
             acc = v_str_cat(acc, v_str(":"));
-            acc = v_str_cat(acc, json_encode(v.u.map->entries[i].val));
+            acc = v_str_cat(acc, json_encode_in(v.u.map->entries[i].val, up));
         }
         return v_str_cat(acc, v_str("}"));
     }
@@ -1683,9 +1714,9 @@ static AnimaVal json_encode(AnimaVal v) {
         AnimaVal acc = v_str("{");
         for (size_t i = 0; i < v.u.ent->len; i++) {
             if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode(v_str(v.u.ent->fields[i].key)));
+            acc = v_str_cat(acc, json_encode_in(v_str(v.u.ent->fields[i].key), up));
             acc = v_str_cat(acc, v_str(":"));
-            acc = v_str_cat(acc, json_encode(v.u.ent->fields[i].val));
+            acc = v_str_cat(acc, json_encode_in(v.u.ent->fields[i].val, up));
         }
         return v_str_cat(acc, v_str("}"));
     }
@@ -1693,7 +1724,7 @@ static AnimaVal json_encode(AnimaVal v) {
         AnimaVal acc = v_str("[");
         for (size_t i = 0; i < v.u.list->len; i++) {
             if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode(v.u.list->items[i]));
+            acc = v_str_cat(acc, json_encode_in(v.u.list->items[i], up));
         }
         return v_str_cat(acc, v_str("]"));
     }

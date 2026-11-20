@@ -361,7 +361,41 @@ func quoteKey(k string) string {
 	return b.String()
 }
 
+// String is the text of a value, as print, str and an f-string give it. A
+// list, map, entity or variant met again inside itself is written `...`:
+// they are references, so one can hold itself, and its text would have no
+// end. The native runtime writes the same (v_fmt in runtime_c.go).
 func (v Value) String() string {
+	return v.text(nil)
+}
+
+// boxOf is what tells one list, map, entity or variant from another.
+func boxOf(v Value) (uintptr, bool) {
+	switch v.Kind {
+	case ValList:
+		if v.List == nil {
+			return 0, false
+		}
+		return reflect.ValueOf(v.List).Pointer(), true
+	case ValMap:
+		return reflect.ValueOf(v.Map).Pointer(), true
+	case ValEntity:
+		return reflect.ValueOf(v.Entity).Pointer(), true
+	case ValVariant:
+		return reflect.ValueOf(v.Variant).Pointer(), true
+	}
+	return 0, false
+}
+
+func (v Value) text(open []uintptr) string {
+	if box, ok := boxOf(v); ok {
+		for _, o := range open {
+			if o == box {
+				return "..."
+			}
+		}
+		open = append(open, box)
+	}
 	switch v.Kind {
 	case ValVoid:
 		return "()"
@@ -382,7 +416,7 @@ func (v Value) String() string {
 		}
 		var parts []string
 		for _, el := range *v.List {
-			parts = append(parts, el.String())
+			parts = append(parts, el.text(open))
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case ValMap:
@@ -390,13 +424,13 @@ func (v Value) String() string {
 		// run to the next, and the native backend has to print the same.
 		var parts []string
 		for _, k := range sortedKeys(v.Map) {
-			parts = append(parts, quoteKey(k)+": "+v.Map[k].String())
+			parts = append(parts, quoteKey(k)+": "+v.Map[k].text(open))
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
 	case ValEntity:
 		var parts []string
 		for _, k := range sortedKeys(v.Entity.Fields) {
-			parts = append(parts, fmt.Sprintf("%s=%s", k, v.Entity.Fields[k].String()))
+			parts = append(parts, fmt.Sprintf("%s=%s", k, v.Entity.Fields[k].text(open)))
 		}
 		return fmt.Sprintf("%s(%s)", v.Entity.TypeName, strings.Join(parts, ", "))
 	case ValVariant:
@@ -405,7 +439,7 @@ func (v Value) String() string {
 		}
 		var parts []string
 		for _, f := range v.Variant.Fields {
-			parts = append(parts, f.String())
+			parts = append(parts, f.text(open))
 		}
 		return fmt.Sprintf("%s(%s)", v.Variant.Name, strings.Join(parts, ", "))
 	case ValHandle:

@@ -871,6 +871,47 @@ def main() -> int:
     return 0
 `
 
+// A list, a map, an entity and a variant are references, so one can hold
+// itself. Its text and its JSON have an end: where it is met again inside
+// itself it is written `...`, and null in JSON. Both backends walked it
+// until the stack ran out.
+func TestE2ESelfHoldingValuesParity(t *testing.T) {
+	runOnBothBackends(t, "self_holding", selfHoldingSrc, "N(by={}, kids=[..., N(by={}, kids=[...], next=Some(...), v=2)], next=None, v=1)\nN(by={}, kids=[], next=Some(N(by={}, kids=[...], next=Some(...), v=2)), v=1)\nN(by={\"me\": ...}, kids=[], next=None, v=1)\n[Node(...)] [[Node(...)], [Node(...)]]\n{\"kids\":[null]}\n")
+}
+
+const selfHoldingSrc = `import std.json as json
+
+type T = Node(kids: list[T]) | Leaf
+
+entity N:
+    v: int
+    kids: list[N]
+    next: Option[N]
+    by: map[str, N]
+
+entity M:
+    kids: list[M]
+
+def main() -> int:
+    a = N(v=1, kids=[], next=None, by={})
+    b = N(v=2, kids=[a], next=Some(a), by={})
+    a.kids = [a, b]
+    print(a)
+    a.kids = []
+    a.next = Some(b)
+    print(str(a))
+    a.next = None
+    a.by["me"] = a
+    print(f"{a}")
+    ks = [Leaf]
+    ks[0] = Node(ks)
+    print(ks, [ks, ks])
+    m = M(kids=[])
+    m.kids = [m]
+    print(json.encode(m))
+    return 0
+`
+
 // A lambda in a fork branch is a function of its own. The native build wrote
 // it inside the function of the branch and did not compile.
 func TestE2EForkBranchLambdaParity(t *testing.T) {

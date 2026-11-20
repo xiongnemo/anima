@@ -2,7 +2,7 @@
 
 Before any kernel runs, the semantic checker gives every value a type and refuses what the two backends could not run as written. The reason behind most rules here is the same: an operation on a value of the wrong sort does not fail when the program runs, it gives `()` or `None` or runs on whatever the value is, and the kernels would go on reasoning about the type the source declared.
 
-Contents: [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [Returns](#returns) · [Matches](#matches)
+Contents: [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [A value may hold itself](#a-value-may-hold-itself) · [Returns](#returns) · [Matches](#matches)
 
 ## Variables
 
@@ -112,6 +112,14 @@ A variable keeps its sort here too: one that is an `int` is not given such a val
 - `req.gather` gives a list of a type only when its futures all give the very same one, ranges included.
 
 Who owns a handle and who must close it is in [ownership.md](ownership.md).
+
+## A value may hold itself
+
+Lists, maps, entities and variants are references, so a write in place can make one hold itself: `a.kids = [a]`.
+
+- `==` compares such values and ends ([Comparisons](#comparisons-and-operators)).
+- Its text (`print`, `str`, an f-string) has `...` where the value is met again inside itself: `Node(kids=[...], v=1)`.
+- `json.encode` gives `null` there.
 
 ## Returns
 
