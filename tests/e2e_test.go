@@ -149,6 +149,10 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_mutex_set_other_type.anm", "is int, got str"},
 		{"../tests/bugs/sema_std_call_missing_argument.anm", "std.crypto.sha256 takes 1 argument, got 0"},
 		{"../tests/bugs/spark_piped_request_timeout.anm", "timeout_bounds"},
+		{"../tests/bugs/spark_byteview_piped_read.anm", "byteview_bounds"},
+		{"../tests/bugs/spark_byteview_from_hex_not_hex.anm", "byteview_bounds"},
+		{"../tests/bugs/spark_byteview_lambda_parameter.anm", "byteview_bounds"},
+		{"../tests/bugs/spark_byteview_slice_outside.anm", "byteview_bounds"},
 		{"../tests/bugs/sema_nested_piped_std_call.anm", "argument 1 of set() of a conc.Mutex is int, got str"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
@@ -408,19 +412,21 @@ def main() -> int:
     return 0
 `, "[[1, 1], [2, 2], [3, 3]]\n[]\n3\ngot\ngot\ngot\n7\n[2, 3]\n")
 
-	// The ends of a slice are brought inside the view: slice(1, 0) was a Go
-	// panic on the VM.
+	// A slice shares the bytes of its view. Ends outside the view are no
+	// longer a program the kernel lets run (byteview_bounds); both backends
+	// still bring them inside.
 	runOnBothBackends(t, "native_slice", `import std.bytes as bytes
 
 def main() -> int:
     bv = bytes.from_str("ABCDEF")
     s = bv.slice(1, 3)
-    print(s.len(), bv.len())
-    print(bv.slice(1, 0).len(), bv.slice(4, 100).len(), bv.slice(9, 12).len(), bv.slice(0 - 3, 2).len(), bv.slice(2, 0 - 1).len())
-    t = bv.slice(2, 6).slice(1, 3)
-    print(t.len())
+    print(s.len(), bv.len(), s.read_u8(0), s.read_u8(1))
+    e = bv.slice(6, 6)
+    w = bv.slice(2, 6)
+    t = w.slice(1, 3)
+    print(e.len(), t.len(), t.read_u16_be(0))
     return 0
-`, "2 6\n0 2 0 2 0\n2\n")
+`, "2 6 66 67\n0 2 17477\n")
 }
 
 // A request that gets no answer is an Err on both backends, with the same
@@ -495,6 +501,61 @@ def main() -> int:
         Err(e) -> print("no listener")
     return 0
 `, "asked\nanswered\n200 hi\n")
+}
+
+// The kernel knows how long a byte view is: what it proves about reads and
+// slices is what both backends do.
+func TestE2EByteViewLengths(t *testing.T) {
+	runOnBothBackends(t, "byteview_lengths", `import std.bytes as bytes
+
+entity Packet:
+    kind: int
+    body: bytes.ByteView
+
+def peek(bv: bytes.ByteView) -> int:
+    if bv.len() > 2:
+        return bv.read_u8(2)
+    return 0 - 1
+
+def head(bv: bytes.ByteView) -> int:
+    requires: bv.len() >= 4
+    return bv.read_u32_be(0)
+
+def first(p: Packet) -> int:
+    requires: p.body.len() >= 1
+    return p.body.read_u8(0)
+
+def at(bv: bytes.ByteView, n: int) -> int:
+    if n >= 0 and n <= bv.len() - 4:
+        w = bv.slice(n, n + 4)
+        return w.read_u32_be(0)
+    return 0 - 1
+
+def words(s: str) -> int:
+    rest = bytes.from_str(s)
+    last = 0
+    while rest.len() >= 2:
+        last = rest.read_u16_be(0)
+        rest = rest.slice(2, rest.len())
+    return last
+
+def main() -> int:
+    print(peek(bytes.from_str("ABC")), peek(bytes.from_str("A")))
+    bv = bytes.from_str("ABCDEF")
+    h = bv.slice(0, 4)
+    print(head(h), at(bv, 2), at(bv, 3), words("ABCDE"), words(""))
+    p = Packet(kind=1, body=bv.slice(1, 3))
+    print(first(p), p.body.len(), p.body.read_u8(1))
+    hx = bytes.from_hex("0a0b0C")
+    print(hx.len(), hx.read_u8(2), 1 |> hx.read_u8())
+    bad = bytes.from_hex("zzzz")
+    odd = bytes.from_hex("abc")
+    print(bad.len(), odd.len())
+    cv = bv
+    bv = bytes.from_str("A")
+    print(cv.read_u8(3), bv.len())
+    return 0
+`, "67 -1\n1094861636 1128547654 -1 17220 0\n66 2 67\n3 12 11\n0 0\n68 1\n")
 }
 
 // A connection moved into a worker must stay open when the function that

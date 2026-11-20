@@ -1,0 +1,11 @@
+# BUG: from_hex of a literal was taken to be half as long as the literal,
+# whatever it holds. A literal that is not pairs of hex digits decodes to an
+# empty view, so the read below is past its end.
+# Expected: SPARK FAILED [def:main.byteview_bounds]
+import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_hex("zzzz")
+    x = bv.read_u8(1)
+    print(x)
+    return 0

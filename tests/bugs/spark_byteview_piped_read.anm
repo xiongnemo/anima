@@ -1,0 +1,11 @@
+# BUG: a read of a byte view given its offset by a pipeline was not checked.
+# `5 |> bv.read_u8()` is bv.read_u8(5): past the end of a view of one byte,
+# a Go panic on the VM and whatever lies there natively.
+# Expected: SPARK FAILED [def:main.byteview_bounds]
+import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_str("A")
+    x = 5 |> bv.read_u8()
+    print(x)
+    return 0

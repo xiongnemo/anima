@@ -3757,3 +3757,155 @@ def main() -> int:
 		}
 	}
 }
+
+const viewPrelude = `import std.bytes as bytes
+
+entity Packet:
+    body: bytes.ByteView
+
+def head(bv: bytes.ByteView) -> int:
+    requires: bv.len() >= 4
+    return bv.read_u32_be(0)
+
+def empty(mut p: Packet) -> int:
+    p.body = bytes.from_str("")
+    return 0
+`
+
+func viewVCs(t *testing.T, body string) string {
+	t.Helper()
+	src := viewPrelude + "\ndef f(bv: bytes.ByteView, s: str, n: int, c: bool, o: Option[bytes.ByteView], vs: list[bytes.ByteView]) -> int:\n" + body + "\n"
+	return strings.Join(failedVCs(verifySrc(t, src)), "\n")
+}
+
+// A byte view is as long as what it was made from: bv.len() is that
+// length, a slice is proved inside its view and is hi - lo long.
+func TestSPARKByteViewLengths(t *testing.T) {
+	proved := map[string]string{
+		"len() guards a read": `
+    if bv.len() > 2:
+        return bv.read_u8(2)
+    return 0`,
+		"a slice has the length it was cut to": `
+    if bv.len() < 6:
+        return 0
+    h = bv.slice(0, 4)
+    rest = bv.slice(4, bv.len())
+    x = head(h)
+    if rest.len() >= 2:
+        return rest.read_u8(1)
+    return x`,
+		"arithmetic on a length": `
+    if n >= 0 and n <= bv.len() - 4:
+        w = bv.slice(n, n + 4)
+        return w.read_u32_be(0)
+    return 0`,
+		"from_str of a string": `
+    v = bytes.from_str(s)
+    if len(s) > 1:
+        return v.read_u16_be(0)
+    return 0`,
+		"from_hex of hex digits": `
+    v = bytes.from_hex("0a0B")
+    return v.read_u16_be(0)`,
+		"another name for a view": `
+    v = bytes.from_str("ABCDEF")
+    w = v
+    v = bytes.from_str("A")
+    return w.read_u8(5) + v.read_u8(0)`,
+		"a loop that eats the view": `
+    rest = bytes.from_str(s)
+    last = 0
+    while rest.len() >= 2:
+        last = rest.read_u16_be(0)
+        rest = rest.slice(2, rest.len())
+    return last`,
+		"a view in a field": `
+    p = Packet(body=bv.slice(0, 0))
+    q = Packet(body=bytes.from_str("xy"))
+    return q.body.read_u16_be(0) + p.body.len()`,
+		"a piped offset inside the view": `
+    v = bytes.from_str("AB")
+    return 1 |> v.read_u8()`,
+		"the element of a loop": `
+    t = 0
+    for w in vs:
+        if w.len() > 0:
+            t = w.read_u8(0)
+    return t`,
+		"after an if, what both branches give": `
+    v = bytes.from_str("ABCDEF")
+    w = v.slice(0, 2)
+    if c:
+        w = v.slice(0, 4)
+    return w.read_u8(1)`,
+	}
+	for name, body := range proved {
+		if got := viewVCs(t, body); got != "" {
+			t.Errorf("%s: not proved: %s", name, got)
+		}
+	}
+
+	refused := map[string]string{
+		"a read without a guard":       "\n    return bv.read_u8(0)",
+		"a guard one short":            "\n    if bv.len() >= 2:\n        return bv.read_u16_be(1)\n    return 0",
+		"a negative offset":            "\n    if bv.len() > n:\n        return bv.read_u8(n)\n    return 0",
+		"a slice past the end":         "\n    v = bytes.from_str(\"ABCD\")\n    w = v.slice(2, 9)\n    return 0",
+		"a slice whose ends cross":     "\n    v = bytes.from_str(\"ABCD\")\n    w = v.slice(3, 2)\n    return 0",
+		"a slice of unknown ends":      "\n    w = bv.slice(0, n)\n    return 0",
+		"a piped slice past the end":   "\n    v = bytes.from_str(\"ABCD\")\n    w = 2 |> v.slice(9)\n    return 0",
+		"a read past a slice":          "\n    v = bytes.from_str(\"ABCDEF\")\n    w = v.slice(0, 2)\n    return w.read_u8(5)",
+		"a read of a slice unnamed":    "\n    v = bytes.from_str(\"ABCDEF\")\n    return v.slice(0, 2).read_u8(0)",
+		"from_hex of what is not hex":  "\n    v = bytes.from_hex(\"zzzz\")\n    return v.read_u8(1)",
+		"from_hex of an odd literal":   "\n    v = bytes.from_hex(\"abc\")\n    return v.read_u8(0)",
+		"a piped offset":               "\n    v = bytes.from_str(\"A\")\n    return 5 |> v.read_u8()",
+		"a view assigned again":        "\n    v = bytes.from_str(\"ABCDEF\")\n    v = bytes.from_str(\"A\")\n    return v.read_u8(3)",
+		"a length read before":         "\n    v = bytes.from_str(\"ABCDEF\")\n    k = v.len()\n    v = bytes.from_str(\"A\")\n    if k > 3:\n        return v.read_u8(3)\n    return 0",
+		"assigned in a branch":         "\n    v = bytes.from_str(\"ABCDEF\")\n    if c:\n        v = bytes.from_str(\"A\")\n    return v.read_u8(3)",
+		"assigned in a loop":           "\n    v = bytes.from_str(\"ABCDEF\")\n    for w in vs:\n        v = w\n    return v.read_u8(3)",
+		"eaten in a loop":              "\n    v = bytes.from_str(\"ABCDEF\")\n    i = 0\n    while i < 3:\n        x = v.read_u8(3)\n        v = v.slice(0, 3)\n        i = i + 1\n    return 0",
+		"a pattern name over a view":   "\n    v = bytes.from_str(\"ABCDEF\")\n    match o:\n        Some(v) -> return v.read_u8(3)\n        None -> return 0",
+		"a pattern name, after":        "\n    v = bytes.from_str(\"ABCDEF\")\n    match o:\n        Some(v) -> print(1)\n        None -> print(2)\n    return v.read_u8(3)",
+		"the parameter of a lambda":    "\n    g = (w) => w.read_u8(3)\n    return g(bytes.from_str(\"A\"))",
+		"a lambda parameter, sliced":   "\n    g = (w) => w.slice(0, 1)\n    return 0",
+		"a lambda parameter by a name": "\n    v = bytes.from_str(\"ABCDEF\")\n    g = (v) => v.read_u8(3)\n    return g(bytes.from_str(\"A\"))",
+		"a field written":              "\n    q = Packet(body=bytes.from_str(\"xy\"))\n    q.body = bytes.from_str(\"z\")\n    return q.body.read_u8(1)",
+		"a field written by a callee":  "\n    q = Packet(body=bytes.from_str(\"xy\"))\n    r = empty(mut q)\n    return q.body.read_u8(1)",
+		"a field written by an alias":  "\n    q = Packet(body=bytes.from_str(\"xy\"))\n    r = q\n    r.body = bytes.from_str(\"\")\n    return q.body.read_u8(1)",
+		"a requires not met":           "\n    v = bytes.from_str(\"ABCDEF\")\n    return head(v.slice(3, 6))",
+		"a requires, view unknown":     "\n    return head(bv)",
+		"the element of a loop":        "\n    t = 0\n    for w in vs:\n        t = w.read_u8(0)\n    return t",
+	}
+	for name, body := range refused {
+		got := viewVCs(t, body)
+		if !strings.Contains(got, "byteview_bounds") && !strings.Contains(got, "call_head_requires_1") {
+			t.Errorf("%s: want a failed byteview_bounds or requires, got %q", name, got)
+		}
+	}
+
+	// What a function says of the view it returns is proved of it.
+	rep := verifySrc(t, viewPrelude+`
+def two(bv: bytes.ByteView) -> bytes.ByteView:
+    requires: bv.len() >= 2
+    ensures: result.len() == 4
+    return bv.slice(0, 2)
+`)
+	if got := strings.Join(failedVCs(rep), "\n"); !strings.Contains(got, "ensures") {
+		t.Errorf("a false ensures about the length of a returned view: got %q", got)
+	}
+}
+
+// A length is counted in an int64, so arithmetic on one can be proved to
+// stay inside it.
+func TestSPARKLengthFitsInt64(t *testing.T) {
+	rep := verifySrc(t, `
+def g(xs: list[int], n: int) -> int:
+    if n >= 0 and n <= len(xs) - 4:
+        w = n + 4
+        return w
+    return 0
+`)
+	if got := failedVCs(rep); len(got) != 0 {
+		t.Errorf("not proved: %v", got)
+	}
+}
