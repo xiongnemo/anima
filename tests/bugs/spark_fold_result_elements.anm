@@ -1,0 +1,10 @@
+# A fold over a list gives what its function gave last: the elements of the
+# list that was folded say nothing of it.
+def main() -> int:
+    d = [1]
+    zs = [0]
+    es = [1]
+    ys = es |> fold(d, (a, x) => zs)
+    if len(ys) > 0:
+        print(10 / ys[0])
+    return 0

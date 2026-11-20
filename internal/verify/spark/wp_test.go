@@ -3678,3 +3678,67 @@ def f(mut m: map[str, int[1..9]], ks: list[str], mi: map[int, int], i: int, b: T
 		t.Errorf("expected every VC proved, failed VCs: %v", failed)
 	}
 }
+
+// A pipeline gives what its last stage gives: the length and the elements of
+// the list it starts from say nothing of what a fold, a function or a take
+// made of it.
+func TestSPARKPipelineResultIsWhatItsLastStageGives(t *testing.T) {
+	const head = `
+import std.fp as fp
+
+def other(xs: list[int]) -> list[int]:
+    return [0]
+
+def zero(n: int) -> int:
+    return 0
+
+def main() -> int:
+    xs = [1, 2, 3]
+    d = [1]
+    zs = [0]
+`
+	first := "    if len(ys) > 0:\n        print(10 / ys[0])\n    return 0\n"
+	stale := map[string]string{
+		"fold to a list":             "    ys = xs |> fold(d, (a, x) => zs)\n" + first,
+		"qualified fold":             "    ys = xs |> fp.fold(d, (a, x) => zs)\n" + first,
+		"fold then take":             "    ys = xs |> fold(d, (a, x) => zs) |> take(1)\n" + first,
+		"flat_map":                   "    ys = xs |> flat_map(x => zs)\n" + first,
+		"function stage":             "    ys = xs |> other()\n" + first,
+		"bare function stage":        "    ys = xs |> other\n" + first,
+		"function stage then filter": "    ys = xs |> other |> filter(x => True)\n" + first,
+		"sum then a function":        "    n = xs |> sum() |> zero()\n    print(10 / n)\n    return 0\n",
+		"sum then a bare function":   "    n = xs |> sum() |> zero\n    print(10 / n)\n    return 0\n",
+		"sum then a lambda":          "    g = (v) => 0\n    n = xs |> sum() |> g()\n    print(10 / n)\n    return 0\n",
+		"sum then a builtin":         "    n = xs |> sum() |> min(0)\n    print(10 / n)\n    return 0\n",
+		"sum fold then a function":   "    n = xs |> fold(1, (a, x) => a + x) |> zero()\n    print(10 / n)\n    return 0\n",
+	}
+	for name, body := range stale {
+		if failed := strings.Join(failedVCs(verifySrc(t, head+body)), "\n"); !strings.Contains(failed, "div_nonzero") {
+			t.Errorf("%s: expected a failed div_nonzero, failed VCs:\n%s", name, failed)
+		}
+	}
+	short := map[string]string{
+		"take":               "    ys = xs |> take(1)\n    print(ys[2])\n    return 0\n",
+		"drop":               "    ys = xs |> drop(2)\n    print(ys[1])\n    return 0\n",
+		"take over an older": "    ys = [4, 5, 6]\n    ys = xs |> take(1)\n    print(ys[2])\n    return 0\n",
+		"annotated":          "    ys: list[int] = xs |> take(1)\n    print(ys[2])\n    return 0\n",
+	}
+	for name, body := range short {
+		if failed := strings.Join(failedVCs(verifySrc(t, head+body)), "\n"); !strings.Contains(failed, "index_bounds") {
+			t.Errorf("%s: expected a failed index_bounds, failed VCs:\n%s", name, failed)
+		}
+	}
+	precise := map[string]string{
+		"sum of positive elements":  "    n = xs |> sum()\n    print(10 / n)\n    return 0\n",
+		"sum fold":                  "    n = xs |> fold(1, (a, x) => a + x)\n    print(10 / n)\n    return 0\n",
+		"filter, map, sum":          "    n = xs |> filter(x => x > 0) |> map(x => x + 1) |> sum()\n    print(n)\n    return 0\n",
+		"map keeps the length":      "    ys = xs |> map(x => x + 1)\n    print(10 / ys[2])\n    return 0\n",
+		"filter keeps the elements": "    ys = xs |> filter(x => x > 1) |> take(2)\n    if len(ys) > 0:\n        print(10 / ys[0])\n    return 0\n",
+		"take is no longer":         "    ys = xs |> take(2)\n    if len(ys) > 3:\n        print(10 / 0)\n    return 0\n",
+	}
+	for name, body := range precise {
+		if failed := strings.Join(failedVCs(verifySrc(t, head+body)), "\n"); failed != "" {
+			t.Errorf("%s: expected every VC proved, failed VCs:\n%s", name, failed)
+		}
+	}
+}
