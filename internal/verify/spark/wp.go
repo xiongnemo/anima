@@ -725,30 +725,115 @@ func (v *verifier) verifyWorkflow(wf *ast.WorkflowDecl) {
 		}
 	}
 
-	for _, n := range wf.Nodes {
-		switch node := n.(type) {
-		case *ast.StartNode:
-			v.execBlock(node.Body, env, scope)
-		case *ast.ForkNode:
-			for _, br := range node.Branches {
+	flow := ast.NewFlow(wf)
+	if flow.Start == nil {
+		v.workflowEnds(env, scope, wf.Span)
+		return
+	}
+	if v.execBlock(flow.Start.Body, env, scope) {
+		return
+	}
+	v.walkWorkflow(flow, flow.Start.Target, env, scope, flow.Start.Span, map[string]bool{})
+}
+
+// walkWorkflow runs the workflow from the node called cur as the backends
+// do, one path at a time: the body of a step is checked with what is known
+// on the way to it, not with what the step written above it left behind. A
+// choice is followed down each branch with its guard taken to hold.
+func (v *verifier) walkWorkflow(flow *ast.Flow, cur string, env *symEnv, scope string, at ast.Span, onPath map[string]bool) {
+	for {
+		if flow.Ends(cur) {
+			v.workflowEnds(env, scope, at)
+			return
+		}
+		if onPath[cur] {
+			// A loop would need an invariant, and a workflow has nowhere to state one.
+			v.record(scope+".acyclic", scope, at, "false", VCFailed,
+				fmt.Sprintf("the workflow comes back to %s: a loop is not verified in a workflow, write it in a function", cur), nil)
+			return
+		}
+		onPath[cur] = true
+		if st := flow.Step(cur); st != nil {
+			if v.execBlock(st.Body, env, scope) {
+				return
+			}
+			next, choice := flow.AfterStep(st)
+			if choice != nil {
+				v.walkChoice(flow, choice, env, scope, onPath)
+				return
+			}
+			cur, at = next, st.Span
+			continue
+		}
+		if cn := flow.Choice(cur); cn != nil {
+			v.walkChoice(flow, cn, env, scope, onPath)
+			return
+		}
+		if fk := flow.Fork(cur); fk != nil {
+			for _, br := range fk.Branches {
 				for _, op := range br.Ops {
 					if op.Kind == ast.BranchStmt && op.Stmt != nil {
 						v.execStmt(op.Stmt, env, scope)
 					}
 				}
 			}
-		case *ast.ChoiceNode:
-			v.verifyChoiceNode(node, env, scope)
-		case *ast.StepNode:
-			v.execBlock(node.Body, env, scope)
+			cur, at = flow.AfterFork(), fk.Span
+			continue
 		}
+		jn := flow.Join(cur)
+		cur, at = flow.AfterJoin(jn), jn.Span
 	}
 }
 
-func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope string) {
+// walkChoice follows each branch of a choice. The backends take the first
+// branch whose guard holds, so a branch is walked with its own guard and
+// the negation of those before it.
+func (v *verifier) walkChoice(flow *ast.Flow, cn *ast.ChoiceNode, env *symEnv, scope string, onPath map[string]bool) {
+	guards := v.verifyChoiceNode(cn, env, scope)
+	var earlier []smt.BoolExpr
+	for i, br := range cn.Branches {
+		benv := env.clone()
+		for _, g := range earlier {
+			benv.assume(smt.Not(g))
+		}
+		if !br.IsElse {
+			benv.assume(guards[i])
+			earlier = append(earlier, guards[i])
+		}
+		path := make(map[string]bool, len(onPath))
+		for k := range onPath {
+			path[k] = true
+		}
+		v.walkWorkflow(flow, br.Target, benv, scope, br.Span, path)
+		if br.IsElse {
+			return
+		}
+	}
+	// With no else and no guard that holds the workflow is over:
+	// choice_complete proves that this is never so.
+}
+
+// workflowEnds is the end of a path that did not return. A workflow that
+// returns a value gives () there, which is of no type.
+func (v *verifier) workflowEnds(env *symEnv, scope string, at ast.Span) {
+	if v.curRetType != nil && v.curRetType.Kind() != sema.KindVoid {
+		if smt.CheckSat(smt.And(smt.Int64Pins(), env.pathCond())).Status == smt.StatusUnsat {
+			v.record(scope+".returns", scope, at, "false", VCProved, "unreachable", nil)
+		} else {
+			v.record(scope+".returns", scope, at, "false", VCFailed,
+				fmt.Sprintf("the workflow can end here without a return, and it returns %s", v.curRetType), nil)
+		}
+	}
+	v.checkFunctionExitContracts(env, scope, at, nil)
+}
+
+// verifyChoiceNode proves that the guards of a choice leave exactly one
+// branch to take, and gives the guard of each branch (nil for else).
+func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope string) []smt.BoolExpr {
 	var guards []smt.BoolExpr
+	byBranch := make([]smt.BoolExpr, len(cn.Branches))
 	hasElse := false
-	for _, br := range cn.Branches {
+	for i, br := range cn.Branches {
 		if br.IsElse {
 			hasElse = true
 			continue
@@ -759,6 +844,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 		v.evalSideEffects(br.Guard, env, scope)
 		g := v.evalBool(br.Guard, env, scope)
 		guards = append(guards, g)
+		byBranch[i] = g
 	}
 
 	// 1. Exhaustiveness: unless `else` present, union of guards must hold
@@ -773,6 +859,7 @@ func (v *verifier) verifyChoiceNode(cn *ast.ChoiceNode, env *symEnv, scope strin
 			v.prove(fmt.Sprintf("%s.choice_exclusive_%d_%d", scope, i+1, j+1), scope, cn.Span, env, notBoth)
 		}
 	}
+	return byBranch
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,24 @@
+# A step is checked with what is known on the way to it. The kernel ran the
+# steps in the order they are written, so `no` was taken to follow `yes` and
+# to see its d = 5.
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+        d = 0
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> done:
+        d = 5
+        return 1
+    step no -> done:
+        return 10 / d
+
+def main() -> int:
+    x = run_workflow W(0)
+    print(x)
+    return 0
