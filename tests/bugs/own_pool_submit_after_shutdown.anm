@@ -1,0 +1,11 @@
+# A pool that was shut down takes no more tasks: on the VM the submit panics,
+# natively it never returns.
+import std.concurrent as conc
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 4)
+    pool.shutdown()
+    f = pool.submit(() => 1)
+    r = f.await()
+    print(r)
+    return 0

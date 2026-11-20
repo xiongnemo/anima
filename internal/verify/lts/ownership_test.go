@@ -852,3 +852,202 @@ workflow W() -> int:
 		}
 	}
 }
+
+// A thread pool is an owned handle: it is shut down on every path by its
+// owner, and not used after.
+func TestOwnershipOfThreadPools(t *testing.T) {
+	rejected := []struct{ name, src, want string }{
+		{"submit after shutdown", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    pool.shutdown()
+    _ = pool.submit(() => 1)
+    return 0
+`, `invalid call pool.submit() while conc.ThreadPool is in state "Shutdown"`},
+		{"shut down twice", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    pool.shutdown()
+    pool.shutdown()
+    return 0
+`, `invalid call pool.shutdown()`},
+		{"borrowed pool shut down", `
+def f(pool: conc.ThreadPool) -> int:
+    pool.shutdown()
+    return 0
+`, "is borrowed"},
+		{"never shut down", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    return 0
+`, "resource handle leak"},
+		{"left running by an early return", `
+def f(c: int) -> int:
+    pool = conc.ThreadPool(2, 4)
+    if c == 1:
+        return 1
+    pool.shutdown()
+    return 0
+`, "resource handle leak"},
+		{"made in a match arm and left running", `
+def f(c: int) -> int:
+    match c:
+        1 ->
+            pool = conc.ThreadPool(2, 4)
+            _ = pool.submit(() => 1)
+        _ -> print(0)
+    return 0
+`, "resource handle leak"},
+		{"made in a loop and left running", `
+def f() -> int:
+    for i in 0..3:
+        pool = conc.ThreadPool(2, 4)
+        _ = pool.submit(() => 1)
+    return 0
+`, "resource handle leak"},
+		{"shut down on one path", `
+def f(c: int) -> int:
+    pool = conc.ThreadPool(2, 4)
+    if c == 1:
+        pool.shutdown()
+    _ = pool.submit(() => 1)
+    pool.shutdown()
+    return 0
+`, "every path must leave it in the same state"},
+		{"shut down in a loop", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    for i in 0..3:
+        pool.shutdown()
+    return 0
+`, "the loop body changes"},
+		{"used through a second name", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    q = pool
+    pool.shutdown()
+    q.shutdown()
+    return 0
+`, "after it was moved"},
+		{"shut down by its own task", `
+def f() -> int:
+    pool = conc.ThreadPool(1, 4)
+    fut = pool.submit(() => pool.shutdown())
+    _ = fut.await()
+    return 0
+`, "a task closure cannot call pool.shutdown()"},
+		{"shut down while a task holds it", `
+def helper(pool: conc.ThreadPool) -> int:
+    _ = pool.submit(() => 1)
+    return 1
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    _ = pool.submit(() => helper(pool))
+    pool.shutdown()
+    return 0
+`, "while a task may still be using"},
+		{"given to a lambda", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    g = (p) => p.shutdown()
+    g(pool)
+    pool.shutdown()
+    return 0
+`, "cannot be stored, copied or passed here"},
+		{"stored in a list", `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    ps = [pool]
+    pool.shutdown()
+    return 0
+`, "cannot be stored, copied or passed here"},
+		{"try while running", `
+def f() -> Result[int, str]:
+    pool = conc.ThreadPool(2, 4)
+    v = fallible()?
+    pool.shutdown()
+    return Ok(v)
+`, "`?` may return early"},
+	}
+	for _, c := range rejected {
+		if got := ownershipErrors(t, c.src); !strings.Contains(got, c.want) {
+			t.Errorf("%s: expected an error containing %q, got:\n%s", c.name, c.want, got)
+		}
+	}
+	accepted := map[string]string{
+		"shut down at the end": `
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => 1)
+    _ = fut.await()
+    pool.shutdown()
+    return 0
+`,
+		"shut down in every arm": `
+def f(c: int) -> int:
+    pool = conc.ThreadPool(2, 4)
+    match c:
+        1 ->
+            fut = pool.submit(() => 5)
+            print(fut.await())
+            pool.shutdown()
+        _ -> pool.shutdown()
+    return 0
+`,
+		"made and shut down in a loop": `
+def f() -> int:
+    for i in 0..3:
+        pool = conc.ThreadPool(1, 1)
+        _ = pool.submit(() => print(i))
+        pool.shutdown()
+    return 0
+`,
+		"borrowed, made by a function, given away": `
+def make() -> conc.ThreadPool:
+    return conc.ThreadPool(2, 4)
+
+def run(pool: conc.ThreadPool) -> int:
+    fut = pool.submit(() => 41)
+    _ = fut.await()
+    return 1
+
+def stop(own pool: conc.ThreadPool) -> int:
+    pool.shutdown()
+    return 0
+
+def f() -> int:
+    pool = make()
+    print(run(pool))
+    return stop(own pool)
+`,
+		"task that holds its pool is awaited first": `
+def helper(pool: conc.ThreadPool) -> int:
+    _ = pool.submit(() => 1)
+    return 1
+
+def f() -> int:
+    pool = conc.ThreadPool(2, 4)
+    fut = pool.submit(() => helper(pool))
+    _ = fut.await()
+    pool.shutdown()
+    return 0
+`,
+		"listener lent to a task until shutdown": `
+def f() -> Result[int, str]:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            pool = conc.ThreadPool(2, 4)
+            _ = pool.submit(() => accept_one(ln))
+            pool.shutdown()
+            ln.close()
+            return Ok(1)
+        Err(e) -> return Err(e)
+`,
+	}
+	for name, src := range accepted {
+		if got := ownershipErrors(t, src); got != "" {
+			t.Errorf("%s: expected no error, got:\n%s", name, got)
+		}
+	}
+}

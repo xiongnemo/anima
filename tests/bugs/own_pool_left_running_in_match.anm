@@ -1,0 +1,12 @@
+# A pool made in a match arm is shut down in that arm, like any other.
+import std.concurrent as conc
+
+def main() -> int:
+    c = 1
+    match c:
+        1 ->
+            pool = conc.ThreadPool(2, 4)
+            f = pool.submit(() => 1)
+            print(1)
+        _ -> print(0)
+    return 0

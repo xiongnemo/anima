@@ -1,0 +1,16 @@
+# A function that borrows a pool cannot shut it down: its owner goes on to
+# submit to it.
+import std.concurrent as conc
+
+def stop(pool: conc.ThreadPool) -> int:
+    pool.shutdown()
+    return 0
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 4)
+    z = stop(pool)
+    f = pool.submit(() => 1)
+    r = f.await()
+    print(r)
+    pool.shutdown()
+    return 0

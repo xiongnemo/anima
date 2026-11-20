@@ -131,3 +131,45 @@ workflow BadPoolLeak:
 		t.Fatalf("expected improper completion due to leaked pool token, got: %v", repLeak.Errors())
 	}
 }
+
+// A future given a name is awaited or gathered somewhere in the function,
+// whatever statement makes it or awaits it; `_ = pool.submit(...)` leaves the
+// task to the shutdown of its pool.
+func TestFuturesAreAwaitedOrLeftToTheirPool(t *testing.T) {
+	const head = `
+import std.concurrent as conc
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 4)
+    c = 1
+`
+	const tail = "    pool.shutdown()\n    return 0\n"
+	leaks := map[string]string{
+		"at the top":      "    f = pool.submit(() => 1)\n",
+		"in a loop":       "    for i in 0..3:\n        f = pool.submit(() => 1)\n",
+		"in a while":      "    while c < 3:\n        f = pool.submit(() => 1)\n        c += 1\n",
+		"in a match arm":  "    match c:\n        1 ->\n            f = pool.submit(() => 1)\n        _ -> print(0)\n",
+		"in an if branch": "    if c == 1:\n        f = pool.submit(() => 1)\n",
+	}
+	for name, body := range leaks {
+		rep := verifyPetri(t, head+body+tail)
+		if got := strings.Join(rep.Errors(), "\n"); !strings.Contains(got, `"f" created by async call was never awaited or gathered`) {
+			t.Errorf("%s: expected a future leak, got:\n%s", name, got)
+		}
+	}
+	fine := map[string]string{
+		"awaited":                  "    f = pool.submit(() => 1)\n    r = f.await()\n",
+		"awaited in every arm":     "    f = pool.submit(() => 1)\n    match c:\n        1 ->\n            r = f.await()\n        _ ->\n            r = f.await()\n",
+		"awaited in a loop":        "    f = pool.submit(() => 1)\n    for i in 0..2:\n        r = f.await()\n",
+		"awaited in an f-string":   "    f = pool.submit(() => 1)\n    print(f\"got {f.await()}\")\n",
+		"awaited in an expression": "    f = pool.submit(() => 1)\n    xs = [f.await()]\n",
+		"gathered":                 "    f = pool.submit(() => 1)\n    g = pool.submit(() => 2)\n    rs = conc.gather([f, g])\n",
+		"left to the pool":         "    _ = pool.submit(() => 1)\n    for i in 0..3:\n        _ = pool.submit(() => i)\n",
+	}
+	for name, body := range fine {
+		rep := verifyPetri(t, head+body+tail)
+		if got := strings.Join(rep.Errors(), "\n"); got != "" {
+			t.Errorf("%s: expected no error, got:\n%s", name, got)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package petri
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -102,7 +103,7 @@ func Verify(info *sema.ProgramInfo) *Report {
 			wr := verifyWorkflow(node)
 			rep.Workflows = append(rep.Workflows, wr)
 		case *ast.FuncDecl:
-			rep.CallErrors = append(rep.CallErrors, checkAsyncResourceFutures(node)...)
+			rep.CallErrors = append(rep.CallErrors, checkAsyncResourceFutures(info, node)...)
 		}
 	}
 	return rep
@@ -442,105 +443,110 @@ func formatMarking(net *PetriNet, m []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// checkAsyncResourceFutures verifies Future tokens opened by get_async/submit are awaited or gathered,
-// and ThreadPool handles are cleanly shut down before leaving scope.
-func checkAsyncResourceFutures(fn *ast.FuncDecl) []string {
+// checkAsyncResourceFutures checks the futures a function makes. A future
+// given a name is awaited or gathered somewhere in the function; one that is
+// not wanted is written `_ = pool.submit(...)`, and the shutdown of its pool
+// waits for the task. (That a pool is shut down on every path, and not used
+// after, is the ownership checker's to prove.)
+func checkAsyncResourceFutures(info *sema.ProgramInfo, fn *ast.FuncDecl) []string {
+	type made struct {
+		name string
+		span ast.Span
+	}
+	var futures []made
+	awaited := map[string]bool{}
 	var errs []string
-	pendingFutures := map[string]ast.Span{}
-	openPools := map[string]ast.Span{}
 
-	var walkExpr func(ast.Expr)
-	walkExpr = func(e ast.Expr) {
-		if e == nil {
-			return
-		}
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			for _, a := range x.Args {
-				walkExpr(a.Value)
+	visit(reflect.ValueOf(fn.Body), func(n any) {
+		switch x := n.(type) {
+		case *ast.LetAssignStmt:
+			if !isFutureProducer(info, x.Value) {
+				return
 			}
-			if fe, ok := x.Callee.(*ast.FieldExpr); ok {
-				if fe.Field == "await" {
-					if id, ok := fe.Object.(*ast.Ident); ok {
-						delete(pendingFutures, id.Name)
-					}
-				} else if fe.Field == "shutdown" {
-					if id, ok := fe.Object.(*ast.Ident); ok {
-						delete(openPools, id.Name)
-					}
-				} else if fe.Field == "gather" {
-					for _, a := range x.Args {
-						if ll, ok := a.Value.(*ast.ListLit); ok {
-							for _, el := range ll.Elems {
-								if id, ok := el.(*ast.Ident); ok {
-									delete(pendingFutures, id.Name)
-								}
+			if x.Name != "_" {
+				futures = append(futures, made{x.Name, x.Span})
+			} else if !isPoolSubmit(info, x.Value) {
+				errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", x.Span, fn.Name))
+			}
+		case *ast.CallExpr:
+			fe, ok := x.Callee.(*ast.FieldExpr)
+			if !ok {
+				return
+			}
+			switch fe.Field {
+			case "await":
+				if id, ok := fe.Object.(*ast.Ident); ok {
+					awaited[id.Name] = true
+				}
+			case "gather":
+				for _, a := range x.Args {
+					if ll, ok := a.Value.(*ast.ListLit); ok {
+						for _, el := range ll.Elems {
+							if id, ok := el.(*ast.Ident); ok {
+								awaited[id.Name] = true
 							}
 						}
 					}
 				}
 			}
-		case *ast.PipeExpr:
-			walkExpr(x.Left)
-			walkExpr(x.Right)
-		case *ast.TryExpr:
-			walkExpr(x.Inner)
 		}
-	}
+	})
 
-	var walkStmts func([]ast.Stmt)
-	walkStmts = func(stmts []ast.Stmt) {
-		for _, s := range stmts {
-			switch x := s.(type) {
-			case *ast.LetAssignStmt:
-				walkExpr(x.Value)
-				if isFutureProducer(x.Value) {
-					pendingFutures[x.Name] = x.Span
-				}
-				if isPoolProducer(x.Value) {
-					openPools[x.Name] = x.Span
-				}
-			case *ast.ExprStmt:
-				walkExpr(x.Expr)
-			case *ast.ReturnStmt:
-				walkExpr(x.Value)
-			case *ast.IfStmt:
-				for _, br := range x.Branches {
-					walkStmts(br.Body)
-				}
-				walkStmts(x.Else)
-			}
+	for _, f := range futures {
+		if !awaited[f.name] {
+			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", f.span, fn.Name, f.name))
 		}
-	}
-	walkStmts(fn.Body)
-
-	for fname, sp := range pendingFutures {
-		errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered", sp, fn.Name, fname))
-	}
-	for pname, sp := range openPools {
-		errs = append(errs, fmt.Sprintf("%s: ThreadPool %q created in %s was never shut down (pool.shutdown())", sp, pname, fn.Name))
 	}
 	return errs
 }
 
-func isFutureProducer(e ast.Expr) bool {
-	ce, ok := e.(*ast.CallExpr)
-	if !ok {
-		return false
+// visit calls f on every AST node reachable from v, whatever statement or
+// expression it is nested in.
+func visit(v reflect.Value, f func(any)) {
+	switch v.Kind() {
+	case reflect.Interface:
+		if !v.IsNil() {
+			visit(v.Elem(), f)
+		}
+	case reflect.Ptr:
+		if !v.IsNil() {
+			f(v.Interface())
+			visit(v.Elem(), f)
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			visit(v.Field(i), f)
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			visit(v.Index(i), f)
+		}
 	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "get_async" || fe.Field == "submit"
-	}
-	return false
 }
 
-func isPoolProducer(e ast.Expr) bool {
+// isFutureProducer reports whether e is a call that starts a task or a request.
+func isFutureProducer(info *sema.ProgramInfo, e ast.Expr) bool {
 	ce, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "ThreadPool"
+	if ht, ok := info.ExprTypes[e].(*sema.HandleType); ok {
+		return ht.Name == "Future"
 	}
-	return false
+	fe, ok := ce.Callee.(*ast.FieldExpr)
+	return ok && (fe.Field == "get_async" || fe.Field == "submit")
+}
+
+// isPoolSubmit reports whether e is pool.submit(...) on a thread pool.
+func isPoolSubmit(info *sema.ProgramInfo, e ast.Expr) bool {
+	ce, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	fe, ok := ce.Callee.(*ast.FieldExpr)
+	if !ok || fe.Field != "submit" {
+		return false
+	}
+	ht, ok := info.ExprTypes[fe.Object].(*sema.HandleType)
+	return ok && ht.Name == "conc.ThreadPool"
 }

@@ -331,7 +331,7 @@ func (c *checker) checkProgram() error {
 				}
 				if p.Own {
 					if h, wrapped := LinearHandle(pt); h == nil || wrapped {
-						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, fs.File), got %s", p.Span, p.Name, pt)
+						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, fs.File, conc.ThreadPool), got %s", p.Span, p.Name, pt)
 					}
 				}
 				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})

@@ -1,0 +1,11 @@
+# Shut down on one path only, the pool may be shut down when the submit runs.
+import std.concurrent as conc
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 4)
+    c = 1
+    if c == 1:
+        pool.shutdown()
+    f = pool.submit(() => 1)
+    print(f.await())
+    return 0

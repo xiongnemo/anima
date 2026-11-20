@@ -140,6 +140,10 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_fold_result_elements.anm", "div_nonzero"},
 		{"../tests/bugs/spark_take_result_length.anm", "index_bounds"},
 		{"../tests/bugs/spark_sum_then_stage.anm", "div_nonzero"},
+		{"../tests/bugs/own_pool_submit_after_shutdown.anm", `invalid call pool.submit() while conc.ThreadPool is in state "Shutdown"`},
+		{"../tests/bugs/own_pool_shut_down_by_borrower.anm", "is borrowed"},
+		{"../tests/bugs/own_pool_shut_down_on_one_path.anm", "every path must leave it in the same state"},
+		{"../tests/bugs/own_pool_left_running_in_match.anm", "resource handle leak"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
@@ -892,3 +896,41 @@ def main() -> int:
         Err(e) -> print(f"listen failed: {e}")
     return 1
 `
+
+// A pool that is made by one function, lent to another and given to a third
+// to shut down runs the same on both backends; so do tasks left to the
+// shutdown of their pool and a pool made and shut down in each pass of a loop.
+func TestE2EThreadPoolOwnershipParity(t *testing.T) {
+	const src = `import std.concurrent as conc
+
+def make() -> conc.ThreadPool:
+    return conc.ThreadPool(1, 4)
+
+def run(pool: conc.ThreadPool) -> int:
+    fut = pool.submit(() => 41)
+    print(fut.await())
+    return 1
+
+def stop(own pool: conc.ThreadPool) -> int:
+    pool.shutdown()
+    return 0
+
+def main() -> int:
+    pool = make()
+    print(run(pool))
+    for i in 0..3:
+        _ = pool.submit(() => print(i))
+    print(stop(own pool))
+    c = 0
+    while c < 2:
+        inner = conc.ThreadPool(1, 1)
+        fut = inner.submit(() => c + 10)
+        match c:
+            0 -> print(f"first {fut.await()}")
+            _ -> print(f"then {fut.await()}")
+        inner.shutdown()
+        c += 1
+    return 0
+`
+	runOnBothBackends(t, "thread_pool_ownership", src, "41\n1\n0\n1\n2\n0\nfirst 10\nthen 11\n")
+}
