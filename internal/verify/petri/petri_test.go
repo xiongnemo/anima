@@ -221,17 +221,18 @@ def main() -> Result[int, str]:
 		}
 	}
 	fine := map[string]string{
-		"awaited":                                             "    r = f.await()\n",
-		"awaited before a try":                                "    r = f.await()\n    v = risky()?\n",
-		"awaited in every branch":                             "    if c == 1:\n        r = f.await()\n    else:\n        r = f.await()\n",
-		"awaited in every arm":                                "    match c:\n        1 ->\n            r = f.await()\n        _ ->\n            r = f.await()\n",
-		"awaited before each return":                          "    if c == 1:\n        r = f.await()\n        return Ok(1)\n    r = f.await()\n",
-		"made in both branches":                               "    r = f.await()\n    if c == 1:\n    " + again + "    else:\n    " + again + "    r = f.await()\n",
-		"each awaited in turn":                                "    r = f.await()\n" + again + "    r = f.await()\n",
-		"made and awaited in a loop":                          "    r = f.await()\n    for i in 0..2:\n    " + again + "        r = f.await()\n",
-		"gathered":                                            "    g = sess.get_async(\"http://127.0.0.1:1/b\", timeout_ms=100)\n    rs = req.gather([f, g])\n",
-		"awaited under a second name":                         "    g = f\n    r = g.await()\n",
-		"awaited under its first name":                        "    g = f\n    r = f.await()\n",
+		"awaited":                      "    r = f.await()\n",
+		"awaited before a try":         "    r = f.await()\n    v = risky()?\n",
+		"awaited in every branch":      "    if c == 1:\n        r = f.await()\n    else:\n        r = f.await()\n",
+		"awaited in every arm":         "    match c:\n        1 ->\n            r = f.await()\n        _ ->\n            r = f.await()\n",
+		"awaited before each return":   "    if c == 1:\n        r = f.await()\n        return Ok(1)\n    r = f.await()\n",
+		"made in both branches":        "    r = f.await()\n    if c == 1:\n    " + again + "    else:\n    " + again + "    r = f.await()\n",
+		"each awaited in turn":         "    r = f.await()\n" + again + "    r = f.await()\n",
+		"made and awaited in a loop":   "    r = f.await()\n    for i in 0..2:\n    " + again + "        r = f.await()\n",
+		"gathered":                     "    g = sess.get_async(\"http://127.0.0.1:1/b\", timeout_ms=100)\n    rs = req.gather([f, g])\n",
+		"awaited under a second name":  "    g = f\n    r = g.await()\n",
+		"awaited under its first name": "    g = f\n    r = f.await()\n",
+		"awaited in the guard of an arm that takes any value": "    match c:\n        _ if is_err(f.await()) -> print(1)\n        _ -> print(0)\n",
 		"second name given another":                           "    g = f\n    g = sess.get_async(\"http://127.0.0.1:1/b\", timeout_ms=100)\n    rs = req.gather([f, g])\n",
 	}
 	for name, body := range fine {
