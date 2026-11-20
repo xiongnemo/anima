@@ -1,0 +1,11 @@
+# What a lambda gave had no type, so any member could be read from it: the
+# VM stopped with a runtime error, the native backend printed (). The call
+# now gives a list[int], which has no member "nope".
+def pick(xs: list[int]) -> int:
+    g = (v) => v
+    y = g(xs)
+    return y.nope()
+
+def main() -> int:
+    print(pick([1, 2]))
+    return 0

@@ -1,0 +1,19 @@
+# A channel made without a type holds anything, so what recv gives has no
+# type. Compared and divided as an int it passed all three kernels: the VM
+# divided by zero, the native backend printed 0. Such a value is now only
+# passed on, printed or matched.
+import std.concurrent as conc
+import std.json as json
+
+def inv(n: int[1..9]) -> int:
+    return 10 / n
+
+def main() -> int:
+    ch = conc.Channel(cap=1)
+    ok = ch.send([1])
+    match ch.recv():
+        Some(v) ->
+            if v != 0:
+                print(10 / v)
+        None -> print("none")
+    return 0

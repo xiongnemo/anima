@@ -141,7 +141,8 @@ func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 			switch {
 			case i == 0:
 				elem = ht.Elem
-			case !knownType(elem) || !knownType(ht.Elem) || !elem.Equals(ht.Elem) || !ht.Elem.Equals(elem):
+			// What `Err("e")` leaves open is not what `Ok("s")` gives.
+			case !knownType(elem) || !knownType(ht.Elem) || !sameWhole(elem, ht.Elem):
 				elem = UnknownType{}
 			}
 		}
@@ -239,7 +240,7 @@ func (c *checker) checkStdArg(a ast.CallArg, at Type, p stdParam, what string, n
 	if at == nil {
 		return nil
 	}
-	unknown := at.Kind() == KindUnknown
+	unknown := generic(at)
 	switch p.kind {
 	case argInt:
 		if at.Kind() != KindInt && !unknown {

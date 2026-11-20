@@ -44,7 +44,19 @@ func (VoidType) Kind() TypeKind     { return KindVoid }
 func (VoidType) String() string     { return "void" }
 func (VoidType) Equals(o Type) bool { _, ok := o.(VoidType); return ok }
 
-type UnknownType struct{}
+// UnknownType is the type of a value sema cannot tell the type of. Such a
+// value is bound, passed on, printed and matched, and nothing else: the
+// kernels read an unknown value as whatever it is used as, and the backends
+// run the operation on whatever it is.
+//
+// Empty marks the type argument that no value has: the elements of [], the
+// error of Ok(v). It is given to any type. Generic marks a parameter of a
+// lambda that is given a name, where the lambda is written: its body is
+// checked again, with the types it is used with, at its first use.
+type UnknownType struct {
+	Empty   bool
+	Generic bool
+}
 
 func (UnknownType) Kind() TypeKind     { return KindUnknown }
 func (UnknownType) String() string     { return "unknown" }

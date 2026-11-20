@@ -1,0 +1,15 @@
+# A channel is a reference. Passed as a Channel[int], the callee sends 0
+# into what the caller reads as a Channel[int[1..9]]: all three kernels
+# passed and the VM divided by zero.
+import std.concurrent as conc
+
+def put(ch: conc.Channel[int]) -> bool:
+    return ch.send(0)
+
+def main() -> int:
+    ch = conc.Channel[int[1..9]](cap=1)
+    ok = put(ch)
+    match ch.recv():
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    return 0

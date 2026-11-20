@@ -858,8 +858,8 @@ def f(c: bool, n: int, s: str, xs: list[int], ss: list[str], o: Option[int], os:
 		{"t = \"a\"\n    t = s\n    b = True\n    b = not c\n    return 0", ""},
 		{"q = None\n    q = Some(3)\n    q = o\n    return 0", ""},
 		{"e = bx\n    e = Box(n=1)\n    return 0", ""},
-		// What a closure hands back has no type, so nothing is known of r.
-		{"g = (v) => v\n    r = g(1)\n    r = \"s\"\n    return 0", ""},
+		// What a named lambda hands back has the type its first use gives.
+		{"g = (v) => v\n    r = g(1)\n    r = \"s\"\n    return 0", "keeps its sort"},
 		{"x = 5\n    x = \"five\"\n    return 0", sort},
 		{"x = 0\n    if c:\n        x = True\n    return 0", sort},
 		{"x = 7\n    if c:\n        x = Some(3)\n    return 0", sort},
@@ -1029,7 +1029,7 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"n = xs |> fold(0, (a, x) => \"s\")":                         "the function of fold gives int[0..0] as fold starts with, got str",
 		"ys = ol |> unwrap_or(xs)":                                   "unwrap_or on Option[list[int]] takes a default that is list[int], got list[int[1..9]]",
 		"ys = fp.unwrap_or(ol, xs)":                                  "takes a default that is list[int], got list[int[1..9]]",
-		"g = (v) => [v]\n    d = g(0)\n    ys = ow |> unwrap_or(d)":  "takes a default that is list[int[1..9]], got list[unknown]",
+		"g = (v) => [v]\n    d = g(0)\n    ys = ow |> unwrap_or(d)":  "takes a default that is list[int[1..9]], got list[int]",
 		"zs: list[int] = [0]\n    q = rl |> and_then(v => Err(zs))":  "gives a Result with the error of Result[int, list[int[1..9]]], got",
 		"g = (v) => v\n    n = 1 |> g(2)":                            "this function takes 1 argument, got 2",
 		"g = (a, b) => b\n    n = 1 |> g":                            "this function takes 2 arguments, got 1",
@@ -1169,7 +1169,7 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"held.set(5)":                  "argument 1 of set() of a conc.Mutex is list[int], got int",
 		"held.with_lock((v) => \"s\")": "the function of with_lock gives what the mutex holds, list[int], got str",
 		"m.with_lock(5)":               "argument 1 of with_lock() of a conc.Mutex is a function of 1 argument, got int",
-		"rs: list[int[1..9]] = [1]\n    ranged = conc.Mutex(rs)\n    ranged.with_lock((v) => v)": "the function of with_lock gives what the mutex holds, list[int[1..9]], got unknown",
+		"rs: list[int[1..9]] = [1]\n    ranged = conc.Mutex(rs)\n    ranged.with_lock((v) => [0])": "the function of with_lock gives what the mutex holds, list[int[1..9]], got list[int]",
 		"r = json.decode()": "std.json.decode takes 1 argument, got 0",
 		// Only to be called.
 		"g = time.sleep_ms":             "std.time.sleep_ms is not a value",

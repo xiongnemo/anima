@@ -2372,7 +2372,7 @@ def f() -> int:
 def wrap(a: A) -> Option:
     return Some(a)
 
-def g(mut p: A, q: Option[A]) -> int:
+def g(mut p: A, q: Option) -> int:
     return 0
 
 def f() -> int:

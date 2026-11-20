@@ -1,0 +1,15 @@
+# The pattern Some(x) writes the variable x, which is an int, with a value
+# of unknown type: after the match x was read as an int and held a list.
+# The VM divided by zero, the native backend printed 0.
+import std.concurrent as conc
+
+def main() -> int:
+    ch = conc.Channel(cap=1)
+    ok = ch.send([1])
+    x = 5
+    match ch.recv():
+        Some(x) -> print(x)
+        None -> print("none")
+    if x != 0:
+        print(10 / x)
+    return 0

@@ -1,0 +1,12 @@
+# Nothing says what `g` takes or gives where it is written, so `y` had no
+# type and anything could be done with it: y[5] is None, which is not 0 to
+# `!=` and is 0 to `/`. The program passed all three kernels and divided by
+# zero on both backends. A named lambda now takes the types of its first use,
+# so y is a list and the index has to be proved inside it.
+def main() -> int:
+    g = (v) => v
+    y = g([1, 2])
+    d = y[5]
+    if d != 0:
+        print(10 / d)
+    return 0
