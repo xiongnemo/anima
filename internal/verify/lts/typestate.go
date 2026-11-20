@@ -136,8 +136,8 @@ func Verify(info *sema.ProgramInfo) *Report {
 // Linear Resource Ownership & Typestate Verifier (Sockets, Files, Ports)
 // ---------------------------------------------------------------------------
 //
-// Every linear handle (sock.TcpStream, sock.TcpListener, fs.File) has exactly
-// one owner. The checker is modular: a function is checked against its own
+// Every linear handle (sock.TcpStream, sock.TcpListener, fs.File,
+// conc.ThreadPool) has exactly one owner. The checker is modular: a function is checked against its own
 // signature and the signatures of the functions it calls.
 //
 //   - A handle parameter is borrowed unless declared `own`. A borrowed handle
@@ -306,7 +306,7 @@ func (t *typestateChecker) newHandle(ht *sema.HandleType, span ast.Span, owned, 
 		span:      span,
 		owned:     owned,
 		wrapped:   wrapped,
-		shareable: ht.Name == "sock.TcpListener",
+		shareable: ht.Name == "sock.TcpListener" || ht.Name == "conc.ThreadPool",
 	}
 }
 
@@ -1205,8 +1205,15 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 		if id, ok := callee.Object.(*ast.Ident); ok {
 			name = id.Name
 			if _, ok := t.handleIdent(id, env); ok {
-				t.evalArgs(e.Args, env)
+				if lam := t.taskOf(e); lam != nil {
+					t.walkTask(lam, name, env)
+				} else {
+					t.evalArgs(e.Args, env)
+				}
 				t.transition(e.Span, env, id.Name, callee.Field)
+				if env.h[id.Name].typeName == "conc.ThreadPool" && callee.Field == "shutdown" && !t.deferred() {
+					env.release(func(l loan) bool { return l.pool == name })
+				}
 				return
 			}
 			if pt, isPort := t.info.Ports[id.Name]; isPort && len(pt.Decl.States) > 0 {
@@ -1218,16 +1225,9 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 		switch objTy := t.info.ExprTypes[callee.Object].(type) {
 		case *sema.HandleType:
 			switch {
-			case objTy.Name == "conc.ThreadPool" && callee.Field == "submit" && len(e.Args) == 1:
-				if lam, ok := e.Args[0].Value.(*ast.LambdaExpr); ok {
-					prevL, prevT := t.inLambda, t.task
-					// A task started by another task is not tied to a future
-					// the function can await, so it may not capture handles.
-					t.inLambda, t.task = prevL || prevT != nil, &taskCtx{pool: name}
-					t.evalExpr(lam.Body, env, false)
-					t.inLambda, t.task = prevL, prevT
-					return
-				}
+			case t.taskOf(e) != nil:
+				t.walkTask(t.taskOf(e), name, env)
+				return
 			case objTy.Name == "conc.ThreadPool" && callee.Field == "shutdown" && name != "" && !t.deferred():
 				env.release(func(l loan) bool { return l.pool == name })
 			case objTy.Name == "Future" && callee.Field == "await" && name != "" && !t.deferred():
@@ -1258,6 +1258,25 @@ func (t *typestateChecker) evalCall(e *ast.CallExpr, env *tsEnv, source bool) {
 		t.evalExpr(e.Callee, env, false)
 		t.evalArgs(e.Args, env)
 	}
+}
+
+// taskOf returns the closure of a pool.submit(() => ...) call.
+func (t *typestateChecker) taskOf(e *ast.CallExpr) *ast.LambdaExpr {
+	if !t.isPoolSubmit(e) || len(e.Args) != 1 {
+		return nil
+	}
+	lam, _ := e.Args[0].Value.(*ast.LambdaExpr)
+	return lam
+}
+
+// walkTask walks the body of a closure given to pool.submit.
+func (t *typestateChecker) walkTask(lam *ast.LambdaExpr, pool string, env *tsEnv) {
+	prevL, prevT := t.inLambda, t.task
+	// A task started by another task is not tied to a future the function
+	// can await, so it may not capture handles.
+	t.inLambda, t.task = prevL || prevT != nil, &taskCtx{pool: pool}
+	t.evalExpr(lam.Body, env, false)
+	t.inLambda, t.task = prevL, prevT
 }
 
 // evalUserCall passes args to a function or workflow with the given

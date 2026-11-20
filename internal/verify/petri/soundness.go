@@ -2,6 +2,8 @@ package petri
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -102,7 +104,7 @@ func Verify(info *sema.ProgramInfo) *Report {
 			wr := verifyWorkflow(node)
 			rep.Workflows = append(rep.Workflows, wr)
 		case *ast.FuncDecl:
-			rep.CallErrors = append(rep.CallErrors, checkAsyncResourceFutures(node)...)
+			rep.CallErrors = append(rep.CallErrors, checkAsyncResourceFutures(info, node)...)
 		}
 	}
 	return rep
@@ -442,105 +444,452 @@ func formatMarking(net *PetriNet, m []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// checkAsyncResourceFutures verifies Future tokens opened by get_async/submit are awaited or gathered,
-// and ThreadPool handles are cleanly shut down before leaving scope.
-func checkAsyncResourceFutures(fn *ast.FuncDecl) []string {
-	var errs []string
-	pendingFutures := map[string]ast.Span{}
-	openPools := map[string]ast.Span{}
+// checkAsyncResourceFutures checks the futures a function makes.
+//
+// A task given to a pool is waited for by the shutdown of that pool, which
+// the ownership checker proves on every path. So its future need not be
+// awaited: one given a name is awaited or gathered somewhere in the function
+// (outside any closure), and one that is not wanted is written
+// `_ = pool.submit(...)`.
+//
+// Nothing else waits for a request started by get_async: its future is
+// awaited or gathered on every path, before the function returns and before
+// its name is given another value.
+func checkAsyncResourceFutures(info *sema.ProgramInfo, fn *ast.FuncDecl) []string {
+	c := &futureCheck{info: info, fn: fn.Name, awaited: map[string]bool{}, seen: map[string]bool{}}
+	st := newPending()
+	if !c.block(fn.Body, st) {
+		c.leak(st.open, "when the function ends")
+	}
+	for _, f := range c.tasks {
+		if !c.awaited[f.name] {
+			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", f.span, fn.Name, f.name))
+		}
+	}
+	return c.errs
+}
 
-	var walkExpr func(ast.Expr)
-	walkExpr = func(e ast.Expr) {
-		if e == nil {
+// pendingFutures is what is known, where a statement is reached, of the
+// requests started before it. open are those some path has not awaited yet.
+// holders[r] are the names that hold r on every path on which r is still
+// open: awaiting one of them ends the wait for r. A name holds one future on
+// any one path, so an await never ends the wait for a request on a path
+// where the name holds another.
+type pendingFutures struct {
+	open    map[ast.Span]string // request -> the name it was made under
+	holders map[ast.Span]map[string]bool
+}
+
+func newPending() *pendingFutures {
+	return &pendingFutures{open: map[ast.Span]string{}, holders: map[ast.Span]map[string]bool{}}
+}
+
+func (p *pendingFutures) clone() *pendingFutures {
+	cp := newPending()
+	for sp, name := range p.open {
+		cp.open[sp] = name
+		cp.holders[sp] = map[string]bool{}
+		for h := range p.holders[sp] {
+			cp.holders[sp][h] = true
+		}
+	}
+	return cp
+}
+
+// join is what is known where the paths meet: a request is open when a path
+// left it open, and held by the names that hold it on each of those paths.
+func join(paths []*pendingFutures) *pendingFutures {
+	out := newPending()
+	for _, q := range paths {
+		for sp, name := range q.open {
+			if _, seen := out.open[sp]; !seen {
+				out.open[sp] = name
+				out.holders[sp] = map[string]bool{}
+				for h := range q.holders[sp] {
+					out.holders[sp][h] = true
+				}
+				continue
+			}
+			for h := range out.holders[sp] {
+				if !q.holders[sp][h] {
+					delete(out.holders[sp], h)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (p *pendingFutures) same(q *pendingFutures) bool {
+	if len(p.open) != len(q.open) {
+		return false
+	}
+	for sp := range p.open {
+		if _, ok := q.open[sp]; !ok || len(p.holders[sp]) != len(q.holders[sp]) {
+			return false
+		}
+		for h := range p.holders[sp] {
+			if !q.holders[sp][h] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// await ends the wait for the requests name holds.
+func (p *pendingFutures) await(name string) {
+	for sp := range p.open {
+		if p.holders[sp][name] {
+			delete(p.open, sp)
+			delete(p.holders, sp)
+		}
+	}
+}
+
+// assign gives name another value: what from holds when from is a name, a
+// new request when made is set, anything else otherwise. It returns the
+// requests that are still open and that no name holds any more.
+func (p *pendingFutures) assign(name, from string, made *ast.Span) map[ast.Span]string {
+	lost := map[ast.Span]string{}
+	if name != "_" {
+		for sp := range p.open {
+			keeps := from != "" && from != name && p.holders[sp][from]
+			if from == name {
+				keeps = p.holders[sp][name]
+			}
+			if keeps {
+				p.holders[sp][name] = true
+				continue
+			}
+			if p.holders[sp][name] {
+				delete(p.holders[sp], name)
+				if len(p.holders[sp]) == 0 {
+					lost[sp] = p.open[sp]
+					delete(p.open, sp)
+					delete(p.holders, sp)
+				}
+			}
+		}
+	}
+	if made != nil {
+		p.open[*made] = name
+		p.holders[*made] = map[string]bool{name: true}
+	}
+	return lost
+}
+
+type namedFuture struct {
+	name string
+	span ast.Span
+}
+
+type futureCheck struct {
+	info    *sema.ProgramInfo
+	fn      string
+	tasks   []namedFuture   // futures of pool tasks that were given a name
+	awaited map[string]bool // names awaited or gathered outside a closure
+	named   ast.Expr        // the call whose future the statement gives a name
+	errs    []string
+	seen    map[string]bool
+}
+
+func (c *futureCheck) report(msg string) {
+	if !c.seen[msg] {
+		c.seen[msg] = true
+		c.errs = append(c.errs, msg)
+	}
+}
+
+// leak reports the requests in open, which were not awaited.
+func (c *futureCheck) leak(open map[ast.Span]string, when string) {
+	spans := make([]ast.Span, 0, len(open))
+	for sp := range open {
+		spans = append(spans, sp)
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].String() < spans[j].String() })
+	for _, sp := range spans {
+		c.report(fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call is not awaited or gathered %s", sp, c.fn, open[sp], when))
+	}
+}
+
+// exprs walks the expressions of a statement. An await or a gather that the
+// statement always runs ends the wait for the requests its name holds: one
+// in a closure, on the right of `and`, `or` or `implies`, or in an arm of a
+// match expression may not run. A `?` may return early: the order in which
+// the parts of a statement run is not the order they are written in (keyword
+// arguments run in parameter order), so only an await inside what the `?` is
+// applied to is known to have run by then. A name in a pattern is written,
+// so it holds nothing known. A request is started where its future is given
+// a name (c.named): anywhere else nothing could wait for it.
+func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
+	maybe := map[any]bool{} // sub-expressions that may not run
+	skipped := 0
+	type ran struct {
+		name   string
+		inside []*ast.TryExpr // the `?` it is an operand of, outermost first
+	}
+	var awaits []ran
+	var tries, inside []*ast.TryExpr
+	unnamed := func(n any) {
+		if x, ok := n.(*ast.CallExpr); ok && ast.Expr(x) != c.named && futureKind(c.info, x) == "request" {
+			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the request started here is not given a name (f = ...get_async(...)), so nothing can wait for it", x.Span, c.fn))
+		}
+	}
+	done := func(e ast.Expr) {
+		id, ok := e.(*ast.Ident)
+		if !ok {
 			return
 		}
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			for _, a := range x.Args {
-				walkExpr(a.Value)
+		c.awaited[id.Name] = true
+		if skipped == 0 {
+			awaits = append(awaits, ran{id.Name, append([]*ast.TryExpr(nil), inside...)})
+		}
+	}
+	for _, n := range nodes {
+		visit(reflect.ValueOf(n), func(n any) bool {
+			if maybe[n] {
+				skipped++
 			}
-			if fe, ok := x.Callee.(*ast.FieldExpr); ok {
-				if fe.Field == "await" {
-					if id, ok := fe.Object.(*ast.Ident); ok {
-						delete(pendingFutures, id.Name)
+			switch x := n.(type) {
+			case *ast.LambdaExpr:
+				// A closure runs later, if at all.
+				if maybe[n] {
+					skipped--
+				}
+				visit(reflect.ValueOf(x.Body), func(n any) bool { unnamed(n); return true }, func(any) {})
+				return false
+			case *ast.BinaryExpr:
+				if x.Op == "and" || x.Op == "or" || x.Op == "implies" {
+					maybe[x.Right] = true
+				}
+			case *ast.MatchExpr:
+				for _, arm := range x.Arms {
+					if arm.Guard != nil {
+						maybe[arm.Guard] = true
 					}
-				} else if fe.Field == "shutdown" {
-					if id, ok := fe.Object.(*ast.Ident); ok {
-						delete(openPools, id.Name)
-					}
-				} else if fe.Field == "gather" {
+					maybe[arm.Value] = true
+				}
+			case *ast.VarPat:
+				c.leak(st.assign(x.Name, "", nil), "before the name is given another value")
+			case *ast.TryExpr:
+				tries = append(tries, x)
+				inside = append(inside, x)
+			case *ast.CallExpr:
+				unnamed(n)
+				fe, ok := x.Callee.(*ast.FieldExpr)
+				if !ok {
+					break
+				}
+				switch fe.Field {
+				case "await":
+					done(fe.Object)
+				case "gather":
 					for _, a := range x.Args {
 						if ll, ok := a.Value.(*ast.ListLit); ok {
 							for _, el := range ll.Elems {
-								if id, ok := el.(*ast.Ident); ok {
-									delete(pendingFutures, id.Name)
-								}
+								done(el)
 							}
 						}
 					}
 				}
 			}
-		case *ast.PipeExpr:
-			walkExpr(x.Left)
-			walkExpr(x.Right)
-		case *ast.TryExpr:
-			walkExpr(x.Inner)
-		}
+			return true
+		}, func(n any) {
+			if maybe[n] {
+				skipped--
+			}
+			if _, ok := n.(*ast.TryExpr); ok {
+				inside = inside[:len(inside)-1]
+			}
+		})
 	}
-
-	var walkStmts func([]ast.Stmt)
-	walkStmts = func(stmts []ast.Stmt) {
-		for _, s := range stmts {
-			switch x := s.(type) {
-			case *ast.LetAssignStmt:
-				walkExpr(x.Value)
-				if isFutureProducer(x.Value) {
-					pendingFutures[x.Name] = x.Span
+	for _, try := range tries {
+		before := st.clone()
+		for _, a := range awaits {
+			for _, t := range a.inside {
+				if t == try {
+					before.await(a.name)
 				}
-				if isPoolProducer(x.Value) {
-					openPools[x.Name] = x.Span
-				}
-			case *ast.ExprStmt:
-				walkExpr(x.Expr)
-			case *ast.ReturnStmt:
-				walkExpr(x.Value)
-			case *ast.IfStmt:
-				for _, br := range x.Branches {
-					walkStmts(br.Body)
-				}
-				walkStmts(x.Else)
 			}
 		}
+		c.leak(before.open, "where `?` may return early")
 	}
-	walkStmts(fn.Body)
-
-	for fname, sp := range pendingFutures {
-		errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered", sp, fn.Name, fname))
+	for _, a := range awaits {
+		st.await(a.name)
 	}
-	for pname, sp := range openPools {
-		errs = append(errs, fmt.Sprintf("%s: ThreadPool %q created in %s was never shut down (pool.shutdown())", sp, pname, fn.Name))
-	}
-	return errs
 }
 
-func isFutureProducer(e ast.Expr) bool {
-	ce, ok := e.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "get_async" || fe.Field == "submit"
+// block walks stmts on one path and reports whether every path through them
+// returns.
+func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetAssignStmt:
+			c.named = s.Value
+			c.exprs(st, s.Value)
+			c.named = nil
+			from := ""
+			if id, ok := s.Value.(*ast.Ident); ok {
+				// A second name for a future holds the same request.
+				from = id.Name
+			}
+			var made *ast.Span
+			switch kind := futureKind(c.info, s.Value); {
+			case kind == "task":
+				if s.Name != "_" {
+					c.tasks = append(c.tasks, namedFuture{s.Name, s.Span})
+				}
+			case kind == "request" && s.Name == "_":
+				c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", s.Span, c.fn))
+			case kind == "request":
+				made = &s.Span
+			}
+			c.leak(st.assign(s.Name, from, made), "before the name is given another value")
+
+		case *ast.IfStmt:
+			// A condition is only reached when those before it were false.
+			var live []*pendingFutures
+			for _, br := range s.Branches {
+				c.exprs(st, br.Cond)
+				b := st.clone()
+				if !c.block(br.Body, b) {
+					live = append(live, b)
+				}
+			}
+			b := st.clone()
+			if !c.block(s.Else, b) {
+				live = append(live, b)
+			}
+			if len(live) == 0 {
+				return true
+			}
+			*st = *join(live)
+
+		case *ast.MatchStmt:
+			c.exprs(st, s.Subject)
+			var live []*pendingFutures
+			for _, arm := range s.Arms {
+				// The arm writes the names of its pattern, then runs its
+				// guard; a later arm may be reached whether the guard ran
+				// or not.
+				b := st.clone()
+				c.exprs(b, arm.Pattern)
+				if arm.Guard != nil {
+					c.exprs(b, arm.Guard)
+				}
+				if !c.block(arm.Body, b) {
+					live = append(live, b)
+				}
+			}
+			if len(s.Arms) == 0 {
+				continue
+			}
+			if len(live) == 0 {
+				return true
+			}
+			*st = *join(live)
+
+		case *ast.WhileStmt:
+			c.exprs(st, s.Cond)
+			c.loop("", s.Body, st)
+
+		case *ast.ForStmt:
+			c.exprs(st, s.Iterable)
+			c.loop(s.Var, s.Body, st)
+
+		case *ast.ReturnStmt:
+			c.exprs(st, s.Value)
+			c.leak(st.open, "before this return")
+			return true
+
+		default:
+			c.exprs(st, stmt)
+		}
 	}
 	return false
 }
 
-func isPoolProducer(e ast.Expr) bool {
+// loop walks a loop body, which may run any number of times: a request it
+// starts is awaited in the same pass, and an await in it does not count for
+// a request started before the loop. What the body does to the names is
+// followed until another pass changes nothing.
+func (c *futureCheck) loop(loopVar string, body []ast.Stmt, st *pendingFutures) {
+	for {
+		b := st.clone()
+		if loopVar != "" {
+			c.leak(b.assign(loopVar, "", nil), "before the name is given another value")
+		}
+		c.block(body, b)
+		made := map[ast.Span]string{}
+		for sp, name := range b.open {
+			if _, before := st.open[sp]; !before {
+				made[sp] = name
+				delete(b.open, sp)
+				delete(b.holders, sp)
+			}
+		}
+		c.leak(made, "in the pass of the loop that makes it")
+		after := join([]*pendingFutures{st, b})
+		if after.same(st) {
+			return
+		}
+		*st = *after
+	}
+}
+
+// visit walks every AST node reachable from v, whatever statement or
+// expression it is nested in: pre before the nodes inside it (which are
+// skipped when it returns false), post after them.
+func visit(v reflect.Value, pre func(any) bool, post func(any)) {
+	switch v.Kind() {
+	case reflect.Interface:
+		if !v.IsNil() {
+			visit(v.Elem(), pre, post)
+		}
+	case reflect.Ptr:
+		if !v.IsNil() && pre(v.Interface()) {
+			visit(v.Elem(), pre, post)
+			post(v.Interface())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			visit(v.Field(i), pre, post)
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			visit(v.Index(i), pre, post)
+		}
+	}
+}
+
+// futureKind tells what the future of the call e waits for: "task" for
+// pool.submit(...), whose pool waits for it too, "request" for get_async(...),
+// which nothing else waits for, and "" when e makes no future.
+func futureKind(info *sema.ProgramInfo, e ast.Expr) string {
 	ce, ok := e.(*ast.CallExpr)
 	if !ok {
-		return false
+		return ""
 	}
-	if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-		return fe.Field == "ThreadPool"
+	fe, ok := ce.Callee.(*ast.FieldExpr)
+	if !ok {
+		return ""
 	}
-	return false
+	if ht, ok := info.ExprTypes[fe.Object].(*sema.HandleType); ok {
+		switch {
+		case ht.Name == "conc.ThreadPool" && fe.Field == "submit":
+			return "task"
+		case ht.Name == "req.Session" && fe.Field == "get_async":
+			return "request"
+		}
+		return ""
+	}
+	// A receiver sema could not type: go by the name of the method.
+	switch fe.Field {
+	case "submit":
+		return "task"
+	case "get_async":
+		return "request"
+	}
+	return ""
 }
