@@ -543,6 +543,12 @@ static void v_fmt_in(AnimaBuf *b, AnimaVal v, const BoxOpen *up) {
             }
             buf_put(b, ")");
             break;
+        case VAL_HANDLE:
+            // The kinds are numbered as the VM numbers them.
+            snprintf(num, sizeof(num), "<handle:%d>", v.u.hdl ? (int)v.u.hdl->kind : 0);
+            buf_put(b, num);
+            break;
+        case VAL_CLOSURE: buf_put(b, "<fn>"); break;
         default: buf_put(b, "<val>"); break;
     }
 }

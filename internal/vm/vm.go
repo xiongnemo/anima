@@ -445,7 +445,7 @@ func (v Value) text(open []uintptr) string {
 	case ValHandle:
 		return fmt.Sprintf("<handle:%d>", v.Handle.Kind)
 	case ValClosure:
-		return fmt.Sprintf("<fn#%d>", v.Closure.FuncIdx)
+		return "<fn>"
 	}
 	return "<val>"
 }
