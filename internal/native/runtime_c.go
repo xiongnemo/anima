@@ -1167,18 +1167,22 @@ static AnimaVal conc_parallel_map(AnimaVal listv, AnimaVal fn) {
     if (n == 0) return out;
     ParMapJob *jobs = calloc(n, sizeof(ParMapJob));
     pthread_t *ths = calloc(n, sizeof(pthread_t));
-    bool *started = calloc(n, sizeof(bool));
     for (size_t i = 0; i < n; i++) {
         jobs[i].fn = fn;
         jobs[i].arg = listv.u.list->items[i];
-        started[i] = pthread_create(&ths[i], NULL, conc_parmap_run, &jobs[i]) == 0;
+        int rc = pthread_create(&ths[i], NULL, conc_parmap_run, &jobs[i]);
+        if (rc != 0) {
+            // The calls run beside each other or not at all: one of them may
+            // wait for what another gives, so none can be run here in turn.
+            fprintf(stderr, "runtime error: parallel_map: cannot start a thread: %s\n", strerror(rc));
+            exit(1);
+        }
     }
     for (size_t i = 0; i < n; i++) {
-        if (started[i]) pthread_join(ths[i], NULL);
-        else conc_parmap_run(&jobs[i]); // no thread to be had: here, once the others are done
+        pthread_join(ths[i], NULL);
         v_list_push(out, jobs[i].out);
     }
-    free(jobs); free(ths); free(started);
+    free(jobs); free(ths);
     return out;
 }
 
