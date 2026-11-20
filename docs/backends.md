@@ -25,6 +25,7 @@ A verified program does the same on both backends. Tests run one source on both 
 - A lambda copies the variables its body names when it is made; one held in a workflow variable or written in a fork branch is called as anywhere else.
 - `run_workflow` runs the workflow it names, and a `merge` node is run by both.
 - A value that holds itself is printed and encoded with an end, the same way: [language.md](language.md#a-value-may-hold-itself).
+- `json.encode` writes the same text: [stdlib.md](stdlib.md#stdjson).
 
 Known differences, none of which a kernel relies on:
 

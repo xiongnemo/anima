@@ -1678,56 +1678,117 @@ static AnimaVal json_parse_val(const char **p, bool *ok) {
     return v_none();
 }
 
-static AnimaVal json_encode_in(AnimaVal v, const BoxOpen *up);
-static AnimaVal json_encode(AnimaVal v) { return json_encode_in(v, NULL); }
+// json_put_str writes s as Go's encoding/json does: the VM encodes with it.
+// Control characters, <, > and & are escaped, U+2028 and U+2029 too, and a
+// byte that is not UTF-8 becomes U+FFFD.
+static void json_put_str(AnimaBuf *b, const char *str) {
+    const unsigned char *s = (const unsigned char *)(str ? str : "");
+    char esc[8];
+    buf_put(b, "\"");
+    while (*s) {
+        unsigned char c = *s;
+        if (c < 0x80) {
+            if (c == '"' || c == '\\') { esc[0] = '\\'; esc[1] = (char)c; esc[2] = 0; }
+            else if (c == '\n') strcpy(esc, "\\n");
+            else if (c == '\r') strcpy(esc, "\\r");
+            else if (c == '\t') strcpy(esc, "\\t");
+            else if (c == '\b') strcpy(esc, "\\b");
+            else if (c == '\f') strcpy(esc, "\\f");
+            else if (c < 0x20 || c == 0x7f || c == '<' || c == '>' || c == '&') {
+                if (c == 0x7f) { esc[0] = (char)c; esc[1] = 0; }
+                else snprintf(esc, sizeof(esc), "\\u%04x", c);
+            }
+            else { esc[0] = (char)c; esc[1] = 0; }
+            buf_put(b, esc);
+            s++;
+            continue;
+        }
+        // The length of a well-formed UTF-8 sequence, or 0.
+        int n = 0;
+        if (c >= 0xc2 && c <= 0xdf) n = 2;
+        else if (c >= 0xe0 && c <= 0xef) n = 3;
+        else if (c >= 0xf0 && c <= 0xf4) n = 4;
+        bool ok = n > 0;
+        for (int i = 1; ok && i < n; i++) ok = (s[i] & 0xc0) == 0x80;
+        if (ok && n == 3) ok = !(c == 0xe0 && s[1] < 0xa0) && !(c == 0xed && s[1] > 0x9f);
+        if (ok && n == 4) ok = !(c == 0xf0 && s[1] < 0x90) && !(c == 0xf4 && s[1] > 0x8f);
+        if (!ok) { buf_put(b, "\\ufffd"); s++; continue; }
+        if (n == 3 && c == 0xe2 && s[1] == 0x80 && (s[2] == 0xa8 || s[2] == 0xa9)) {
+            buf_put(b, s[2] == 0xa8 ? "\\u2028" : "\\u2029");
+        } else {
+            char seq[5] = {0};
+            memcpy(seq, s, (size_t)n);
+            buf_put(b, seq);
+        }
+        s += n;
+    }
+    buf_put(b, "\"");
+}
+
+static void json_put(AnimaBuf *b, AnimaVal v, const BoxOpen *up);
+
+// The entries of a map or the fields of an entity, sorted by key as Go
+// sorts the keys of a map.
+static void json_put_entries(AnimaBuf *b, AnimaMapEntry *entries, size_t len, const BoxOpen *up) {
+    AnimaMapEntry **order = malloc((len ? len : 1) * sizeof(*order));
+    for (size_t i = 0; i < len; i++) order[i] = &entries[i];
+    qsort(order, len, sizeof(*order), v_entry_cmp);
+    buf_put(b, "{");
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0) buf_put(b, ",");
+        json_put_str(b, order[i]->key);
+        buf_put(b, ":");
+        json_put(b, order[i]->val, up);
+    }
+    buf_put(b, "}");
+    free(order);
+}
 
 // A value met again inside itself is null, as on the VM.
-static AnimaVal json_encode_in(AnimaVal v, const BoxOpen *up) {
+static void json_put(AnimaBuf *b, AnimaVal v, const BoxOpen *up) {
+    char num[32];
     BoxOpen here = { v_box(v), up };
-    if (box_open(here.box, up)) return v_str("null");
-    up = &here;
-    if (v.kind == VAL_INT) { char b[64]; snprintf(b, sizeof(b), "%lld", (long long)v.u.i); return v_str(b); }
-    if (v.kind == VAL_BOOL) return v_str(v.u.b ? "true" : "false");
-    if (v.kind == VAL_STR) {
-        size_t l = strlen(v.u.s);
-        char *b = malloc(l*2 + 4);
-        size_t j = 0;
-        b[j++] = '"';
-        for (size_t i = 0; i < l; i++) {
-            if (v.u.s[i] == '"' || v.u.s[i] == '\\') b[j++] = '\\';
-            b[j++] = v.u.s[i];
+    if (box_open(here.box, up)) { buf_put(b, "null"); return; }
+    switch (v.kind) {
+        case VAL_INT: snprintf(num, sizeof(num), "%lld", (long long)v.u.i); buf_put(b, num); break;
+        case VAL_BOOL: buf_put(b, v.u.b ? "true" : "false"); break;
+        case VAL_STR: json_put_str(b, v.u.s); break;
+        case VAL_LIST:
+            buf_put(b, "[");
+            for (size_t i = 0; v.u.list && i < v.u.list->len; i++) {
+                if (i > 0) buf_put(b, ",");
+                json_put(b, v.u.list->items[i], &here);
+            }
+            buf_put(b, "]");
+            break;
+        case VAL_MAP:
+            if (v.u.map) json_put_entries(b, v.u.map->entries, v.u.map->len, &here);
+            else buf_put(b, "{}");
+            break;
+        case VAL_ENTITY:
+            if (v.u.ent) json_put_entries(b, v.u.ent->fields, v.u.ent->len, &here);
+            else buf_put(b, "{}");
+            break;
+        case VAL_VARIANT: {
+            // A variant is its text, as on the VM.
+            if (!v.u.var) { buf_put(b, "null"); break; }
+            AnimaBuf t = {0};
+            buf_put(&t, "");
+            v_fmt_in(&t, v, up);
+            json_put_str(b, t.p);
+            free(t.p);
+            break;
         }
-        b[j++] = '"'; b[j] = '\0';
-        AnimaVal r = v_str(b); free(b); return r;
+        default: buf_put(b, "null"); break;
     }
-    if (v.kind == VAL_MAP && v.u.map) {
-        AnimaVal acc = v_str("{");
-        for (size_t i = 0; i < v.u.map->len; i++) {
-            if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode_in(v_str(v.u.map->entries[i].key), up));
-            acc = v_str_cat(acc, v_str(":"));
-            acc = v_str_cat(acc, json_encode_in(v.u.map->entries[i].val, up));
-        }
-        return v_str_cat(acc, v_str("}"));
-    }
-    if (v.kind == VAL_ENTITY && v.u.ent) {
-        AnimaVal acc = v_str("{");
-        for (size_t i = 0; i < v.u.ent->len; i++) {
-            if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode_in(v_str(v.u.ent->fields[i].key), up));
-            acc = v_str_cat(acc, v_str(":"));
-            acc = v_str_cat(acc, json_encode_in(v.u.ent->fields[i].val, up));
-        }
-        return v_str_cat(acc, v_str("}"));
-    }
-    if (v.kind == VAL_LIST && v.u.list) {
-        AnimaVal acc = v_str("[");
-        for (size_t i = 0; i < v.u.list->len; i++) {
-            if (i > 0) acc = v_str_cat(acc, v_str(","));
-            acc = v_str_cat(acc, json_encode_in(v.u.list->items[i], up));
-        }
-        return v_str_cat(acc, v_str("]"));
-    }
-    return v_str("null");
+}
+
+static AnimaVal json_encode(AnimaVal v) {
+    AnimaBuf b = {0};
+    buf_put(&b, "");
+    json_put(&b, v, NULL);
+    AnimaVal r = v_str(b.p);
+    free(b.p);
+    return r;
 }
 `
