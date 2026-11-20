@@ -1695,24 +1695,10 @@ func TestSPARKUnsharedEntityKeepsTwoStepUpdates(t *testing.T) {
 	}
 }
 
-// An untyped map (`m = {}`) gives its elements no type. Taking one into a
-// typed variable shares it, and a field write on an untyped one is rejected.
-func TestSPARKEntityInAnUntypedMap(t *testing.T) {
-	body := func(b string) string {
-		return invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m = {}\n    m[\"k\"] = A(x=5, y=5)\n" + b + "\n    return use(m[\"k\"])\n"
-	}
-	rejected := map[string]string{
-		"typed variable":   "entity_r_invariant_1\x00    r: A = m[\"k\"]\n    r.x = 6",
-		"untyped variable": "field_x_object_type\x00    r = m[\"k\"]\n    r.x = 6",
-		"in place":         "field_x_object_type\x00    m[\"k\"].x = 6",
-	}
-	for name, c := range rejected {
-		vc, b, _ := strings.Cut(c, "\x00")
-		failed := strings.Join(failedVCs(verifySrc(t, body(b))), "\n")
-		if !strings.Contains(failed, vc) {
-			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, vc, failed)
-		}
-	}
+// A map of entities has a declared type (sema refuses `m = {}` given an
+// entity: the map would not say what it holds), so an element taken out of
+// it is known to fit its invariant.
+func TestSPARKEntityInAMap(t *testing.T) {
 	// With a typed map the element's other fields are known to fit the invariant.
 	typed := invariantPrelude + "\ndef f(a: A, rows: list[A], o: Option[A]) -> int:\n    m: map[str, A] = {}\n    m[\"k\"] = A(x=5, y=5)\n    r = m[\"k\"]\n    r.x = 0\n    return use(m[\"k\"])\n"
 	if failed := failedVCs(verifySrc(t, typed)); len(failed) != 0 {

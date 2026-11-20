@@ -1,0 +1,16 @@
+# The future gives an Option of no type yet and is replaced, after it is
+# awaited, by one that gives Some(0). All three kernels passed and both
+# backends printed none, then divided by zero.
+import std.concurrent as conc
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 2)
+    f = pool.submit(() => None)
+    for i in [1, 2]:
+        p: Option[int[1..9]] = f.await()
+        match p:
+            Some(n) -> print(10 / n)
+            None -> print("none")
+        f = pool.submit(() => Some(0))
+    pool.shutdown()
+    return 0

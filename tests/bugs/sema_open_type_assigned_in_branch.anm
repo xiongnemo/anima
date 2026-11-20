@@ -1,0 +1,13 @@
+# `o = None` leaves open what o holds, and the open part was any type: o was
+# given Some(0) in a branch and read as an Option[int[1..9]]. All three
+# kernels passed and both backends divided by zero.
+def main() -> int:
+    o = None
+    xs = [1]
+    if len(xs) > 0:
+        o = Some(0)
+    p: Option[int[1..9]] = o
+    match p:
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    return 0

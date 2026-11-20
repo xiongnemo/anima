@@ -1,0 +1,12 @@
+# The read of o is placed before the assignment that types it and runs after
+# it, on the second turn of the loop. All three kernels passed and both
+# backends printed none, then divided by zero.
+def main() -> int:
+    o = None
+    for i in [1, 2]:
+        p: Option[int[1..9]] = o
+        match p:
+            Some(n) -> print(10 / n)
+            None -> print("none")
+        o = Some(0)
+    return 0

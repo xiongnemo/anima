@@ -1,0 +1,13 @@
+# The mutex holds an Option of no type yet, so set took Some(0) and get gave
+# an Option[int[1..9]]. All three kernels passed and both backends divided
+# by zero.
+import std.concurrent as conc
+
+def main() -> int:
+    m = conc.Mutex(None)
+    m.set(Some(0))
+    o: Option[int[1..9]] = m.get()
+    match o:
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    return 0

@@ -929,6 +929,12 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if !ok {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s): give %s a type where it is first assigned", s.Span, valTy, s.Name, prev.ty, s.Name)
 			}
+			// A part of its type that no value has typed stays so: a read
+			// placed before this assignment and run after it, in a loop,
+			// took the variable for a value of any type there.
+			if !sameWhole(target, prev.ty) {
+				return fmt.Errorf("%s: cannot assign %s to %s (%s), which does not say the type of all it holds: declare the type of %s where it is first assigned", s.Span, valTy, s.Name, prev.ty, s.Name)
+			}
 			if !c.assignable(target, valTy, s.Value) {
 				return fmt.Errorf("%s: cannot assign %s to %s (%s): a variable keeps the type of its elements", s.Span, valTy, s.Name, target)
 			}
@@ -954,6 +960,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			valTy = &cp
 		}
 		if err := keepsSort(sc, s.Name, valTy, s.Span); err != nil {
+			return err
+		}
+		if err := wholeSlots(s.Name, valTy, s.Span); err != nil {
 			return err
 		}
 		if c.curFuncInfo != nil {
@@ -1138,6 +1147,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err := keepsElements(sc, s.Var, elem, s.Span); err != nil {
 				return err
 			}
+			if err := wholeSlots(s.Var, elem, s.Span); err != nil {
+				return err
+			}
 			sub.defineLocal(s.Var, varBinding{ty: elem, span: s.Span})
 		}
 		for _, bst := range s.Body {
@@ -1247,6 +1259,9 @@ func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
 		if err := keepsElements(sc, p.Name, subjTy, p.Span); err != nil {
 			return err
 		}
+		if err := wholeSlots(p.Name, subjTy, p.Span); err != nil {
+			return err
+		}
 		sc.defineLocal(p.Name, varBinding{ty: subjTy, span: p.Span})
 		return nil
 	case *ast.VariantPat:
@@ -1324,7 +1339,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 	case *ast.StrLit:
 		return StrType{}, nil
 	case *ast.NoneLit:
-		return &ADTType{Name: "Option", TypeParams: []string{"T"}, VariantMap: c.info.ADTs["Option"].VariantMap}, nil
+		return c.instantiateADT("Option", []Type{UnknownType{Empty: true}}), nil
 	case *ast.FStrExpr:
 		for _, part := range e.Parts {
 			if part.IsExpr {
@@ -1786,6 +1801,11 @@ func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
 	// had: the variable keeps the type of what its handle holds.
 	if _, ok := prev.ty.(*HandleType); ok && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of what its handle holds", span, name, prev.ty, ty)
+	}
+	// A part of its type that no value has typed is any type where the
+	// variable is read: it is not given a value that has one there.
+	if hasGap(prev.ty) && knownType(ty) && !sameWhole(prev.ty, ty) {
+		return fmt.Errorf("%s: %s is a %s, which does not say the type of all it holds, and cannot be given a %s: declare the type of %s where it is first assigned", span, name, prev.ty, ty, name)
 	}
 	// Nor is it of a type on one path and of none on another.
 	switch {
@@ -2889,6 +2909,44 @@ func hasGap(t Type) bool {
 	return false
 }
 
+// slotGap reports whether t has such a part in something that is written
+// after it is made: an element of a list, an entry of a map, what a mutex
+// holds. A list of nothing has no element to write.
+func slotGap(t Type) bool {
+	switch x := t.(type) {
+	case *ListType:
+		return !vacuous(x.Elem) && hasGap(x.Elem)
+	case *MapType:
+		return hasGap(x.Key) || hasGap(x.Val)
+	case *HandleType:
+		if x.Elem == nil {
+			return false
+		}
+		if x.Name == "conc.Mutex" {
+			return hasGap(x.Elem)
+		}
+		return slotGap(x.Elem)
+	case *ADTType:
+		for _, a := range x.TypeArgs {
+			if slotGap(a) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wholeSlots refuses to give the variable name a value of a type with such
+// a part. The part would be any type: a write through the variable would put
+// a value there that a read, through it or through another name for the
+// same list, map or mutex, takes for one of another type.
+func wholeSlots(name string, ty Type, span ast.Span) error {
+	if slotGap(ty) {
+		return fmt.Errorf("%s: %s would be a %s, which can be written to and does not say the type of all it holds: declare the type of %s", span, name, ty, name)
+	}
+	return nil
+}
+
 // namedLambdaOf is the named lambda e is the name of.
 func namedLambdaOf(e ast.Expr, sc *scope) (*namedLambda, string) {
 	if id, ok := e.(*ast.Ident); ok {
@@ -3367,8 +3425,9 @@ func sameElemRange(expected, actual Type) bool {
 func withinRange(expected, actual Type) bool {
 	e, ok := expected.(*IntType)
 	a, ok2 := actual.(*IntType)
+	// The part no value has typed holds nothing: `None` is in every range.
 	if _, unknown := actual.(UnknownType); unknown && ok && e.IsBounded {
-		return false
+		return vacuous(actual)
 	}
 	if !ok || !ok2 || !e.IsBounded {
 		return true
