@@ -141,7 +141,7 @@ func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 			switch {
 			case i == 0:
 				elem = ht.Elem
-			case !knownType(elem) || !knownType(ht.Elem) || !elem.Equals(ht.Elem) || !ht.Elem.Equals(elem):
+			case !knownType(elem) || !knownType(ht.Elem) || !sameHeld(elem, ht.Elem):
 				elem = UnknownType{}
 			}
 		}

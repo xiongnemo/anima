@@ -9,12 +9,19 @@ import (
 
 const unknownHead = `import std.concurrent as conc
 import std.json as json
+import std.requests as req
 
 def work(x: int[0..100]) -> int[0..100]:
     return x
 
 def nothing():
     print("n")
+
+def inRange() -> Option[int[1..9]]:
+    return Some(1)
+
+def outOfRange() -> Option[int[0..0]]:
+    return Some(0)
 
 def some() -> Option:
     return Some([1])
@@ -164,6 +171,42 @@ func TestSemaUnknownValueIsOnlyPassedOn(t *testing.T) {
 		{"a channel given as what it is", `    c = conc.Channel[int[1..9]](cap=1)
     d = conc.Channel[int](cap=1)
     print(drain(c), fill(d))`, ""},
+		// A variable keeps the type of what its handle holds, whichever path
+		// gave it the handle.
+		{"a future of an int given one of a str on one path", `    pool = conc.ThreadPool(1, 2)
+    f = pool.submit(() => 5)
+    if sent:
+        f = pool.submit(() => "s")
+    print(f.await())
+    pool.shutdown()`, "f is a Future[int] and cannot be given a Future[str]: a variable keeps the type of what its handle holds"},
+		{"a future given one of the same type", `    pool = conc.ThreadPool(1, 2)
+    f = pool.submit(() => 5)
+    if sent:
+        f = pool.submit(() => 6)
+    print(f.await() + 1)
+    pool.shutdown()`, ""},
+		{"a channel of anything given one of ints", `    c = conc.Channel(cap=1)
+    c = conc.Channel[int](cap=1)
+    print(c.recv())`, "c is a conc.Channel[unknown] and cannot be given a conc.Channel[int]"},
+		// Futures gathered into one list give one type, ranges included.
+		{"futures of two ranges gathered", `    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => inRange())
+    f2 = pool.submit(() => outOfRange())
+    rs = req.gather([f1, f2])
+    pool.shutdown()
+    for r in rs:
+        match r:
+            Some(n) -> print(10 / n)
+            None -> print("none")`, "arithmetic / requires int, got int[10..10] and unknown"},
+		{"futures of one range gathered", `    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => inRange())
+    f2 = pool.submit(() => inRange())
+    rs = req.gather([f1, f2])
+    pool.shutdown()
+    for r in rs:
+        match r:
+            Some(n) -> print(10 / n)
+            None -> print("none")`, ""},
 		// What has no value yet takes the type of what it is given.
 		{"an empty list, None and Ok", `    ys: list[int] = []
     o: Option[int] = None
@@ -208,6 +251,28 @@ func TestSemaNamedLambdaTakesTheTypesOfItsFirstUse(t *testing.T) {
     print(xs |> map(g))`, same},
 		{"too many arguments", `    g = (v) => v
     print(g(1, 2))`, "takes 1 argument, got 2"},
+		// The types of the first use are those of every later one, so it
+		// has to say them whole: None would let Some(0) in afterwards.
+		{"first used with None", `    g = (v) => v
+    a = g(None)
+    o: Option[int[1..9]] = g(Some(0))
+    print(a, o)`, "g is first used with Option, which does not say the type of all it holds"},
+		{"first used with an empty list", `    g = (v) => v
+    a = g([])
+    print(a)`, "g is first used with list[unknown], which does not say the type of all it holds"},
+		{"None after a whole type", `    g = (v) => v
+    o: Option[int[1..9]] = Some(1)
+    print(g(o), g(None))`, ""},
+		{"an Option of a range and then one of any int", `    g = (v) => v
+    o: Option[int[1..9]] = Some(1)
+    print(g(o))
+    p: Option[int[1..9]] = g(Some(0))
+    print(p)`, "g takes Option[int[1..9]] where it is first used, got Option[int]: " + same},
+		// A lambda keeps the handle its variable had where it was written.
+		{"the mutex it names is one of another type by its first use", `    m = conc.Mutex(5)
+    g = (v) => m.get()
+    m = conc.Mutex("s")
+    print(g(1) + "t")`, "m is a conc.Mutex[int] and cannot be given a conc.Mutex[str]: a variable keeps the type of what its handle holds"},
 		{"given another name", `    g = (v) => v
     h = g
     print(1)`, "g " + byName},

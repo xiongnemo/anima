@@ -1773,6 +1773,12 @@ func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
 	if !sameSort(prev.ty, ty) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps its sort", span, name, prev.ty, ty)
 	}
+	// A handle is read as a handle of what its variable holds, whichever
+	// path gave it, and a lambda that names the variable keeps the handle it
+	// had: the variable keeps the type of what its handle holds.
+	if _, ok := prev.ty.(*HandleType); ok && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
+		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of what its handle holds", span, name, prev.ty, ty)
+	}
 	// Nor is it of a type on one path and of none on another.
 	switch {
 	case knownType(prev.ty) && untyped(ty):
@@ -2825,6 +2831,12 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 	if !nl.fixed {
 		params := make([]Type, len(args))
 		for i, a := range args {
+			// The types of this use are those of every later one, and a
+			// type argument no value has would be any type there: `None`
+			// here would let `Some(0)` in later as an Option of nothing.
+			if hasGap(a) {
+				return nil, fmt.Errorf("%s: %s is first used with %s, which does not say the type of all it holds: use it first with a value that has its whole type", span, name, a)
+			}
 			params[i] = widenInt(a)
 		}
 		ft, err := c.checkLambdaWith(nl.expr, nl.sc, params)
@@ -2840,6 +2852,33 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 		}
 	}
 	return nl.ret, nil
+}
+
+// hasGap reports whether t has a part no value has given a type: the
+// elements of `[]`, what `None` holds.
+func hasGap(t Type) bool {
+	switch x := t.(type) {
+	case UnknownType:
+		return x.Empty
+	case TypeVar:
+		return true
+	case *ListType:
+		return hasGap(x.Elem)
+	case *MapType:
+		return hasGap(x.Key) || hasGap(x.Val)
+	case *ADTType:
+		if len(x.TypeArgs) < len(x.TypeParams) {
+			return true
+		}
+		for _, a := range x.TypeArgs {
+			if hasGap(a) {
+				return true
+			}
+		}
+	case *HandleType:
+		return x.Elem != nil && hasGap(x.Elem)
+	}
+	return false
 }
 
 // namedLambdaOf is the named lambda e is the name of.
@@ -3240,11 +3279,16 @@ func isAssignable(expected, actual Type) bool {
 		if eh.Elem == nil || ah.Elem == nil {
 			return eh.Elem == nil && ah.Elem == nil
 		}
-		return untyped(eh.Elem) == untyped(ah.Elem) &&
-			isAssignable(eh.Elem, ah.Elem) && isAssignable(ah.Elem, eh.Elem) &&
-			sameElemRange(eh.Elem, ah.Elem) && sameElemRange(ah.Elem, eh.Elem)
+		return untyped(eh.Elem) == untyped(ah.Elem) && sameHeld(eh.Elem, ah.Elem)
 	}
 	return expected.Equals(actual)
+}
+
+// sameHeld reports whether a and b are one type, ranges included: what two
+// names for one reference, or the results of futures gathered into one list,
+// have to agree on.
+func sameHeld(a, b Type) bool {
+	return isAssignable(a, b) && isAssignable(b, a) && sameElemRange(a, b) && sameElemRange(b, a)
 }
 
 // sameElemRange reports whether two element types of a list or map agree on
