@@ -996,9 +996,10 @@ const jsonRoundTripSrc = "import std.json as json\n" +
 
 // A JSON text with \u0000 in a string or a key is an Err on both backends:
 // a native string ends at a NUL, so it read "ab\u0000cd" as "ab" where the
-// VM read five characters. An escaped backslash before u0000 is no NUL.
+// VM read five characters. An escaped backslash before u0000 is no NUL, and
+// a NUL in a member that a later one with the same key replaces is one.
 func TestE2EJsonDecodeNULParity(t *testing.T) {
-	runOnBothBackends(t, "json_decode_nul", jsonDecodeNULSrc, "err\nerr\nok 8 \"a\\\\u0000b\"\nerr\n")
+	runOnBothBackends(t, "json_decode_nul", jsonDecodeNULSrc, "err\nerr\nok 8 \"a\\\\u0000b\"\nerr\nerr\nok 15 \"q\\\\\\\\u0000 \\\"u0000\"\n")
 }
 
 const jsonDecodeNULSrc = "import std.json as json\n" +
@@ -1023,6 +1024,16 @@ const jsonDecodeNULSrc = "import std.json as json\n" +
 	"        Err(e) ->\n" +
 	"            print(\"err\")\n" +
 	"    match json.decode[Msg](\"{\\\"text\\\":\\\"z\\\", \\\"more\\\":[{\\\"k\\\":\\\"\\\\u0000\\\"}]}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"a\\\\u0000\\\", \\\"text\\\":\\\"z\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"q\\\\\\\\\\\\\\\\u0000 \\\\\\\"u0000\\\"}\"):\n" +
 	"        Ok(back) ->\n" +
 	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
 	"        Err(e) ->\n" +
