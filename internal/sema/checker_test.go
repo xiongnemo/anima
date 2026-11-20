@@ -1175,6 +1175,10 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"g = time.sleep_ms":             "std.time.sleep_ms is not a value",
 		"g = conn.send_text":            "send_text() of a sock.TcpStream is not a value",
 		"xs = zs |> map(crypto.sha256)": "std.crypto.sha256 is not a value",
+		// Piped: `x |> o.f(a)` is o.f(x, a).
+		"ok = 0 |> ch.send()":               "argument 1 of send() of a conc.Channel is int[1..9], got int[0..0]",
+		"s = 5 |> crypto.sha256()":          "argument 1 of std.crypto.sha256 is a str, got int",
+		"s = \"a\" |> crypto.sha256(\"b\")": "std.crypto.sha256 takes 1 argument, got 2",
 		// What is not there.
 		"x = conc.nope()":                      "module std.concurrent has no member \"nope\"",
 		"rs = conc.gather([1])":                "module std.concurrent has no member \"gather\"",
@@ -1208,6 +1212,7 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"ok = ch.send(5)\n    ok2 = ch.send(small)\n    v = ch.recv()\n    ok3 = lists.send([1, 2])",
 		"m.set(0)\n    m.set(n)\n    held.set(zs)\n    held.with_lock((v) => zs)\n    m.with_lock((v) => 7)\n    k = m.get()",
 		"sem.acquire()\n    sem.release()",
+		"s = \"abc\" |> crypto.sha256()\n    h = \"k\" |> crypto.hmac_sha256(\"abc\")\n    ok = 5 |> ch.send()\n    b = 1 |> bv.read_u8()\n    n |> time.sleep_ms()",
 		"k = bytes.from_str(\"ab\").len()\n    g = (ms) => time.sleep_ms(ms)\n    g(1)",
 		"rs: list[int[1..9]] = [1]\n    ranged = conc.Mutex(rs)\n    ranged.with_lock((v) => rs)\n    ranged.set([2, 3])",
 		"f = pool.submit(() => 1)\n    g = pool.submit(() => \"s\")\n    rs = req.gather([f, g])\n    xs = conc.parallel_map(zs, (x) => x)",

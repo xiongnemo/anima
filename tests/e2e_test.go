@@ -969,6 +969,10 @@ def main() -> int:
     print(bv.len(), bv.read_u8(1))
     print(crypto.constant_time_eq("a", "a"), json.encode([1, 2]))
     time.sleep_ms(ms=1)
+    ok3 = 7 |> ch.send()
+    match ch.recv():
+        Some(v) -> print(v, 1 |> bv.read_u8())
+        None -> print(0)
     pool = conc.ThreadPool(workers=1, queue_cap=2)
     f = pool.submit(() => 1)
     g = pool.submit(() => 2)
@@ -976,5 +980,5 @@ def main() -> int:
     pool.shutdown()
     return 0
 `
-	runOnBothBackends(t, "standard_calls", src, "2\n5\n2 66\nTrue [1,2]\n[1, 2]\n")
+	runOnBothBackends(t, "standard_calls", src, "2\n5\n2 66\nTrue [1,2]\n4 66\n[1, 2]\n")
 }

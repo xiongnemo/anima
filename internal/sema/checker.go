@@ -2537,6 +2537,18 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
 		return c.checkExpr(call, sc)
 	}
+	// `x |> o.f(a)` calls o.f(x, a) on both backends too: a function of a
+	// standard module or a method of a handle is checked with the piped
+	// value as its first argument.
+	if rhs, ok := e.Right.(*ast.CallExpr); ok {
+		if _, member := rhs.Callee.(*ast.FieldExpr); member {
+			if _, isStage := stageShapes[fnName]; !isStage {
+				call := &ast.CallExpr{Span: e.Span, Callee: rhs.Callee, TypeArgs: rhs.TypeArgs}
+				call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+				return c.checkExpr(call, sc)
+			}
+		}
+	}
 	if _, err := c.checkExpr(e.Right, sc); err != nil {
 		return nil, err
 	}
