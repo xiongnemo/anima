@@ -945,9 +945,10 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				}
 			}
 		}
-		// `_` is where a handle is left to itself, a future to its pool:
-		// it takes one of any type, so what its handle holds has none.
-		if ht, ok := valTy.(*HandleType); ok && s.Name == "_" && ht.Elem != nil {
+		// `_` is where a future is left to its pool: it takes one of any
+		// type, so what its future gives has none. Nothing is written
+		// through a future; a channel or a mutex keeps its type under `_`.
+		if ht, ok := valTy.(*HandleType); ok && s.Name == "_" && ht.Name == "Future" && ht.Elem != nil {
 			cp := *ht
 			cp.Elem = UnknownType{}
 			valTy = &cp
@@ -3317,7 +3318,9 @@ func sameWhole(a, b Type) bool {
 		return ok && sameWhole(x.Elem, y.Elem)
 	case *MapType:
 		y, ok := b.(*MapType)
-		return ok && sameWhole(x.Key, y.Key) && sameWhole(x.Val, y.Val)
+		// The range of a key is not part of a map type: isAssignable
+		// does not read it either.
+		return ok && sameWhole(widenInt(x.Key), widenInt(y.Key)) && sameWhole(x.Val, y.Val)
 	case *HandleType:
 		y, ok := b.(*HandleType)
 		return ok && x.Name == y.Name && sameWhole(x.Elem, y.Elem)
