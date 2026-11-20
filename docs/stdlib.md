@@ -78,7 +78,7 @@ Every socket has one owner that closes it on every path; none is used after it i
 - a variant is the string of its text: `Some(4)` is `"Some(4)"`, `None` is `null`;
 - a value met again inside itself is `null`.
 
-`json.decode` reads these escapes back, a `\uXXXX` pair of surrogates as one character and half a pair as U+FFFD.
+`json.decode` reads these escapes back, a `\uXXXX` pair of surrogates as one character and half a pair as U+FFFD. A text with `\u0000` in a string or a key is an `Err` on both backends: a string of the native backend ends at a NUL.
 
 `json.decode[EntityType]` checks what it reads at the boundary: every `int[lo..hi]` range of the entity and its `invariant`. Without a type, what it gives is of unknown type: [language.md](language.md#values-of-unknown-type).
 

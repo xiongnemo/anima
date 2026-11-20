@@ -1215,7 +1215,33 @@ func decodeJSONToMap(raw string) (map[string]any, error) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, err
 	}
+	if holdsNUL(m) {
+		return nil, fmt.Errorf("a string holds a NUL")
+	}
 	return m, nil
+}
+
+// holdsNUL reports whether a string or a key of decoded JSON holds a NUL
+// (written \u0000). A string of the native runtime ends at one, so the text
+// is refused on both backends rather than read as two different values.
+func holdsNUL(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.IndexByte(x, 0) >= 0
+	case []any:
+		for _, el := range x {
+			if holdsNUL(el) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, el := range x {
+			if strings.IndexByte(k, 0) >= 0 || holdsNUL(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var _ = time.Millisecond

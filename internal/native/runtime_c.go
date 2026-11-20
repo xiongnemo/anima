@@ -1618,6 +1618,9 @@ static char *json_parse_str(const char **p) {
             // \uXXXX is a code point, written here as UTF-8; two of them
             // can be a surrogate pair, and half a pair is U+FFFD, as in Go.
             long cp = json_hex4(*p + 2);
+            // A string here ends at a NUL, so it cannot hold one: the text
+            // is refused, on the VM too.
+            if (cp == 0) { free(out); return NULL; }
             *p += 6;
             if (cp >= 0xd800 && cp <= 0xdbff) {
                 int lo = (*p)[0] == '\\' && (*p)[1] == 'u' ? json_hex4(*p + 2) : -1;
@@ -1670,6 +1673,7 @@ static AnimaVal json_parse_val(const char **p, bool *ok) {
     char ch = **p;
     if (ch == '"') {
         char *s = json_parse_str(p);
+        if (!s) { *ok = false; return v_none(); }
         AnimaVal v = v_str(s);
         free(s);
         return v;
