@@ -129,7 +129,7 @@ var stdSigs = map[string]stdSig{
 // the same type.
 func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 	var elem Type = UnknownType{}
-	if lit, ok := e.Args[0].Value.(*ast.ListLit); ok {
+	if lit, ok := c.stdArgs(e)[0].Value.(*ast.ListLit); ok {
 		for i, x := range lit.Elems {
 			ht, ok := c.info.ExprTypes[x].(*HandleType)
 			if !ok || ht.Name != "Future" {
@@ -152,6 +152,16 @@ func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 	return &ListType{Elem: elem}, nil
 }
 
+// stdArgs are the arguments a standard call is given: those written, after
+// the piped value when the call is a pipeline stage (`x |> o.f(a)` is
+// o.f(x, a)).
+func (c *checker) stdArgs(e *ast.CallExpr) []ast.CallArg {
+	if c.pipedInto != e || c.piped == nil {
+		return e.Args
+	}
+	return append([]ast.CallArg{{Value: c.piped, Span: c.piped.GetSpan()}}, e.Args...)
+}
+
 // checkStdCall checks the arguments of a call to a standard function or to a
 // method of a standard handle. The arguments have been type-checked.
 func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
@@ -172,18 +182,19 @@ func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
 	if !ok {
 		return nil
 	}
+	args := c.stdArgs(e)
 	named := false // timeout_ms is given by keyword
-	for _, a := range e.Args {
+	for _, a := range args {
 		named = named || (s.timeout && a.Name == "timeout_ms")
 	}
 	given := 0
-	for i, a := range e.Args {
+	for i, a := range args {
 		at := c.info.ExprTypes[a.Value]
 		if a.Mut || a.Own {
 			return fmt.Errorf("%s: %s takes its arguments as they are: no `mut` or `own`", a.Span, what)
 		}
 		if a.Name == "timeout_ms" && s.timeout {
-			if i != len(e.Args)-1 {
+			if i != len(args)-1 {
 				return fmt.Errorf("%s: timeout_ms is the last argument of %s", a.Span, what)
 			}
 			continue
@@ -193,7 +204,7 @@ func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
 				// The timeout, by position.
 				continue
 			}
-			return fmt.Errorf("%s: %s takes %s, got %d", e.Span, what, s.takes(), len(e.Args))
+			return fmt.Errorf("%s: %s takes %s, got %d", e.Span, what, s.takes(), len(args))
 		}
 		p := s.params[i]
 		if a.Name != "" && a.Name != p.name {
@@ -206,14 +217,14 @@ func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
 	}
 	for _, p := range s.params[given:] {
 		if !p.opt {
-			return fmt.Errorf("%s: %s takes %s, got %d", e.Span, what, s.takes(), len(e.Args))
+			return fmt.Errorf("%s: %s takes %s, got %d", e.Span, what, s.takes(), len(args))
 		}
 	}
 	// What the function of with_lock gives is what the mutex then holds.
-	if key == "conc.Mutex.with_lock" && len(e.Args) == 1 {
-		if ft, ok := c.info.ExprTypes[e.Args[0].Value].(*FuncType); ok && knownType(elem) {
+	if key == "conc.Mutex.with_lock" && len(args) == 1 {
+		if ft, ok := c.info.ExprTypes[args[0].Value].(*FuncType); ok && knownType(elem) {
 			if !c.kept(elem, ft.Return, nil) {
-				return fmt.Errorf("%s: the function of with_lock gives what the mutex holds, %s, got %s", e.Args[0].Value.GetSpan(), elem, ft.Return)
+				return fmt.Errorf("%s: the function of with_lock gives what the mutex holds, %s, got %s", args[0].Value.GetSpan(), elem, ft.Return)
 			}
 		}
 	}

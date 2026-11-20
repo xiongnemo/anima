@@ -1,0 +1,13 @@
+# A request that is piped its URL is the same call: its timeout is proved
+# in 1..300000 like any other, and 0 would block for ever.
+import std.requests as req
+
+def main() -> int:
+    sess = req.Session(4)
+    t: int = 0
+    r = "http://127.0.0.1:1/a" |> sess.get(timeout_ms=t)
+    match r:
+        Ok(resp) -> print("ok")
+        Err(e) -> print("err")
+    sess.close()
+    return 0

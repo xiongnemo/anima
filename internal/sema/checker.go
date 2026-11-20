@@ -45,6 +45,9 @@ type checker struct {
 	curReturn   Type
 	curFuncInfo *FuncInfo
 	callee      ast.Expr // the callee of the call being checked
+	// `x |> o.f(a)`: the call o.f(a) and the x it is given first.
+	pipedInto *ast.CallExpr
+	piped     ast.Expr
 }
 
 type scope struct {
@@ -1949,7 +1952,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			case "Mutex":
 				// The mutex holds values of the type of its first one, not
 				// of that one's range: set() gives it others.
-				return &HandleType{Name: "conc.Mutex", Elem: widenInt(c.info.ExprTypes[e.Args[0].Value])}, nil
+				return &HandleType{Name: "conc.Mutex", Elem: widenInt(c.info.ExprTypes[c.stdArgs(e)[0].Value])}, nil
 			case "Semaphore":
 				return &HandleType{Name: "conc.Semaphore"}, nil
 			case "parallel_map":
@@ -2537,20 +2540,24 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
 		return c.checkExpr(call, sc)
 	}
-	// `x |> o.f(a)` calls o.f(x, a) on both backends too: a function of a
-	// standard module or a method of a handle is checked with the piped
-	// value as its first argument.
+	// `x |> o.f(a)` calls o.f(x, a) on both backends too. The call that is
+	// written is the one the kernels look at (its timeout, the handle it
+	// makes), so it is that one that is checked, with the piped value
+	// counted as its first argument.
 	if rhs, ok := e.Right.(*ast.CallExpr); ok {
 		if _, member := rhs.Callee.(*ast.FieldExpr); member {
-			if _, isStage := stageShapes[fnName]; !isStage {
-				call := &ast.CallExpr{Span: e.Span, Callee: rhs.Callee, TypeArgs: rhs.TypeArgs}
-				call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
-				return c.checkExpr(call, sc)
-			}
+			c.pipedInto, c.piped = rhs, e.Left
 		}
 	}
-	if _, err := c.checkExpr(e.Right, sc); err != nil {
+	rt, err := c.checkExpr(e.Right, sc)
+	c.pipedInto, c.piped = nil, nil
+	if err != nil {
 		return nil, err
+	}
+	if _, member := e.Right.(*ast.CallExpr); member && rt != nil {
+		if _, isField := e.Right.(*ast.CallExpr).Callee.(*ast.FieldExpr); isField {
+			return rt, nil
+		}
 	}
 	return UnknownType{}, nil
 }
