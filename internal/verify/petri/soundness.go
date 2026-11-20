@@ -691,12 +691,6 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 				b := st.clone()
 				if arm.Guard != nil {
 					c.exprs(b, arm.Guard)
-					// The guard of an arm that takes any value has run
-					// when a later arm is reached.
-					switch arm.Pattern.(type) {
-					case *ast.WildcardPat, *ast.VarPat:
-						c.exprs(st, arm.Guard)
-					}
 				}
 				if !c.block(arm.Body, b) {
 					live = append(live, b)
