@@ -3,6 +3,7 @@ package petri
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -443,82 +444,248 @@ func formatMarking(net *PetriNet, m []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// checkAsyncResourceFutures checks the futures a function makes. A future
-// given a name is awaited or gathered further down in the function, before
-// the name is given another future; one that is
-// not wanted is written `_ = pool.submit(...)`, and the shutdown of its pool
-// waits for the task. (That a pool is shut down on every path, and not used
-// after, is the ownership checker's to prove.)
+// checkAsyncResourceFutures checks the futures a function makes.
+//
+// A task given to a pool is waited for by the shutdown of that pool, which
+// the ownership checker proves on every path. So its future need not be
+// awaited: one given a name is awaited or gathered somewhere in the function
+// (outside any closure), and one that is not wanted is written
+// `_ = pool.submit(...)`.
+//
+// Nothing else waits for a request started by get_async: its future is
+// awaited or gathered on every path, before the function returns and before
+// its name is given another value.
 func checkAsyncResourceFutures(info *sema.ProgramInfo, fn *ast.FuncDecl) []string {
-	// What the function does with futures, in the order it is written.
-	type event struct {
-		name  string
-		span  ast.Span
-		await bool
+	c := &futureCheck{info: info, fn: fn.Name, awaited: map[string]bool{}, seen: map[string]bool{}}
+	st := pendingFutures{}
+	if !c.block(fn.Body, st) {
+		c.leak(st, "when the function ends")
 	}
-	var events []event
-	var errs []string
+	for _, f := range c.tasks {
+		if !c.awaited[f.name] {
+			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", f.span, fn.Name, f.name))
+		}
+	}
+	return c.errs
+}
 
-	visit(reflect.ValueOf(fn.Body), func(n any) bool {
-		switch x := n.(type) {
-		case *ast.LambdaExpr:
-			// A closure runs later, if at all: an await in it waits for nothing here.
-			return false
-		case *ast.CallExpr:
-			fe, ok := x.Callee.(*ast.FieldExpr)
-			if !ok {
-				break
-			}
-			switch fe.Field {
-			case "await":
-				if id, ok := fe.Object.(*ast.Ident); ok {
-					events = append(events, event{name: id.Name, await: true})
+// pendingFutures are the requests a path has started and not awaited, under
+// the names that hold them.
+type pendingFutures map[string][]ast.Span
+
+func (p pendingFutures) clone() pendingFutures {
+	cp := make(pendingFutures, len(p))
+	for k, v := range p {
+		cp[k] = append([]ast.Span(nil), v...)
+	}
+	return cp
+}
+
+// become makes p what is pending on any of the paths.
+func (p pendingFutures) become(paths []pendingFutures) {
+	for k := range p {
+		delete(p, k)
+	}
+	for _, q := range paths {
+		for name, spans := range q {
+			for _, sp := range spans {
+				dup := false
+				for _, have := range p[name] {
+					dup = dup || have == sp
 				}
-			case "gather":
-				for _, a := range x.Args {
-					if ll, ok := a.Value.(*ast.ListLit); ok {
-						for _, el := range ll.Elems {
-							if id, ok := el.(*ast.Ident); ok {
-								events = append(events, event{name: id.Name, await: true})
+				if !dup {
+					p[name] = append(p[name], sp)
+				}
+			}
+		}
+	}
+}
+
+type namedFuture struct {
+	name string
+	span ast.Span
+}
+
+type futureCheck struct {
+	info    *sema.ProgramInfo
+	fn      string
+	tasks   []namedFuture   // futures of pool tasks that were given a name
+	awaited map[string]bool // names awaited or gathered outside a closure
+	errs    []string
+	seen    map[string]bool
+}
+
+func (c *futureCheck) report(msg string) {
+	if !c.seen[msg] {
+		c.seen[msg] = true
+		c.errs = append(c.errs, msg)
+	}
+}
+
+// leak reports every request still pending in st.
+func (c *futureCheck) leak(st pendingFutures, when string) {
+	names := make([]string, 0, len(st))
+	for name := range st {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, sp := range st[name] {
+			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call is not awaited or gathered %s", sp, c.fn, name, when))
+		}
+	}
+}
+
+// exprs walks the expressions of a statement: an await or a gather outside a
+// closure ends the wait for the futures it names. A `?` may return early,
+// leaving what is still pending.
+func (c *futureCheck) exprs(st pendingFutures, nodes ...any) {
+	try := false
+	done := func(e ast.Expr) {
+		if id, ok := e.(*ast.Ident); ok {
+			c.awaited[id.Name] = true
+			delete(st, id.Name)
+		}
+	}
+	for _, n := range nodes {
+		visit(reflect.ValueOf(n), func(n any) bool {
+			switch x := n.(type) {
+			case *ast.LambdaExpr:
+				// A closure runs later, if at all.
+				return false
+			case *ast.TryExpr:
+				try = true
+			case *ast.CallExpr:
+				fe, ok := x.Callee.(*ast.FieldExpr)
+				if !ok {
+					break
+				}
+				switch fe.Field {
+				case "await":
+					done(fe.Object)
+				case "gather":
+					for _, a := range x.Args {
+						if ll, ok := a.Value.(*ast.ListLit); ok {
+							for _, el := range ll.Elems {
+								done(el)
 							}
 						}
 					}
 				}
 			}
-		}
-		return true
-	}, func(n any) {
-		// The name holds the new future once the right-hand side has run.
-		x, ok := n.(*ast.LetAssignStmt)
-		if !ok || !isFutureProducer(info, x.Value) {
-			return
-		}
-		if x.Name != "_" {
-			events = append(events, event{name: x.Name, span: x.Span})
-		} else if !isPoolSubmit(info, x.Value) {
-			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", x.Span, fn.Name))
-		}
-	})
+			return true
+		}, func(any) {})
+	}
+	if try {
+		c.leak(st, "where `?` may return early")
+	}
+}
 
-	// A future is awaited by an await of its name written after it and
-	// before the name is given another future.
-	for i, made := range events {
-		if made.await {
-			continue
-		}
-		awaited := false
-		for _, later := range events[i+1:] {
-			if later.name != made.name {
-				continue
+// block walks stmts on one path and reports whether every path through them
+// returns.
+func (c *futureCheck) block(stmts []ast.Stmt, st pendingFutures) bool {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetAssignStmt:
+			c.exprs(st, s.Value)
+			var moved []ast.Span
+			if id, ok := s.Value.(*ast.Ident); ok && id.Name != s.Name {
+				// A second name for the future: awaiting either will do.
+				moved = st[id.Name]
+				delete(st, id.Name)
 			}
-			awaited = later.await
-			break
-		}
-		if !awaited {
-			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", made.span, fn.Name, made.name))
+			c.leak(pendingFutures{s.Name: st[s.Name]}, "before the name is given another value")
+			delete(st, s.Name)
+			if len(moved) > 0 {
+				st[s.Name] = moved
+			}
+			switch {
+			case !isFutureProducer(c.info, s.Value):
+			case isPoolSubmit(c.info, s.Value):
+				if s.Name != "_" {
+					c.tasks = append(c.tasks, namedFuture{s.Name, s.Span})
+				}
+			case s.Name == "_":
+				c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", s.Span, c.fn))
+			default:
+				st[s.Name] = []ast.Span{s.Span}
+			}
+
+		case *ast.IfStmt:
+			// A condition is only reached when those before it were false.
+			var live []pendingFutures
+			for _, br := range s.Branches {
+				c.exprs(st, br.Cond)
+				b := st.clone()
+				if !c.block(br.Body, b) {
+					live = append(live, b)
+				}
+			}
+			b := st.clone()
+			if !c.block(s.Else, b) {
+				live = append(live, b)
+			}
+			if len(live) == 0 {
+				return true
+			}
+			st.become(live)
+
+		case *ast.MatchStmt:
+			c.exprs(st, s.Subject)
+			var live []pendingFutures
+			for _, arm := range s.Arms {
+				b := st.clone()
+				if arm.Guard != nil {
+					c.exprs(b, arm.Guard)
+				}
+				if !c.block(arm.Body, b) {
+					live = append(live, b)
+				}
+			}
+			if len(live) == 0 && len(s.Arms) > 0 {
+				return true
+			}
+			st.become(live)
+
+		case *ast.WhileStmt:
+			c.exprs(st, s.Cond)
+			c.loop(s.Body, st)
+
+		case *ast.ForStmt:
+			c.exprs(st, s.Iterable)
+			c.loop(s.Body, st)
+
+		case *ast.ReturnStmt:
+			c.exprs(st, s.Value)
+			c.leak(st, "before this return")
+			return true
+
+		default:
+			c.exprs(st, stmt)
 		}
 	}
-	return errs
+	return false
+}
+
+// loop walks a loop body, which may run any number of times: a request it
+// starts is awaited in the same pass, and an await in it does not count for
+// a request started before the loop.
+func (c *futureCheck) loop(body []ast.Stmt, st pendingFutures) {
+	b := st.clone()
+	c.block(body, b)
+	for name, spans := range b {
+		var made []ast.Span
+		for _, sp := range spans {
+			before := false
+			for _, have := range st[name] {
+				before = before || have == sp
+			}
+			if !before {
+				made = append(made, sp)
+			}
+		}
+		c.leak(pendingFutures{name: made}, "in the pass of the loop that makes it")
+	}
 }
 
 // visit walks every AST node reachable from v, whatever statement or
