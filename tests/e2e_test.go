@@ -1701,3 +1701,48 @@ def main() -> int:
     print(run_workflow V(5), run_workflow V(0))
     return 0
 `
+
+// run_workflow runs the workflow it names. The VM compiled functions before
+// a workflow had its index, so every run_workflow in a function, or in a
+// workflow declared above the one it names, ran the first workflow declared.
+func TestE2ERunWorkflowRunsTheOneNamedParity(t *testing.T) {
+	runOnBothBackends(t, "run_workflow_named", runWorkflowNamedSrc, "103 20 3 20 3 6\n")
+}
+
+const runWorkflowNamedSrc = `workflow A(n: int) -> int:
+    verify: sound
+
+    start -> s:
+        x = run_workflow C(n)
+
+    step s -> done:
+        return x + 100
+
+workflow B(n: int) -> int:
+    verify: sound
+
+    start -> s:
+        d = 20
+
+    step s -> done:
+        return d
+
+workflow C(n: int) -> int[3..3]:
+    verify: sound
+
+    start -> s:
+        d = 3
+
+    step s -> done:
+        return d
+
+def pick(k: int) -> int:
+    if k > 0:
+        return run_workflow B(k)
+    return run_workflow C(k)
+
+def main() -> int:
+    c = run_workflow C(1)
+    print(run_workflow A(1), run_workflow B(1), c, pick(1), pick(0), 12 / (c - 1))
+    return 0
+`
