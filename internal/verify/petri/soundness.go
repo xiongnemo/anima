@@ -613,21 +613,29 @@ func (c *futureCheck) leak(open map[ast.Span]string, when string) {
 	}
 }
 
-// exprs walks the expressions of a statement, in the order they run. An
-// await or a gather that the statement always runs ends the wait for the
-// requests its name holds: one in a closure, on the right of `and`, `or` or
-// `implies`, or in an arm of a match expression may not run. A `?` may
-// return early, leaving what is open when it is reached. A name in a pattern
-// is written, so it holds nothing known. A request is started where its
-// future is given a name (c.named): anywhere else nothing could wait for it.
+// exprs walks the expressions of a statement. An await or a gather that the
+// statement always runs ends the wait for the requests its name holds: one
+// in a closure, on the right of `and`, `or` or `implies`, or in an arm of a
+// match expression may not run. A `?` may return early: the order in which
+// the parts of a statement run is not the order they are written in (keyword
+// arguments run in parameter order), so only an await inside what the `?` is
+// applied to is known to have run by then. A name in a pattern is written,
+// so it holds nothing known. A request is started where its future is given
+// a name (c.named): anywhere else nothing could wait for it.
 func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 	maybe := map[any]bool{} // sub-expressions that may not run
+	skipped := 0
+	type ran struct {
+		name   string
+		inside []*ast.TryExpr // the `?` it is an operand of, outermost first
+	}
+	var awaits []ran
+	var tries, inside []*ast.TryExpr
 	unnamed := func(n any) {
 		if x, ok := n.(*ast.CallExpr); ok && ast.Expr(x) != c.named && futureKind(c.info, x) == "request" {
 			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the request started here is not given a name (f = ...get_async(...)), so nothing can wait for it", x.Span, c.fn))
 		}
 	}
-	skipped := 0
 	done := func(e ast.Expr) {
 		id, ok := e.(*ast.Ident)
 		if !ok {
@@ -635,7 +643,7 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 		}
 		c.awaited[id.Name] = true
 		if skipped == 0 {
-			st.await(id.Name)
+			awaits = append(awaits, ran{id.Name, append([]*ast.TryExpr(nil), inside...)})
 		}
 	}
 	for _, n := range nodes {
@@ -664,6 +672,9 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 				}
 			case *ast.VarPat:
 				c.leak(st.assign(x.Name, "", nil), "before the name is given another value")
+			case *ast.TryExpr:
+				tries = append(tries, x)
+				inside = append(inside, x)
 			case *ast.CallExpr:
 				unnamed(n)
 				fe, ok := x.Callee.(*ast.FieldExpr)
@@ -689,10 +700,23 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 				skipped--
 			}
 			if _, ok := n.(*ast.TryExpr); ok {
-				// What it is applied to has run; what follows has not.
-				c.leak(st.open, "where `?` may return early")
+				inside = inside[:len(inside)-1]
 			}
 		})
+	}
+	for _, try := range tries {
+		before := st.clone()
+		for _, a := range awaits {
+			for _, t := range a.inside {
+				if t == try {
+					before.await(a.name)
+				}
+			}
+		}
+		c.leak(before.open, "where `?` may return early")
+	}
+	for _, a := range awaits {
+		st.await(a.name)
 	}
 }
 
