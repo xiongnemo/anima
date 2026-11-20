@@ -1,0 +1,10 @@
+# unwrap_or gives the default itself, not a copy: as a list[int] it could be
+# written with a 0 that is then read through the name with the range.
+def main() -> int:
+    o: Option[list[int]] = None
+    d: list[int[1..9]] = [1]
+    ys = o |> unwrap_or(d)
+    if len(ys) > 0:
+        ys[0] = 0
+    print(10 / d[0])
+    return 0

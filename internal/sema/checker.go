@@ -2126,6 +2126,30 @@ func (c *checker) checkFuncArgs(name string, fi *FuncInfo, args []ast.CallArg, s
 	return c.checkCallAliasing(args, true)
 }
 
+// eitherOf is the type of a value that is one of type a or one of type b,
+// and whether there is such a type. An int has the range of both. A list, a
+// map or a variant is a reference whose element ranges are part of its
+// type, so the two types are the same one; with one of them unknown, the
+// value has no type the kernel could read a range from.
+func eitherOf(a, b Type) (Type, bool) {
+	if keepsType(a) || keepsType(b) {
+		if !knownType(a) || !knownType(b) {
+			return UnknownType{}, true
+		}
+		return a, isAssignable(a, b) && isAssignable(b, a)
+	}
+	if !knownType(a) || !knownType(b) {
+		if knownType(a) {
+			return widenInt(a), true
+		}
+		return widenInt(b), true
+	}
+	if a.Kind() != b.Kind() || !sameSort(a, b) {
+		return nil, false
+	}
+	return unifyTypes(a, b), true
+}
+
 // stageShape is what a pipeline stage takes after the piped value.
 type stageShape struct {
 	args    int  // how many arguments
@@ -2388,17 +2412,24 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			// What the variant holds, or the default: the range is that of
-			// both, and no range when what it holds is not known.
-			adt, ok := lhsTy.(*ADTType)
-			if !ok || len(adt.TypeArgs) == 0 || adt.TypeArgs[0].Kind() == KindUnknown {
-				return widenInt(dt), nil
+			// What the variant holds, or the default.
+			var held Type = UnknownType{}
+			if adt, ok := lhsTy.(*ADTType); ok && len(adt.TypeArgs) > 0 {
+				held = adt.TypeArgs[0]
 			}
-			held := adt.TypeArgs[0]
-			if dt.Kind() != KindUnknown && dt.Kind() != held.Kind() {
+			ty, ok := eitherOf(held, dt)
+			// A list or map literal is a new value: it takes the type of
+			// what the variant holds, and the kernel proves its elements.
+			switch callArgs[0].Value.(type) {
+			case *ast.ListLit, *ast.MapLit:
+				if knownType(held) && c.assignable(held, dt, callArgs[0].Value) {
+					ty, ok = held, true
+				}
+			}
+			if !ok {
 				return nil, fmt.Errorf("%s: unwrap_or on %s takes a default that is %s, got %s", callArgs[0].Value.GetSpan(), lhsTy, held, dt)
 			}
-			return unifyTypes(held, dt), nil
+			return ty, nil
 		}
 	case "and_then":
 		if len(callArgs) == 1 {
@@ -2430,12 +2461,17 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 					}
 					return nil, fmt.Errorf("%s: the function of and_then gives %s, got %s", lam.Body.GetSpan(), want, bty)
 				}
-				if known && adt.Name == "Result" && len(adt.TypeArgs) == 2 && len(bdt.TypeArgs) == 2 {
-					le, be := adt.TypeArgs[1], bdt.TypeArgs[1]
-					if le.Kind() != KindUnknown && be.Kind() != KindUnknown && le.Kind() != be.Kind() {
+				if bdt.Name == "Result" && len(bdt.TypeArgs) == 2 {
+					// The error is the one it is given or the one it gives.
+					var le Type = UnknownType{}
+					if known && len(adt.TypeArgs) == 2 {
+						le = adt.TypeArgs[1]
+					}
+					et, ok := eitherOf(le, bdt.TypeArgs[1])
+					if !ok {
 						return nil, fmt.Errorf("%s: the function of and_then gives a Result with the error of %s, got %s", lam.Body.GetSpan(), lhsTy, bty)
 					}
-					return c.instantiateADT("Result", []Type{bdt.TypeArgs[0], unifyTypes(le, be)}), nil
+					return c.instantiateADT("Result", []Type{bdt.TypeArgs[0], et}), nil
 				}
 				return bty, nil
 			}
