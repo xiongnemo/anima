@@ -855,6 +855,20 @@ func goJSONToValue(x any) Value {
 }
 
 func valueToGoJSON(v Value) any {
+	return valueToJSON(v, nil)
+}
+
+// valueToJSON gives null for a list, map or entity met again inside itself:
+// one can hold itself, and its encoding would have no end.
+func valueToJSON(v Value, open []uintptr) any {
+	if box, ok := boxOf(v); ok {
+		for _, o := range open {
+			if o == box {
+				return nil
+			}
+		}
+		open = append(open, box)
+	}
 	switch v.Kind {
 	case ValInt:
 		return v.Int
@@ -868,23 +882,23 @@ func valueToGoJSON(v Value) any {
 		}
 		out := make([]any, len(*v.List))
 		for i, el := range *v.List {
-			out[i] = valueToGoJSON(el)
+			out[i] = valueToJSON(el, open)
 		}
 		return out
 	case ValMap:
 		out := map[string]any{}
 		for k, val := range v.Map {
-			out[k] = valueToGoJSON(val)
+			out[k] = valueToJSON(val, open)
 		}
 		return out
 	case ValEntity:
 		out := map[string]any{}
 		for k, val := range v.Entity.Fields {
-			out[k] = valueToGoJSON(val)
+			out[k] = valueToJSON(val, open)
 		}
 		return out
 	case ValVariant:
-		return v.String()
+		return v.text(open[:len(open)-1])
 	default:
 		return nil
 	}
