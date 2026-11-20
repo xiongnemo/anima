@@ -1,0 +1,11 @@
+# The element is an Option of no type yet, so the write took Some(0) and the
+# read gave an Option[int[1..9]]. All three kernels passed and both backends
+# divided by zero.
+def main() -> int:
+    xs = [None]
+    xs[0] = Some(0)
+    o: Option[int[1..9]] = xs[0]
+    match o:
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    return 0

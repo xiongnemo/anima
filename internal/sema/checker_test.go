@@ -199,7 +199,7 @@ def f() -> int:
     a[1] = 2
     b: map[bool, int[0..9]] = {}
     b[True] = 3
-    c = {}
+    c: map[str, int] = {}
     c["k"] = 4
     a = {}
     a[2] = 3
@@ -212,10 +212,10 @@ def f() -> int:
 	if _, err := Check(prog); err != nil {
 		t.Errorf("int, bool and str keys into an empty map should be accepted, got %v", err)
 	}
-	// Without a declared type the keys are str, in every branch alike.
+	// An assigned `{}` keeps the type the map was declared with.
 	branches := `
 def f(flag: bool) -> int:
-    m = {}
+    m: map[str, int] = {}
     if flag:
         m = {}
         m["a"] = 1
@@ -230,7 +230,7 @@ def f(flag: bool) -> int:
 	if _, err := Check(prog); err != nil {
 		t.Errorf("str keys in both branches should be accepted, got %v", err)
 	}
-	bad := "def f() -> int:\n    c = {}\n    c[1] = 4\n    return 0\n"
+	bad := "def f() -> int:\n    c: map[str, int] = {}\n    c[1] = 4\n    return 0\n"
 	prog, err = parser.Parse("bad.anm", bad)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
@@ -277,9 +277,9 @@ def f(mut rows: list[Row]) -> int:
 // Keys are stored by their printed form, so one map cannot mix key types.
 func TestSemaRejectsMixedMapKeyTypes(t *testing.T) {
 	for name, body := range map[string]string{
-		"writes to an empty map": "    m = {}\n    m[1] = 1\n    m[\"1\"] = 2\n",
+		"writes to an empty map": "    m: map[int, int] = {}\n    m[1] = 1\n    m[\"1\"] = 2\n",
 		"literal":                "    m = {1: 1, \"1\": 2}\n",
-		"map inside a list":      "    maps = [{}]\n    m = maps[0]\n    m[\"1\"] = 1\n    m[1] = 2\n",
+		"map inside a list":      "    maps: list[map[str, int]] = [{}]\n    m = maps[0]\n    m[\"1\"] = 1\n    m[1] = 2\n",
 	} {
 		prog, err := parser.Parse("mixed.anm", "def f() -> int:\n"+body+"    return 0\n")
 		if err != nil {
@@ -856,7 +856,12 @@ def f(c: bool, n: int, s: str, xs: list[int], ss: list[str], o: Option[int], os:
 		// Assignments.
 		{"x = 5\n    x = 7\n    if c:\n        x = n\n    return x", ""},
 		{"t = \"a\"\n    t = s\n    b = True\n    b = not c\n    return 0", ""},
-		{"q = None\n    q = Some(3)\n    q = o\n    return 0", ""},
+		{"q: Option[int] = None\n    q = Some(3)\n    q = o\n    return 0", ""},
+		// A part no value has typed is not typed by a later assignment.
+		{"q = None\n    q = Some(3)\n    return 0", "declare the type of q where it is first assigned"},
+		{"q = None\n    q = None\n    print(q)\n    return 0", ""},
+		{"ys = []\n    ys = [1]\n    return 0", "declare the type of ys where it is first assigned"},
+		{"ys: list[int] = []\n    ys = [1]\n    ys = []\n    return 0", ""},
 		{"e = bx\n    e = Box(n=1)\n    return 0", ""},
 		// What a named lambda hands back has the type its first use gives.
 		{"g = (v) => v\n    r = g(1)\n    r = \"s\"\n    return 0", "keeps its sort"},

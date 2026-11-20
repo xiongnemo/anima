@@ -143,6 +143,17 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_void_value_in_typed_variable.anm", "holds what a function with no return type gives"},
 		{"../tests/bugs/sema_bare_option_payload.anm", "cannot assign unknown to k (int)"},
 		{"../tests/bugs/sema_handle_element_type.anm", "expects conc.Channel[int], got conc.Channel[int[1..9]]"},
+		{"../tests/bugs/sema_open_type_assigned_in_branch.anm", "declare the type of o where it is first assigned"},
+		{"../tests/bugs/sema_open_type_assigned_in_loop.anm", "declare the type of o where it is first assigned"},
+		{"../tests/bugs/sema_open_list_assigned_in_loop.anm", "declare the type of xs where it is first assigned"},
+		{"../tests/bugs/sema_open_type_loop_variable.anm", "declare the type of o where it is first assigned"},
+		{"../tests/bugs/sema_open_type_pattern_name.anm", "declare the type of o where it is first assigned"},
+		{"../tests/bugs/sema_open_future_assigned_in_loop.anm", "declare the type of f where it is first assigned"},
+		{"../tests/bugs/sema_open_type_workflow_step.anm", "declare the type of o where it is first assigned"},
+		{"../tests/bugs/sema_open_mutex_set.anm", "m would be a conc.Mutex[Option[unknown]], which can be written to and does not say the type of all it holds"},
+		{"../tests/bugs/sema_open_list_element_written.anm", "xs would be a list[Option[unknown]], which can be written to and does not say the type of all it holds"},
+		{"../tests/bugs/sema_open_map_entry_written.anm", "m would be a map[str, Option[unknown]], which can be written to and does not say the type of all it holds"},
+		{"../tests/bugs/sema_open_gathered_list_two_types.anm", "rs would be a list[Result[int, unknown]], which can be written to and does not say the type of all it holds"},
 		{"../tests/bugs/sema_fork_branch_writes_field.anm", "writes acc in place"},
 		{"../tests/bugs/sema_fork_branches_write_one_entity.anm", "in place"},
 		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},
@@ -794,6 +805,35 @@ func TestE2EBuiltinsAndStagesParity(t *testing.T) {
 func TestE2ENamedLambdasParity(t *testing.T) {
 	runOnBothBackends(t, "named_lambdas", namedLambdasSrc, "True False [2, 3] True Some(2) True [7]\n7 [1, 2, 3] 25 3\n")
 }
+
+// What `None`, `[]`, `{}` and `Ok(1)` leave open is said by the declared type
+// of the variable, and both backends run the program alike.
+func TestE2EDeclaredOpenTypesParity(t *testing.T) {
+	runOnBothBackends(t, "declared_open_types", declaredOpenTypesSrc, "Some(3) [Some(4)] {\"a\": 5} [Ok(1), Ok(2)] Some(6) [1]\n")
+}
+
+const declaredOpenTypesSrc = `import std.concurrent as conc
+import std.requests as req
+
+def main() -> int:
+    m: conc.Mutex[Option[int]] = conc.Mutex(None)
+    m.set(Some(3))
+    xs: list[Option[int]] = [None]
+    xs[0] = Some(4)
+    d: map[str, int] = {}
+    d["a"] = 5
+    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => Ok(1))
+    f2 = pool.submit(() => Ok(2))
+    rs: list[Result[int, str]] = req.gather([f1, f2])
+    pool.shutdown()
+    o: Option[int] = None
+    o = Some(6)
+    ys: list[int] = []
+    ys = [1]
+    print(m.get(), xs, d, rs, o, ys)
+    return 0
+`
 
 const namedLambdasSrc = `import std.concurrent as conc
 

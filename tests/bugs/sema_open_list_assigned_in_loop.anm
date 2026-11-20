@@ -1,0 +1,11 @@
+# xs is a list of nothing where it is read as a list[str] and a list of ints
+# when the loop comes round. All three kernels passed and both backends
+# printed 1t.
+def main() -> int:
+    xs = []
+    for i in [1, 2]:
+        ys: list[str] = xs
+        if len(ys) > 0:
+            print(ys[0] + "t")
+        xs = [1]
+    return 0

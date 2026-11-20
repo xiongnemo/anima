@@ -1,0 +1,13 @@
+# The pattern binds o, which holds an Option of no type yet: after the match
+# o is Some(0) and is read as an Option[int[1..9]]. All three kernels passed
+# and both backends divided by zero.
+def main() -> int:
+    o = None
+    match Some(Some(0)):
+        Some(o) -> print(o)
+        None -> print("x")
+    p: Option[int[1..9]] = o
+    match p:
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    return 0

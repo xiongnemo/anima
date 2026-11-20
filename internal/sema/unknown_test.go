@@ -214,7 +214,7 @@ func TestSemaUnknownValueIsOnlyPassedOn(t *testing.T) {
 		{"two Oks gathered", `    pool = conc.ThreadPool(2, 2)
     f1 = pool.submit(() => Ok(1))
     f2 = pool.submit(() => Ok(2))
-    rs = req.gather([f1, f2])
+    rs: list[Result[int, str]] = req.gather([f1, f2])
     pool.shutdown()
     for r in rs:
         match r:
@@ -249,13 +249,12 @@ func TestSemaUnknownValueIsOnlyPassedOn(t *testing.T) {
         match r:
             Some(n) -> print(10 / n)
             None -> print("none")`, ""},
-		// What has no value yet takes the type of what it is given.
+		// What has no value yet takes the type it is declared with.
 		{"an empty list, None and Ok", `    ys: list[int] = []
     o: Option[int] = None
     r: Result[int, str] = Ok(1)
     zs = []
-    zs = [1]
-    print(ys, o, r, zs[0])`, ""},
+    print(ys, o, r, zs)`, ""},
 	})
 }
 
@@ -298,7 +297,7 @@ func TestSemaNamedLambdaTakesTheTypesOfItsFirstUse(t *testing.T) {
 		{"first used with None", `    g = (v) => v
     a = g(None)
     o: Option[int[1..9]] = g(Some(0))
-    print(a, o)`, "g is first used with Option, which does not say the type of all it holds"},
+    print(a, o)`, "g is first used with Option[unknown], which does not say the type of all it holds"},
 		{"first used with an empty list", `    g = (v) => v
     a = g([])
     print(a)`, "g is first used with list[unknown], which does not say the type of all it holds"},

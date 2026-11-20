@@ -1,0 +1,22 @@
+# Two Oks say nothing of the error type, so the gathered list was at once a
+# list[Result[int, str]] and a list[Result[int, int]]: a string written
+# through one name was read as an int through the other. All three kernels
+# passed; the VM printed 0 and the native build 1.
+import std.concurrent as conc
+import std.requests as req
+
+def main() -> int:
+    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => Ok(1))
+    f2 = pool.submit(() => Ok(2))
+    rs = req.gather([f1, f2])
+    pool.shutdown()
+    a: list[Result[int, str]] = rs
+    b: list[Result[int, int]] = rs
+    if len(a) > 0:
+        a[0] = Err("s")
+    if len(b) > 0:
+        match b[0]:
+            Ok(n) -> print(n)
+            Err(e) -> print(e % 7)
+    return 0
