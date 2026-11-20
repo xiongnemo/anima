@@ -1,0 +1,10 @@
+# fold gives what it starts with when the list is empty, else what its
+# function gave last: the two are lists of the same type.
+def main() -> int:
+    d: list[int[1..9]] = [1]
+    zs: list[int] = [0]
+    es: list[int] = [1]
+    ys = es |> fold(d, (a, x) => zs)
+    if len(ys) > 0:
+        print(10 / ys[0])
+    return 0

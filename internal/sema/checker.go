@@ -2366,7 +2366,13 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 					Params: []FuncParamInfo{{Name: lam.Params[0], Type: accTy}, {Name: lam.Params[1], Type: elemTy}},
 					Return: rty,
 				}
-				return unifyTypes(accTy, rty), nil
+				// The start when the list is empty, else what the
+				// function gave last.
+				ty, ok := eitherOf(accTy, rty)
+				if !ok {
+					return nil, fmt.Errorf("%s: the function of fold gives %s as fold starts with, got %s", lam.Body.GetSpan(), accTy, rty)
+				}
+				return ty, nil
 			}
 			return accTy, nil
 		}

@@ -136,6 +136,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_unwrap_or_default_range.anm", "div_nonzero"},
 		{"../tests/bugs/sema_and_then_gives_variant.anm", "the function of and_then gives an Option, got"},
 		{"../tests/bugs/sema_unwrap_or_default_elements.anm", "takes a default that is list[int], got list[int[1..9]]"},
+		{"../tests/bugs/sema_fold_result_elements.anm", "the function of fold gives list[int[1..9]] as fold starts with, got list[int]"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
