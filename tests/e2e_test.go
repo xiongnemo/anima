@@ -957,6 +957,43 @@ const jsonEncodeSrc = "import std.json as json\n" +
 	"    print(json.encode([[1, 2], []]), json.encode({\"n\": None}))\n" +
 	"    return 0\n"
 
+// What json.encode writes, json.decode reads back on both backends: the
+// native parser took the u of a \u escape for a letter. A handle and a
+// lambda have the same text on both, in print and inside an encoded variant.
+func TestE2EJsonRoundTripParity(t *testing.T) {
+	runOnBothBackends(t, "json_round_trip", jsonRoundTripSrc, "True\n\"\xc3\xa9 \xf0\x9f\x98\x80 \xef\xbf\xbdx \xef\xbf\xbd \xef\xbf\xbdA / \\b\\f \xe2\x82\xac\"\n<handle:9> Some(<handle:9>) <handle:4> <fn>\n\"Some(\\u003chandle:9\\u003e)\" [null]\n")
+}
+
+const jsonRoundTripSrc = "import std.json as json\n" +
+	"import std.bytes as bytes\n" +
+	"import std.concurrent as conc\n" +
+	"\n" +
+	"entity Msg:\n" +
+	"    text: str\n" +
+	"\n" +
+	"def show(t: str):\n" +
+	"    match json.decode[Msg](t):\n" +
+	"        Ok(back) ->\n" +
+	"            print(json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"\n" +
+	"def main() -> int:\n" +
+	"    m = Msg(text=\"a&b<c>d\\n\\te \\\"q\\\" \\\\ \xc3\xa9\")\n" +
+	"    s = json.encode(m)\n" +
+	"    match json.decode[Msg](s):\n" +
+	"        Ok(back) ->\n" +
+	"            print(back.text == m.text)\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    show(\"{\\\"text\\\":\\\"\\\\u00e9 \\\\ud83d\\\\ude00 \\\\ud800x \\\\udc00 \\\\ud83d\\\\u0041 \\\\/ \\\\b\\\\f \\\\u20AC\\\"}\")\n" +
+	"    bv = bytes.from_str(\"A\")\n" +
+	"    ch = conc.Channel[int](cap=1)\n" +
+	"    g = () => 1\n" +
+	"    print(bv, Some(bv), ch, g)\n" +
+	"    print(json.encode(Some(bv)), json.encode([bv]))\n" +
+	"    return 0\n"
+
 // A lambda in a fork branch is a function of its own. The native build wrote
 // it inside the function of the branch and did not compile.
 func TestE2EForkBranchLambdaParity(t *testing.T) {

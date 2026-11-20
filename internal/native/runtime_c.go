@@ -1595,6 +1595,18 @@ static void json_skip_ws(const char **p) {
     while (**p && isspace((unsigned char)**p)) (*p)++;
 }
 
+// json_hex4 reads the four hex digits of a \u escape, or gives -1.
+static int json_hex4(const char *s) {
+    int r = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = s[i];
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return -1;
+        r = r * 16 + d;
+    }
+    return r;
+}
+
 static char *json_parse_str(const char **p) {
     if (**p != '"') return NULL;
     (*p)++;
@@ -1602,12 +1614,43 @@ static char *json_parse_str(const char **p) {
     char *out = malloc(cap);
     while (**p && **p != '"') {
         char ch = **p;
+        if (ch == '\\' && (*p)[1] == 'u' && json_hex4(*p + 2) >= 0) {
+            // \uXXXX is a code point, written here as UTF-8; two of them
+            // can be a surrogate pair, and half a pair is U+FFFD, as in Go.
+            long cp = json_hex4(*p + 2);
+            *p += 6;
+            if (cp >= 0xd800 && cp <= 0xdbff) {
+                int lo = (*p)[0] == '\\' && (*p)[1] == 'u' ? json_hex4(*p + 2) : -1;
+                if (lo >= 0xdc00 && lo <= 0xdfff) {
+                    cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                    *p += 6;
+                } else cp = 0xfffd;
+            } else if (cp >= 0xdc00 && cp <= 0xdfff) cp = 0xfffd;
+            if (len + 5 >= cap) { cap *= 2; out = realloc(out, cap); }
+            if (cp < 0x80) out[len++] = (char)cp;
+            else if (cp < 0x800) {
+                out[len++] = (char)(0xc0 | (cp >> 6));
+                out[len++] = (char)(0x80 | (cp & 0x3f));
+            } else if (cp < 0x10000) {
+                out[len++] = (char)(0xe0 | (cp >> 12));
+                out[len++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+                out[len++] = (char)(0x80 | (cp & 0x3f));
+            } else {
+                out[len++] = (char)(0xf0 | (cp >> 18));
+                out[len++] = (char)(0x80 | ((cp >> 12) & 0x3f));
+                out[len++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+                out[len++] = (char)(0x80 | (cp & 0x3f));
+            }
+            continue;
+        }
         if (ch == '\\' && (*p)[1]) {
             (*p)++;
             switch (**p) {
                 case 'n': ch = '\n'; break;
                 case 't': ch = '\t'; break;
                 case 'r': ch = '\r'; break;
+                case 'b': ch = '\b'; break;
+                case 'f': ch = '\f'; break;
                 default: ch = **p; break;
             }
         }
