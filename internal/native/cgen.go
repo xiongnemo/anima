@@ -1175,22 +1175,35 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	g.lamSeq++
 	lname := fmt.Sprintf("__lam_%d", g.lamSeq)
 
-	// Collect free vars (captured upvalues) present in g.localVars or g.wfVars
-	paramSet := map[string]bool{}
+	// The variables the body names that live where the lambda is written:
+	// locals, workflow variables and, inside another lambda, what that one
+	// captured. They are copied into the closure.
+	bound := map[string]bool{}
 	for _, p := range lam.Params {
-		paramSet[p] = true
+		bound[p] = true
+	}
+	inScope := func(name string) bool {
+		if g.localVars[name] || (g.wfVars != nil && g.wfVars[name]) {
+			return true
+		}
+		_, captured := g.upvalMap[name]
+		return captured
 	}
 	var freeVars []string
-	seen := map[string]bool{}
-	collectFreeVarsExpr(lam.Body, paramSet, g.localVars, g.wfVars, &freeVars, seen)
+	collectFreeVarsExpr(lam.Body, bound, inScope, &freeVars, map[string]bool{})
 
 	fmt.Fprintf(g.fwdDecls, "static AnimaVal %s(AnimaVal *__upvals, int __argc, AnimaVal *__argv);\n", lname)
 
 	prevCur := g.cur
 	prevVars := g.localVars
 	prevUp := g.upvalMap
+	prevIndent := g.indent
 
-	g.cur = g.liftedFns
+	// The function is written apart and added once it is whole: a lambda in
+	// its body is a function of its own, not one inside this one.
+	fn := &strings.Builder{}
+	g.cur = fn
+	g.indent = 0
 	g.localVars = map[string]bool{}
 	g.upvalMap = map[string]int{}
 	for i, fv := range freeVars {
@@ -1207,10 +1220,12 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	g.line("return %s;", bodyC)
 	g.indent--
 	g.line("}")
+	g.liftedFns.WriteString(fn.String())
 
 	g.cur = prevCur
 	g.localVars = prevVars
 	g.upvalMap = prevUp
+	g.indent = prevIndent
 
 	if len(freeVars) == 0 {
 		return fmt.Sprintf("v_closure(%s, 0, NULL)", lname)
@@ -1224,34 +1239,87 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	return fmt.Sprintf("v_closure(%s, %d, %s)", lname, len(refs), arr)
 }
 
-func collectFreeVarsExpr(expr ast.Expr, params, locals, wfVars map[string]bool, out *[]string, seen map[string]bool) {
-	if expr == nil {
-		return
+// collectFreeVarsExpr adds to out the names expr reads that are in scope
+// where the lambda is written and are not bound inside it: by its
+// parameters, by those of a lambda in it, or by a pattern of a match in it.
+func collectFreeVarsExpr(expr ast.Expr, bound map[string]bool, inScope func(string) bool, out *[]string, seen map[string]bool) {
+	walk := func(e ast.Expr) { collectFreeVarsExpr(e, bound, inScope, out, seen) }
+	with := func(names []string, e ast.Expr) {
+		inner := map[string]bool{}
+		for n := range bound {
+			inner[n] = true
+		}
+		for _, n := range names {
+			inner[n] = true
+		}
+		collectFreeVarsExpr(e, inner, inScope, out, seen)
 	}
 	switch e := expr.(type) {
+	case nil:
 	case *ast.Ident:
-		if !params[e.Name] && !seen[e.Name] && (locals[e.Name] || (wfVars != nil && wfVars[e.Name])) {
+		if !bound[e.Name] && !seen[e.Name] && inScope(e.Name) {
 			seen[e.Name] = true
 			*out = append(*out, e.Name)
 		}
+	case *ast.OldExpr:
+		walk(e.Inner)
 	case *ast.UnaryExpr:
-		collectFreeVarsExpr(e.Expr, params, locals, wfVars, out, seen)
+		walk(e.Expr)
 	case *ast.BinaryExpr:
-		collectFreeVarsExpr(e.Left, params, locals, wfVars, out, seen)
-		collectFreeVarsExpr(e.Right, params, locals, wfVars, out, seen)
+		walk(e.Left)
+		walk(e.Right)
+	case *ast.RangeExpr:
+		walk(e.Lo)
+		walk(e.Hi)
 	case *ast.FieldExpr:
-		collectFreeVarsExpr(e.Object, params, locals, wfVars, out, seen)
+		walk(e.Object)
 	case *ast.IndexExpr:
-		collectFreeVarsExpr(e.List, params, locals, wfVars, out, seen)
-		collectFreeVarsExpr(e.Index, params, locals, wfVars, out, seen)
+		walk(e.List)
+		walk(e.Index)
 	case *ast.CallExpr:
-		collectFreeVarsExpr(e.Callee, params, locals, wfVars, out, seen)
+		walk(e.Callee)
 		for _, a := range e.Args {
-			collectFreeVarsExpr(a.Value, params, locals, wfVars, out, seen)
+			walk(a.Value)
 		}
+	case *ast.RunWorkflowExpr:
+		for _, a := range e.Args {
+			walk(a.Value)
+		}
+	case *ast.LambdaExpr:
+		with(e.Params, e.Body)
+	case *ast.PipeExpr:
+		walk(e.Left)
+		walk(e.Right)
+	case *ast.TryExpr:
+		walk(e.Inner)
 	case *ast.ListLit:
 		for _, el := range e.Elems {
-			collectFreeVarsExpr(el, params, locals, wfVars, out, seen)
+			walk(el)
+		}
+	case *ast.MapLit:
+		for _, en := range e.Entries {
+			walk(en.Key)
+			walk(en.Value)
+		}
+	case *ast.FStrExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				walk(part.Expr)
+			}
+		}
+	case *ast.WithExpr:
+		walk(e.Base)
+		for _, f := range e.Fields {
+			walk(f.Value)
+		}
+	case *ast.MatchExpr:
+		walk(e.Subject)
+		for _, arm := range e.Arms {
+			names := patternNames(arm.Pattern)
+			if arm.Guard != nil {
+				with(names, arm.Guard)
+			}
+			with(names, arm.Value)
 		}
 	}
 }
@@ -1306,7 +1374,9 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 	// 3. Built-in / User / Closure calls
 	if id, ok := e.Callee.(*ast.Ident); ok {
 		// Closure variable?
-		if g.localVars[id.Name] || (g.upvalMap != nil && g.upvalMap[id.Name] >= 0 && func() bool { _, ok := g.upvalMap[id.Name]; return ok }()) {
+		// A workflow variable holds one as a local does.
+		_, captured := g.upvalMap[id.Name]
+		if g.localVars[id.Name] || captured || (g.wfVars != nil && g.wfVars[id.Name]) {
 			if len(e.Args) == 0 {
 				return fmt.Sprintf("v_call_clos(%s, 0, NULL)", g.varRef(id.Name))
 			}
