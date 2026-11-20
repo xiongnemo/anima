@@ -809,7 +809,7 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 			}
 		}
 	}
-	return nil
+	return checkWorkflowAssigned(wf)
 }
 
 func (c *checker) checkSystem(sys *ast.SystemDecl) error {
