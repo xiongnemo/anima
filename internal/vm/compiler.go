@@ -111,6 +111,15 @@ func Compile(info *sema.ProgramInfo, rawSource string, verified bool) (*Compiled
 		}
 	}
 
+	// A workflow has its index before any code is compiled: run_workflow
+	// in a function, or in a workflow declared above, names it by index.
+	for _, d := range info.Program.Decls {
+		if wf, ok := d.(*ast.WorkflowDecl); ok {
+			c.mod.WorkflowIdx[wf.Name] = len(c.mod.Workflows)
+			c.mod.Workflows = append(c.mod.Workflows, WorkflowProto{Name: wf.Name})
+		}
+	}
+
 	// Compile user functions
 	for _, d := range info.Program.Decls {
 		if fn, ok := d.(*ast.FuncDecl); ok {
@@ -383,13 +392,11 @@ func (c *compiler) compileWorkflow(wf *ast.WorkflowDecl) error {
 	}
 
 	c.wfCompiled[wf.Name] = wfc
-	idx := len(c.mod.Workflows)
-	c.mod.Workflows = append(c.mod.Workflows, WorkflowProto{
+	c.mod.Workflows[c.mod.WorkflowIdx[wf.Name]] = WorkflowProto{
 		Name:   wf.Name,
 		Params: sharedParams,
 		Pools:  wfc.Pools,
-	})
-	c.mod.WorkflowIdx[wf.Name] = idx
+	}
 	return nil
 }
 
