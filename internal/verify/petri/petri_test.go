@@ -145,11 +145,14 @@ def main() -> int:
 `
 	const tail = "    pool.shutdown()\n    return 0\n"
 	leaks := map[string]string{
-		"at the top":      "    f = pool.submit(() => 1)\n",
-		"in a loop":       "    for i in 0..3:\n        f = pool.submit(() => 1)\n",
-		"in a while":      "    while c < 3:\n        f = pool.submit(() => 1)\n        c += 1\n",
-		"in a match arm":  "    match c:\n        1 ->\n            f = pool.submit(() => 1)\n        _ -> print(0)\n",
-		"in an if branch": "    if c == 1:\n        f = pool.submit(() => 1)\n",
+		"at the top":                    "    f = pool.submit(() => 1)\n",
+		"in a loop":                     "    for i in 0..3:\n        f = pool.submit(() => 1)\n",
+		"in a while":                    "    while c < 3:\n        f = pool.submit(() => 1)\n        c += 1\n",
+		"in a match arm":                "    match c:\n        1 ->\n            f = pool.submit(() => 1)\n        _ -> print(0)\n",
+		"in an if branch":               "    if c == 1:\n        f = pool.submit(() => 1)\n",
+		"given another after its await": "    f = pool.submit(() => 1)\n    r = f.await()\n    f = pool.submit(() => 2)\n",
+		"awaited before it is made":     "    f = pool.submit(() => 1)\n    r = f.await()\n    f = pool.submit(() => f.await())\n",
+		"awaited in a closure only":     "    f = pool.submit(() => 1)\n    g = () => f.await()\n",
 	}
 	for name, body := range leaks {
 		rep := verifyPetri(t, head+body+tail)
@@ -158,13 +161,15 @@ def main() -> int:
 		}
 	}
 	fine := map[string]string{
-		"awaited":                  "    f = pool.submit(() => 1)\n    r = f.await()\n",
-		"awaited in every arm":     "    f = pool.submit(() => 1)\n    match c:\n        1 ->\n            r = f.await()\n        _ ->\n            r = f.await()\n",
-		"awaited in a loop":        "    f = pool.submit(() => 1)\n    for i in 0..2:\n        r = f.await()\n",
-		"awaited in an f-string":   "    f = pool.submit(() => 1)\n    print(f\"got {f.await()}\")\n",
-		"awaited in an expression": "    f = pool.submit(() => 1)\n    xs = [f.await()]\n",
-		"gathered":                 "    f = pool.submit(() => 1)\n    g = pool.submit(() => 2)\n    rs = conc.gather([f, g])\n",
-		"left to the pool":         "    _ = pool.submit(() => 1)\n    for i in 0..3:\n        _ = pool.submit(() => i)\n",
+		"awaited":                    "    f = pool.submit(() => 1)\n    r = f.await()\n",
+		"awaited in every arm":       "    f = pool.submit(() => 1)\n    match c:\n        1 ->\n            r = f.await()\n        _ ->\n            r = f.await()\n",
+		"awaited in a loop":          "    f = pool.submit(() => 1)\n    for i in 0..2:\n        r = f.await()\n",
+		"awaited in an f-string":     "    f = pool.submit(() => 1)\n    print(f\"got {f.await()}\")\n",
+		"awaited in an expression":   "    f = pool.submit(() => 1)\n    xs = [f.await()]\n",
+		"gathered":                   "    f = pool.submit(() => 1)\n    g = pool.submit(() => 2)\n    rs = conc.gather([f, g])\n",
+		"each awaited in turn":       "    f = pool.submit(() => 1)\n    r = f.await()\n    f = pool.submit(() => 2)\n    r = f.await()\n",
+		"made and awaited in a loop": "    while c < 3:\n        f = pool.submit(() => 1)\n        r = f.await()\n        c += 1\n",
+		"left to the pool":           "    _ = pool.submit(() => 1)\n    for i in 0..3:\n        _ = pool.submit(() => i)\n",
 	}
 	for name, body := range fine {
 		rep := verifyPetri(t, head+body+tail)

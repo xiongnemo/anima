@@ -444,82 +444,104 @@ func formatMarking(net *PetriNet, m []int) string {
 }
 
 // checkAsyncResourceFutures checks the futures a function makes. A future
-// given a name is awaited or gathered somewhere in the function; one that is
+// given a name is awaited or gathered further down in the function, before
+// the name is given another future; one that is
 // not wanted is written `_ = pool.submit(...)`, and the shutdown of its pool
 // waits for the task. (That a pool is shut down on every path, and not used
 // after, is the ownership checker's to prove.)
 func checkAsyncResourceFutures(info *sema.ProgramInfo, fn *ast.FuncDecl) []string {
-	type made struct {
-		name string
-		span ast.Span
+	// What the function does with futures, in the order it is written.
+	type event struct {
+		name  string
+		span  ast.Span
+		await bool
 	}
-	var futures []made
-	awaited := map[string]bool{}
+	var events []event
 	var errs []string
 
-	visit(reflect.ValueOf(fn.Body), func(n any) {
+	visit(reflect.ValueOf(fn.Body), func(n any) bool {
 		switch x := n.(type) {
-		case *ast.LetAssignStmt:
-			if !isFutureProducer(info, x.Value) {
-				return
-			}
-			if x.Name != "_" {
-				futures = append(futures, made{x.Name, x.Span})
-			} else if !isPoolSubmit(info, x.Value) {
-				errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", x.Span, fn.Name))
-			}
+		case *ast.LambdaExpr:
+			// A closure runs later, if at all: an await in it waits for nothing here.
+			return false
 		case *ast.CallExpr:
 			fe, ok := x.Callee.(*ast.FieldExpr)
 			if !ok {
-				return
+				break
 			}
 			switch fe.Field {
 			case "await":
 				if id, ok := fe.Object.(*ast.Ident); ok {
-					awaited[id.Name] = true
+					events = append(events, event{name: id.Name, await: true})
 				}
 			case "gather":
 				for _, a := range x.Args {
 					if ll, ok := a.Value.(*ast.ListLit); ok {
 						for _, el := range ll.Elems {
 							if id, ok := el.(*ast.Ident); ok {
-								awaited[id.Name] = true
+								events = append(events, event{name: id.Name, await: true})
 							}
 						}
 					}
 				}
 			}
 		}
+		return true
+	}, func(n any) {
+		// The name holds the new future once the right-hand side has run.
+		x, ok := n.(*ast.LetAssignStmt)
+		if !ok || !isFutureProducer(info, x.Value) {
+			return
+		}
+		if x.Name != "_" {
+			events = append(events, event{name: x.Name, span: x.Span})
+		} else if !isPoolSubmit(info, x.Value) {
+			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", x.Span, fn.Name))
+		}
 	})
 
-	for _, f := range futures {
-		if !awaited[f.name] {
-			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", f.span, fn.Name, f.name))
+	// A future is awaited by an await of its name written after it and
+	// before the name is given another future.
+	for i, made := range events {
+		if made.await {
+			continue
+		}
+		awaited := false
+		for _, later := range events[i+1:] {
+			if later.name != made.name {
+				continue
+			}
+			awaited = later.await
+			break
+		}
+		if !awaited {
+			errs = append(errs, fmt.Sprintf("%s: Petri Future token leak in %s: %q created by async call was never awaited or gathered (write `_ = pool.submit(...)` to leave a task to the shutdown of its pool)", made.span, fn.Name, made.name))
 		}
 	}
 	return errs
 }
 
-// visit calls f on every AST node reachable from v, whatever statement or
-// expression it is nested in.
-func visit(v reflect.Value, f func(any)) {
+// visit walks every AST node reachable from v, whatever statement or
+// expression it is nested in: pre before the nodes inside it (which are
+// skipped when it returns false), post after them.
+func visit(v reflect.Value, pre func(any) bool, post func(any)) {
 	switch v.Kind() {
 	case reflect.Interface:
 		if !v.IsNil() {
-			visit(v.Elem(), f)
+			visit(v.Elem(), pre, post)
 		}
 	case reflect.Ptr:
-		if !v.IsNil() {
-			f(v.Interface())
-			visit(v.Elem(), f)
+		if !v.IsNil() && pre(v.Interface()) {
+			visit(v.Elem(), pre, post)
+			post(v.Interface())
 		}
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
-			visit(v.Field(i), f)
+			visit(v.Field(i), pre, post)
 		}
 	case reflect.Slice:
 		for i := 0; i < v.Len(); i++ {
-			visit(v.Index(i), f)
+			visit(v.Index(i), pre, post)
 		}
 	}
 }
