@@ -1,0 +1,13 @@
+# A piped call whose argument is itself a piped call is still given the
+# piped value first: m.set("s", ...) on a mutex of ints. Unchecked, the
+# mutex held a str: the VM printed `s1`, the native backend an address.
+import std.concurrent as conc
+import std.bytes as bytes
+
+def main() -> int:
+    m = conc.Mutex(5)
+    bv = bytes.from_str("AB")
+    "s" |> m.set(0 |> bv.read_u8())
+    n = m.get()
+    print(n + 1)
+    return 0

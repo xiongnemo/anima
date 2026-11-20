@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xiongnemo/anima/internal/ast"
 	"github.com/xiongnemo/anima/internal/parser"
 )
 
@@ -1085,6 +1086,179 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		}
 		if _, err := Check(prog); err != nil {
 			t.Errorf("%q: expected no error, got %v", body, err)
+		}
+	}
+}
+
+// A standard function or handle method takes its arguments by position and
+// reads them as what it expects: the call is checked against that.
+func TestSemaStandardCallsAreGivenWhatTheyTake(t *testing.T) {
+	const head = `import std.socket as sock
+import std.concurrent as conc
+import std.time as time
+import std.crypto as crypto
+import std.bytes as bytes
+import std.fs as fs
+import std.cli as cli
+import std.json as json
+import std.requests as req
+
+def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.ThreadPool) -> int:
+    sess = req.Session(4)
+    bv = bytes.from_str("abcd")
+    ch = conc.Channel[int[1..9]](cap=2)
+    lists = conc.Channel[list[int[1..9]]](cap=2)
+    m = conc.Mutex(5)
+    held = conc.Mutex([1])
+    sem = conc.Semaphore(1)
+    n: int = 3
+    small: int[1..9] = 3
+    zs: list[int] = [0]
+`
+	rejected := map[string]string{
+		// How many.
+		"time.sleep_ms()":                          "std.time.sleep_ms takes 1 argument, got 0",
+		"time.sleep_ms(1, 2)":                      "std.time.sleep_ms takes 1 argument, got 2",
+		"t = time.now_ms(1)":                       "std.time.now_ms takes 0 arguments, got 1",
+		"s = crypto.sha256()":                      "std.crypto.sha256 takes 1 argument, got 0",
+		"s = crypto.hmac_sha256(\"k\")":            "std.crypto.hmac_sha256 takes 2 arguments, got 1",
+		"s = json.encode()":                        "std.json.encode takes 1 argument, got 0",
+		"r = fs.read_text()":                       "std.fs.read_text takes 1 argument, got 0",
+		"r = fs.open()":                            "std.fs.open takes 1 to 2 arguments, got 0",
+		"r = fs.open(\"p\", \"w\", \"x\")":         "std.fs.open takes 1 to 2 arguments, got 3",
+		"r = sock.connect_tcp(\"h\")":              "std.socket.connect_tcp takes 2 arguments, got 1",
+		"p = conc.ThreadPool(2)":                   "std.concurrent.ThreadPool takes 2 arguments, got 1",
+		"s = conc.Semaphore()":                     "std.concurrent.Semaphore takes 1 argument, got 0",
+		"x = conc.Mutex()":                         "std.concurrent.Mutex takes 1 argument, got 0",
+		"r = conn.send_text()":                     "send_text() of a sock.TcpStream takes 1 argument, got 0",
+		"r = conn.recv_text(1, 2)":                 "recv_text() of a sock.TcpStream takes 0 to 1 argument, got 2",
+		"p = ln.port(1)":                           "port() of a sock.TcpListener takes 0 arguments, got 1",
+		"r = file.write_text()":                    "write_text() of a fs.File takes 1 argument, got 0",
+		"b = bv.read_u8()":                         "read_u8() of a bytes.ByteView takes 1 argument, got 0",
+		"ok = ch.send()":                           "send() of a conc.Channel takes 1 argument, got 0",
+		"v = ch.recv(1)":                           "recv() of a conc.Channel takes 0 arguments, got 1",
+		"m.set()":                                  "set() of a conc.Mutex takes 1 argument, got 0",
+		"sem.acquire(1)":                           "acquire() of a conc.Semaphore takes 0 arguments, got 1",
+		"r = sess.post(\"u\", timeout_ms=5)":       "post() of a req.Session takes 2 arguments and timeout_ms, got 2",
+		"r = sess.get(\"u\", \"b\", timeout_ms=5)": "get() of a req.Session takes 1 argument and timeout_ms, got 3",
+		// What kind.
+		"time.sleep_ms(\"a\")":                "argument 1 of std.time.sleep_ms is an int, got str",
+		"s = crypto.sha256(5)":                "argument 1 of std.crypto.sha256 is a str, got int",
+		"o = cli.env_get(5)":                  "argument 1 of std.cli.env_get is a str, got int",
+		"r = sock.listen_tcp(80, \"h\")":      "argument 1 of std.socket.listen_tcp is a str, got int",
+		"r = conn.send_text(5)":               "argument 1 of send_text() of a sock.TcpStream is a str, got int",
+		"r = conn.recv_text(\"a\")":           "argument 1 of recv_text() of a sock.TcpStream is an int, got str",
+		"b = bv.read_u8(\"a\")":               "argument 1 of read_u8() of a bytes.ByteView is an int, got str",
+		"xs = conc.parallel_map(5, (x) => x)": "argument 1 of std.concurrent.parallel_map is a list, got int",
+		"xs = conc.parallel_map(zs, 5)":       "argument 2 of std.concurrent.parallel_map is a function of 1 argument, got int",
+		"xs = conc.parallel_map(zs, () => 1)": "argument 2 of std.concurrent.parallel_map is a function of 1 argument",
+		"f = pool.submit(5)":                  "argument 1 of submit() of a conc.ThreadPool is a function of 0 arguments, got int",
+		"f = pool.submit((a) => a)":           "argument 1 of submit() of a conc.ThreadPool is a function of 0 arguments",
+		"rs = req.gather(5)":                  "argument 1 of std.requests.gather is a list, got int",
+		"rs = req.gather([1, 2])":             "gather takes futures, got int",
+		// By position.
+		"p = conc.ThreadPool(queue_cap=4, workers=2)": "argument 1 of std.concurrent.ThreadPool is \"workers\"",
+		"time.sleep_ms(millis=5)":                     "argument 1 of std.time.sleep_ms is \"ms\"",
+		"time.sleep_ms(mut n)":                        "no `mut` or `own`",
+		// What a channel or a mutex keeps.
+		"ok = ch.send(0)":              "argument 1 of send() of a conc.Channel is int[1..9], got int[0..0]",
+		"ok = ch.send(n)":              "argument 1 of send() of a conc.Channel is int[1..9], got int",
+		"ok = ch.send(\"s\")":          "argument 1 of send() of a conc.Channel is int[1..9], got str",
+		"ok = lists.send(zs)":          "argument 1 of send() of a conc.Channel is list[int[1..9]], got list[int]",
+		"m.set(\"s\")":                 "argument 1 of set() of a conc.Mutex is int, got str",
+		"held.set(5)":                  "argument 1 of set() of a conc.Mutex is list[int], got int",
+		"held.with_lock((v) => \"s\")": "the function of with_lock gives what the mutex holds, list[int], got str",
+		"m.with_lock(5)":               "argument 1 of with_lock() of a conc.Mutex is a function of 1 argument, got int",
+		"rs: list[int[1..9]] = [1]\n    ranged = conc.Mutex(rs)\n    ranged.with_lock((v) => v)": "the function of with_lock gives what the mutex holds, list[int[1..9]], got unknown",
+		"r = json.decode()": "std.json.decode takes 1 argument, got 0",
+		// Only to be called.
+		"g = time.sleep_ms":             "std.time.sleep_ms is not a value",
+		"g = conn.send_text":            "send_text() of a sock.TcpStream is not a value",
+		"xs = zs |> map(crypto.sha256)": "std.crypto.sha256 is not a value",
+		// Piped: `x |> o.f(a)` is o.f(x, a).
+		"ok = 0 |> ch.send()":                "argument 1 of send() of a conc.Channel is int[1..9], got int[0..0]",
+		"s = 5 |> crypto.sha256()":           "argument 1 of std.crypto.sha256 is a str, got int",
+		"s = \"a\" |> crypto.sha256(\"b\")":  "std.crypto.sha256 takes 1 argument, got 2",
+		"((v) => \"s\") |> held.with_lock()": "the function of with_lock gives what the mutex holds, list[int], got str",
+		"rs = [1, 2] |> req.gather()":        "gather takes futures, got int",
+		"x = conc.Mutex() |> print()":        "std.concurrent.Mutex takes 1 argument, got 0",
+		// A piped call inside the arguments of a piped call.
+		"\"s\" |> m.set(0 |> bv.read_u8())":                     "argument 1 of set() of a conc.Mutex is int, got str",
+		"7 |> m.set(0 |> bv.read_u8())":                         "set() of a conc.Mutex takes 1 argument, got 2",
+		"(\"s\" |> bv.read_u8()) |> m.set()":                    "argument 1 of read_u8() of a bytes.ByteView is an int, got str",
+		"s = 5 |> crypto.hmac_sha256(\"a\" |> crypto.sha256())": "argument 1 of std.crypto.hmac_sha256 is a str, got int",
+		"s = \"k\" |> crypto.hmac_sha256(5 |> crypto.sha256())": "argument 1 of std.crypto.sha256 is a str, got int",
+		// The timeout of a piped request is where the call has it.
+		"r = \"u\" |> sess.get()":      "'get' requires explicit bounded 'timeout_ms: int[1..300_000]'",
+		"r = \"u\" |> req.post(\"b\")": "'post' requires explicit bounded 'timeout_ms: int[1..300_000]'",
+		"r = \"u\" |> sess.get(\"v\")": "timeout_ms must be int[1..300_000], got str",
+		"r = \"u\" |> req.get(0)":      "timeout_ms range [0..0] exceeds legal contract int[1..300_000]",
+		// What is not there.
+		"x = conc.nope()":                      "module std.concurrent has no member \"nope\"",
+		"rs = conc.gather([1])":                "module std.concurrent has no member \"gather\"",
+		"sem.nope()":                           "handle conc.Semaphore has no method \"nope\"",
+		"m.nope()":                             "handle conc.Mutex has no method \"nope\"",
+		"r = conn.send_bytes(\"x\")":           "handle sock.TcpStream has no method \"send_bytes\"",
+		"xs = pool.map_parallel(zs, (x) => x)": "handle conc.ThreadPool has no method \"map_parallel\"",
+		"r = req.serve_once(80)":               "module std.requests has no member \"serve_once\"",
+	}
+	for body, want := range rejected {
+		prog, err := parser.Parse("std.anm", head+"    "+body+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", body, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: expected %q, got %v", body, want, err)
+		}
+	}
+	accepted := []string{
+		"time.sleep_ms(5)\n    time.sleep_ms(ms=n)\n    t = time.now_ms()",
+		"s = crypto.sha256(\"a\")\n    h = crypto.hmac_sha256(\"k\", \"a\")\n    b = crypto.constant_time_eq(s, h)",
+		"r = fs.open(\"p\")\n    w = fs.open(\"p\", \"w\")\n    t = fs.read_text(\"p\")\n    a = fs.write_atomic(\"p\", \"x\")",
+		"args = cli.args()\n    o = cli.env_get(\"HOME\")\n    s = json.encode(zs)",
+		"p = conc.ThreadPool(workers=2, queue_cap=4)\n    c2 = conc.Channel[int](cap=n)\n    c3 = conc.Channel[int]()\n    s2 = req.Session()",
+		"r = conn.send_text(\"x\")\n    a = conn.recv_text()\n    b = conn.recv_text(16)\n    p = ln.port()",
+		"r = ln.accept(timeout_ms=10)\n    q = ln.accept(10)",
+		"r = sess.get(\"u\", timeout_ms=5)\n    q = sess.get(\"u\", 5)\n    p = sess.post(\"u\", \"b\", timeout_ms=5)\n    f = sess.get_async(\"u\", timeout_ms=5)\n    rs = req.gather([f])",
+		"r = req.get(\"u\", timeout_ms=5)\n    p = req.post(\"u\", \"b\", 5)",
+		"r = file.read_text()\n    w = file.write_text(\"x\")",
+		"b = bv.read_u8(0)\n    l = bv.len()\n    s = bv.slice(1, 2)",
+		"ok = ch.send(5)\n    ok2 = ch.send(small)\n    v = ch.recv()\n    ok3 = lists.send([1, 2])",
+		"m.set(0)\n    m.set(n)\n    held.set(zs)\n    held.with_lock((v) => zs)\n    m.with_lock((v) => 7)\n    k = m.get()",
+		"sem.acquire()\n    sem.release()",
+		"(0 |> bv.read_u8()) |> m.set()\n    s = \"k\" |> crypto.hmac_sha256(\"a\" |> crypto.sha256())\n    h = (\"a\" |> crypto.sha256()) |> crypto.sha256()",
+		"r = \"u\" |> req.get(5)\n    p = \"u\" |> req.post(\"b\", 5)\n    q = \"u\" |> sess.get(small)",
+		"m2 = 5 |> conc.Mutex()\n    m2.set(0)\n    ((v) => zs) |> held.with_lock()\n    r = \"u\" |> sess.get(timeout_ms=5)",
+		"s = \"abc\" |> crypto.sha256()\n    h = \"k\" |> crypto.hmac_sha256(\"abc\")\n    ok = 5 |> ch.send()\n    b = 1 |> bv.read_u8()\n    n |> time.sleep_ms()",
+		"k = bytes.from_str(\"ab\").len()\n    g = (ms) => time.sleep_ms(ms)\n    g(1)",
+		"rs: list[int[1..9]] = [1]\n    ranged = conc.Mutex(rs)\n    ranged.with_lock((v) => rs)\n    ranged.set([2, 3])",
+		"f = pool.submit(() => 1)\n    g = pool.submit(() => \"s\")\n    rs = req.gather([f, g])\n    xs = conc.parallel_map(zs, (x) => x)",
+	}
+	for _, body := range accepted {
+		prog, err := parser.Parse("std.anm", head+"    "+body+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", body, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%q: expected no error, got %v", body, err)
+		}
+	}
+	// A mutex holds values of the type of its first one, not of its range.
+	prog, err := parser.Parse("std.anm", head+"    k = m.get()\n    return 0\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := Check(prog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for e, ty := range info.ExprTypes {
+		if call, ok := e.(*ast.CallExpr); ok {
+			if fe, ok := call.Callee.(*ast.FieldExpr); ok && fe.Field == "get" {
+				if it, ok := ty.(*IntType); !ok || it.IsBounded {
+					t.Errorf("m.get() of conc.Mutex(5): expected int, got %s", ty)
+				}
+			}
 		}
 	}
 }

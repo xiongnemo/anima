@@ -144,6 +144,12 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/own_pool_shut_down_by_borrower.anm", "is borrowed"},
 		{"../tests/bugs/own_pool_shut_down_on_one_path.anm", "every path must leave it in the same state"},
 		{"../tests/bugs/own_pool_left_running_in_match.anm", "resource handle leak"},
+		{"../tests/bugs/sema_channel_send_out_of_range.anm", "is int[1..9], got int[0..0]"},
+		{"../tests/bugs/sema_mutex_holds_its_type.anm", "div_nonzero"},
+		{"../tests/bugs/sema_mutex_set_other_type.anm", "is int, got str"},
+		{"../tests/bugs/sema_std_call_missing_argument.anm", "std.crypto.sha256 takes 1 argument, got 0"},
+		{"../tests/bugs/spark_piped_request_timeout.anm", "timeout_bounds"},
+		{"../tests/bugs/sema_nested_piped_std_call.anm", "argument 1 of set() of a conc.Mutex is int, got str"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
@@ -933,4 +939,48 @@ def main() -> int:
     return 0
 `
 	runOnBothBackends(t, "thread_pool_ownership", src, "41\n1\n0\n1\n2\n0\nfirst 10\nthen 11\n")
+}
+
+// Standard calls that are given what they take run the same on both
+// backends: a channel and a mutex give back what they were given.
+func TestE2EStandardCallsParity(t *testing.T) {
+	const src = `import std.concurrent as conc
+import std.crypto as crypto
+import std.bytes as bytes
+import std.time as time
+import std.json as json
+import std.requests as req
+
+def main() -> int:
+    ch = conc.Channel[int[1..9]](cap=2)
+    small: int[1..9] = 4
+    ok = ch.send(5)
+    ok2 = ch.send(small)
+    match ch.recv():
+        Some(v) -> print(10 / v)
+        None -> print(0)
+    m = conc.Mutex(5)
+    m.set(2)
+    k = m.get()
+    if k != 0:
+        print(10 / k)
+    sem = conc.Semaphore(1)
+    sem.acquire()
+    sem.release()
+    bv = bytes.from_str("AB")
+    print(bv.len(), bv.read_u8(1))
+    print(crypto.constant_time_eq("a", "a"), json.encode([1, 2]))
+    time.sleep_ms(ms=1)
+    ok3 = 7 |> ch.send()
+    match ch.recv():
+        Some(v) -> print(v, 1 |> bv.read_u8())
+        None -> print(0)
+    pool = conc.ThreadPool(workers=1, queue_cap=2)
+    f = pool.submit(() => 1)
+    g = pool.submit(() => 2)
+    print(req.gather([f, g]))
+    pool.shutdown()
+    return 0
+`
+	runOnBothBackends(t, "standard_calls", src, "2\n5\n2 66\nTrue [1,2]\n4 66\n[1, 2]\n")
 }

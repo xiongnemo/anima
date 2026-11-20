@@ -1,0 +1,7 @@
+# A standard function reads its arguments without counting them: one that is
+# missing stops the VM with a Go panic and the native build with it.
+import std.crypto as crypto
+
+def main() -> int:
+    print(crypto.sha256())
+    return 0
