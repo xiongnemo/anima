@@ -1,14 +1,19 @@
 package tests
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func buildCLI(t *testing.T, tmpDir string) string {
@@ -1263,4 +1268,152 @@ def main() -> int:
     return 0
 `
 	runOnBothBackends(t, "standard_calls", src, "2\n5\n2 66\nTrue [1,2]\n4 66\n[1, 2]\n")
+}
+
+// rawHTTPServer answers each request with the bytes its path names, so a
+// test decides the framing of the answer. keepOpen paths are answered and
+// the connection is then held open for a second.
+func rawHTTPServer(t *testing.T, answers map[string]string, keepOpen map[string]bool) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	serve := func(c net.Conn) {
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		r := bufio.NewReader(c)
+		line, err := r.ReadString('\n')
+		parts := strings.Split(line, " ")
+		if err != nil || len(parts) < 2 {
+			return
+		}
+		path, length := parts[1], 0
+		for {
+			h, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if h == "\r\n" {
+				break
+			}
+			if k, v, ok := strings.Cut(h, ":"); ok && strings.EqualFold(k, "Content-Length") {
+				length, _ = strconv.Atoi(strings.TrimSpace(v))
+			}
+		}
+		body := make([]byte, length)
+		got, _ := io.ReadFull(r, body)
+		switch path {
+		case "/echo-len":
+			// What arrived: the length announced, the bytes read, and
+			// whether they are the x's that were posted.
+			msg := fmt.Sprintf("%d %d %t", length, got, strings.Trim(string(body[:got]), "x") == "")
+			fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s", len(msg), msg)
+		case "/dribble":
+			_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 100\r\n\r\n"))
+			for i := 0; i < 30; i++ {
+				if _, err := c.Write([]byte("a")); err != nil {
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		default:
+			_, _ = c.Write([]byte(answers[path]))
+			if keepOpen[path] {
+				time.Sleep(time.Second)
+			}
+		}
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serve(c)
+		}
+	}()
+	return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// The native HTTP client reads an answer as the VM's does: a chunked body
+// is decoded, a body is as long as its Content-Length says or the request
+// fails, 204 has no body, and the time limit is for the whole request. It
+// read the chunk framing as the body, took a body cut short for the whole
+// of it, and gave each read the full time: a server sending a byte now and
+// then was waited on for as long as it went on.
+func TestE2ENativeHTTPClientFraming(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+	port := rawHTTPServer(t, map[string]string{
+		"/chunked":       head + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
+		"/chunked-ext":   head + "Content-Length: 3\r\ntransfer-encoding: Chunked\r\n\r\n5;x=1\r\nhello\r\nA\r\n0123456789\r\n0\r\nTrailer: 1\r\n\r\n",
+		"/chunked-short": head + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, wo",
+		"/chunked-bad":   head + "Transfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
+		"/short":         head + "Content-Length: 100\r\n\r\nonly this",
+		"/long":          head + "Content-Length: 4\r\n\r\nfour and more",
+		"/until-close":   head + "\r\nuntil close",
+		"/204":           "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+	}, map[string]bool{"/chunked": true, "/204": true})
+	src := strings.ReplaceAll(`import std.requests as req
+import std.time as time
+
+def show(tag: str, r: Result[req.HttpResponse, str]) -> int:
+    match r:
+        Ok(resp) -> print(tag, resp.status, resp.ok, len(resp.body), resp.body)
+        Err(e) -> print(tag, "ERR", e)
+    return 0
+
+def main() -> int:
+    a = show("chunked", req.get("http://127.0.0.1:PORT/chunked", 3000))
+    b = show("chunked-ext", req.get("http://127.0.0.1:PORT/chunked-ext", 3000))
+    c = show("chunked-short", req.get("http://127.0.0.1:PORT/chunked-short", 3000))
+    d = show("chunked-bad", req.get("http://127.0.0.1:PORT/chunked-bad", 3000))
+    e = show("short", req.get("http://127.0.0.1:PORT/short", 3000))
+    f = show("long", req.get("http://127.0.0.1:PORT/long", 3000))
+    g = show("until-close", req.get("http://127.0.0.1:PORT/until-close", 3000))
+    h = show("204", req.get("http://127.0.0.1:PORT/204", 3000))
+    t0 = time.now_ms()
+    i = show("dribble", req.get("http://127.0.0.1:PORT/dribble", 300))
+    if time.now_ms() - t0 < 1500:
+        print("in time")
+    else:
+        print("late")
+    return 0
+`, "PORT", port)
+	runOnBothBackends(t, "http_framing", src, `chunked 200 True 12 hello, world
+chunked-ext 200 True 15 hello0123456789
+chunked-short ERR unexpected EOF
+chunked-bad ERR invalid byte in chunk length
+short ERR unexpected EOF
+long 200 True 4 four
+until-close 200 True 11 until close
+204 204 True 0 
+dribble ERR context deadline exceeded (Client.Timeout or context cancellation while reading body)
+in time
+`)
+}
+
+// A request is sent whole, whatever its length. The native client built it
+// in 4096 bytes and sent as many bytes as it should have had: a body over
+// that was cut, and what followed it on the stack went to the server.
+func TestE2ENativeHTTPClientSendsALongBody(t *testing.T) {
+	port := rawHTTPServer(t, nil, nil)
+	src := strings.ReplaceAll(`import std.requests as req
+
+def grow(n: int[0..20]) -> str:
+    s = "x"
+    for i in 0..n:
+        s = s + s
+    return s
+
+def main() -> int:
+    for n in [4, 13, 17]:
+        body = grow(n)
+        match req.post("http://127.0.0.1:PORT/echo-len", body, 3000):
+            Ok(resp) -> print(len(body), resp.status, resp.body)
+            Err(e) -> print(len(body), "ERR", e)
+    return 0
+`, "PORT", port)
+	runOnBothBackends(t, "http_long_body", src, "16 200 16 16 true\n8192 200 8192 8192 true\n131072 200 131072 131072 true\n")
 }
