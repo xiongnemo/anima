@@ -1295,20 +1295,31 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 	}
 
 	for _, step := range chain {
+		// What an earlier stage gave is not what the pipeline gives.
+		delete(env.intTerms, targetVar)
+		delete(env.sumInfos, targetVar)
 		ce, ok := step.(*ast.CallExpr)
 		if !ok {
+			// `xs |> f`: whatever f gives.
+			curLen, curElem = env.freshLen("pipe"), smt.Interval{}
 			continue
 		}
-		fname := ""
-		if id, ok := ce.Callee.(*ast.Ident); ok {
-			fname = id.Name
-		}
+		fname := v.stageName(ce)
 		switch fname {
-		case "filter", "filter_ok":
+		case "filter", "take", "drop":
+			// Some of the elements it is given.
 			fv := smt.Var(env.freshVar("flen"))
 			env.assume(smt.Ge(fv, smt.Const(0)))
 			env.assume(smt.Le(fv, curLen))
 			curLen = fv
+		case "map", "fold", "sum":
+			// Read the list they are given below.
+		default:
+			// Any other stage gives a value of its own: nothing is known
+			// of its length or of its elements from the list it is given.
+			curLen, curElem = env.freshLen("pipe"), smt.Interval{}
+		}
+		switch fname {
 		case "map":
 			// The elements are what the lambda yields: nothing is known
 			// of them when that cannot be bounded.
@@ -1341,6 +1352,10 @@ func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *sy
 				env.assume(smt.Ge(fv, curLen.Scale(curElem.Lo)))
 				env.assume(smt.Le(fv, curLen.Scale(curElem.Hi)))
 			}
+		}
+		if fname == "fold" || fname == "sum" {
+			// What a fold gives is not the list it is given either.
+			curLen, curElem = env.freshLen("pipe"), smt.Interval{}
 		}
 	}
 	env.listLens[targetVar] = curLen

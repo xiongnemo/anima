@@ -1,0 +1,7 @@
+# take gives a list that may be shorter than the one it is given: reading
+# past its end gives None, which divides as 0.
+def main() -> int:
+    xs = [1, 2, 3]
+    ys = xs |> take(1)
+    print(10 / ys[2])
+    return 0

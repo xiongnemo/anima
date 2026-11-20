@@ -1,0 +1,9 @@
+# The pipeline gives what its last stage gives, not the sum before it.
+def zero(n: int) -> int:
+    return 0
+
+def main() -> int:
+    xs = [1, 2]
+    n = xs |> sum() |> zero()
+    print(10 / n)
+    return 0
