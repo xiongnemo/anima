@@ -1,0 +1,25 @@
+import std.concurrent as conc
+
+# Only the path through yes shuts the pool down. The ownership checker read
+# the steps down the page, saw the shutdown before it got to no, and passed
+# the workflow.
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+        pool = conc.ThreadPool(1, 2)
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> done:
+        pool.shutdown()
+        return 1
+    step no -> done:
+        return 2
+
+def main() -> int:
+    print(run_workflow W(0), run_workflow W(5))
+    return 0

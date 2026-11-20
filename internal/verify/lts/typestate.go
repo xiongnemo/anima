@@ -437,49 +437,106 @@ func (t *typestateChecker) checkFunc(fn *ast.FuncDecl) {
 	}
 }
 
+// checkWorkflow follows the workflow as the backends run it, one path at a
+// time: a step is checked with the handles as the way to it left them, not
+// as the step written above it did, and every way out is an exit.
 func (t *typestateChecker) checkWorkflow(wf *ast.WorkflowDecl) {
 	env := newTsEnv()
 	t.fn = "workflow " + wf.Name
 	if wi := t.info.Workflows[wf.Name]; wi != nil {
 		t.bindParams(wf.Params, wi.Params, env)
 	}
-	for _, n := range wf.Nodes {
-		switch node := n.(type) {
-		case *ast.StartNode:
-			t.walkBlock(node.Body, env)
-		case *ast.ForkNode:
-			usedBy := map[string]string{}
-			for _, br := range node.Branches {
-				b := env.clone()
-				t.fn = "workflow " + wf.Name + "." + br.Name
-				t.touched = map[string]bool{}
-				for _, op := range br.Ops {
-					if op.Kind == ast.BranchStmt && op.Stmt != nil {
-						t.walkStmt(op.Stmt, b)
-					}
-				}
-				// Branches run concurrently: they may only share shareable handles.
-				for _, k := range env.names() {
-					if !t.touched[k] {
-						continue
-					}
-					if other, ok := usedBy[k]; ok && !env.h[k].shareable {
-						t.err(br.Span, "%s %q is used by concurrent branches %q and %q; it cannot be shared between threads", env.h[k].typeName, k, other, br.Name)
-					}
-					usedBy[k] = br.Name
-				}
-				t.touched = nil
-				t.endScope(br.Span, env, b)
-				t.requireUnchanged(br.Span, env, b, "a concurrent branch")
-				t.checkPortLeaks(br.Span, b.ports)
-				env.addLoans(b.loans)
-				t.fn = "workflow " + wf.Name
-			}
-		case *ast.StepNode:
-			t.walkBlock(node.Body, env)
-		}
+	flow := ast.NewFlow(wf)
+	if flow.Start == nil {
+		t.checkExit(wf.Span, env)
+		return
 	}
-	t.checkExit(wf.Span, env)
+	if t.walkBlock(flow.Start.Body, env) {
+		return
+	}
+	t.walkWorkflow(wf, flow, flow.Start.Target, env, flow.Start.Span, map[string]bool{})
+}
+
+func (t *typestateChecker) walkWorkflow(wf *ast.WorkflowDecl, flow *ast.Flow, cur string, env *tsEnv, at ast.Span, onPath map[string]bool) {
+	for {
+		if flow.Ends(cur) {
+			t.checkExit(at, env)
+			return
+		}
+		if onPath[cur] {
+			// The contract kernel refuses a workflow that comes back to a node.
+			return
+		}
+		onPath[cur] = true
+		choice := flow.Choice(cur)
+		if st := flow.Step(cur); st != nil {
+			if t.walkBlock(st.Body, env) {
+				return
+			}
+			if cur, choice = flow.AfterStep(st); choice == nil {
+				at = st.Span
+				continue
+			}
+		}
+		if choice != nil {
+			for _, br := range choice.Branches {
+				if br.Guard != nil {
+					t.evalExpr(br.Guard, env, false)
+				}
+			}
+			for _, br := range choice.Branches {
+				path := make(map[string]bool, len(onPath))
+				for k := range onPath {
+					path[k] = true
+				}
+				t.walkWorkflow(wf, flow, br.Target, env.clone(), br.Span, path)
+			}
+			return
+		}
+		if fk := flow.Fork(cur); fk != nil {
+			t.walkFork(wf, fk, env)
+			cur, at = flow.AfterFork(), fk.Span
+			continue
+		}
+		if jn := flow.Join(cur); jn != nil {
+			cur, at = flow.AfterJoin(jn), jn.Span
+			continue
+		}
+		mn := flow.Merge(cur)
+		cur, at = flow.AfterMerge(mn), mn.Span
+	}
+}
+
+// walkFork checks the branches of a fork, which run at the same time: each
+// leaves the handles of the workflow as it found them.
+func (t *typestateChecker) walkFork(wf *ast.WorkflowDecl, node *ast.ForkNode, env *tsEnv) {
+	usedBy := map[string]string{}
+	for _, br := range node.Branches {
+		b := env.clone()
+		t.fn = "workflow " + wf.Name + "." + br.Name
+		t.touched = map[string]bool{}
+		for _, op := range br.Ops {
+			if op.Kind == ast.BranchStmt && op.Stmt != nil {
+				t.walkStmt(op.Stmt, b)
+			}
+		}
+		// Branches run concurrently: they may only share shareable handles.
+		for _, k := range env.names() {
+			if !t.touched[k] {
+				continue
+			}
+			if other, ok := usedBy[k]; ok && !env.h[k].shareable {
+				t.err(br.Span, "%s %q is used by concurrent branches %q and %q; it cannot be shared between threads", env.h[k].typeName, k, other, br.Name)
+			}
+			usedBy[k] = br.Name
+		}
+		t.touched = nil
+		t.endScope(br.Span, env, b)
+		t.requireUnchanged(br.Span, env, b, "a concurrent branch")
+		t.checkPortLeaks(br.Span, b.ports)
+		env.addLoans(b.loans)
+		t.fn = "workflow " + wf.Name
+	}
 }
 
 func (t *typestateChecker) walkBlock(stmts []ast.Stmt, env *tsEnv) bool {
