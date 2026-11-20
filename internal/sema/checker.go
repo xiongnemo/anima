@@ -2458,6 +2458,23 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		}
 		return fi.Type.Return, nil
 	}
+	// `x |> g(a)` and `x |> g` call g(x, a) on both backends, whatever g
+	// is: a lambda in a variable, a built-in function, a constructor.
+	if _, isStage := stageShapes[fnName]; direct && !isStage {
+		// The kernel proves the fields of an entity or a variant where it
+		// is made, and that is a call.
+		_, isEntity := c.info.Entities[fnName]
+		_, isVariant := c.info.Variants[fnName]
+		if isEntity || isVariant || fnName == "Some" || fnName == "Ok" || fnName == "Err" {
+			return nil, fmt.Errorf("%s: %s makes a value and is not a pipeline stage: write %s(...)", e.Right.GetSpan(), fnName, fnName)
+		}
+		call := &ast.CallExpr{Span: e.Span, Callee: &ast.Ident{Span: e.Right.GetSpan(), Name: fnName}}
+		if rhs, ok := e.Right.(*ast.CallExpr); ok {
+			call.Callee, call.TypeArgs = rhs.Callee, rhs.TypeArgs
+		}
+		call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+		return c.checkExpr(call, sc)
+	}
 	if _, err := c.checkExpr(e.Right, sc); err != nil {
 		return nil, err
 	}

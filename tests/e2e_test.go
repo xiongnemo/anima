@@ -514,7 +514,9 @@ def main() -> int:
     print(fp.filter(xs, g), fp.any(xs, g), fp.find(xs, x => x > 5), fp.drop(xs, 2))
     h = (a, b) => b
     k = () => 7
+    k2 = (v) => v
     print(h(1, 2), k(), abs(0 - 3), min(1, 2), max(1, 2), str(5), len("ab"))
+    print(1 |> h(2), 1 |> k2(), 1 |> k2, 0 - 3 |> abs(), 5 |> str(), 2 |> min(1), "ab" |> len(), xs |> len)
     assert(len(xs) == 3, "three")
     assert(True)
     return 0
@@ -526,6 +528,7 @@ const builtinsAndStagesWant = `[1, 2] 6 [2, 3]
 [1, 2, 3] [1, 2] 6 1 3
 [2, 3] True None [3]
 2 7 3 1 2 5 2
+2 1 1 3 5 1 2 3
 `
 
 // A literal or range nested in a variant pattern must be compared, on both

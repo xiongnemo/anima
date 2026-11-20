@@ -979,7 +979,7 @@ def f(n: int, p: int[1..9], xs: list[int], rs: list[int[1..9]], o: Option[int], 
 // they take: both backends read arguments by position without counting
 // them, and an argument that is not given is None when the program runs.
 func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
-	const head = "import std.fp as fp\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n"
+	const head = "import std.fp as fp\n\ntype Shape = Circle(r: int[1..9]) | Dot\n\nentity Box:\n    n: int[1..9]\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n"
 	rejected := map[string]string{
 		"g = (a, b) => b\n    n = g(1)":          "this function takes 2 arguments, got 1",
 		"g = (a) => a\n    n = g(1, 2)":          "this function takes 1 argument, got 2",
@@ -1023,6 +1023,15 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"n = abs(\"a\")":                         "argument 1 of abs() is an int, got str",
 		"n = min(\"a\", \"b\")":                  "argument 1 of min() is an int, got str",
 		"n = len(5)":                             "len() takes a list, a map or a string, got",
+		"g = (v) => v\n    n = 1 |> g(2)":        "this function takes 1 argument, got 2",
+		"g = (a, b) => b\n    n = 1 |> g":        "this function takes 2 arguments, got 1",
+		"n = \"a\" |> abs()":                     "argument 1 of abs() is an int, got str",
+		"n = 1 |> min()":                         "min() takes 2 arguments, got 1",
+		"p = 1 |> Some()":                        "Some makes a value and is not a pipeline stage",
+		"p = 1 |> Some":                          "Some makes a value and is not a pipeline stage",
+		"p = 1 |> Ok()":                          "Ok makes a value and is not a pipeline stage",
+		"b = 1 |> Box()":                         "Box makes a value and is not a pipeline stage",
+		"c = 1 |> Circle()":                      "Circle makes a value and is not a pipeline stage",
 		"n = o |> unwrap_or(\"x\")":              "unwrap_or on Option[int] takes a default that is int, got str",
 		"p = o |> and_then(v => 1)":              "the function of and_then gives an Option, got",
 		"p = o |> and_then(v => Ok(v))":          "the function of and_then gives an Option, got",
@@ -1052,6 +1061,8 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"ys = fp.map(xs, x => x)\n    n = fp.fold(xs, 0, (a, x) => x)\n    m = fp.sum(xs)\n    zs = fp.take(xs, 2)",
 		"n = abs(0 - 3) + min(1, 2) + max(1, 2) + len(xs) + len(\"ab\")\n    s = str(5)",
 		"assert(1 == 1)\n    assert(1 == 1, \"ok\")",
+		"g = (v) => v\n    h = (a, b) => b\n    n = 1 |> g()\n    m = 1 |> g\n    k = 1 |> h(2)",
+		"n = (0 - 3 |> abs()) + (2 |> min(1)) + (\"ab\" |> len()) + (xs |> len)\n    s = 5 |> str()\n    7 |> print()",
 		"p = o |> and_then(v => Some(v))\n    q = o |> and_then(v => None)",
 		"u = r |> and_then(v => Ok(\"s\"))\n    e = r |> and_then(v => Err(\"bad\"))\n    n = r |> unwrap_or(0)",
 		"k: int[0..9] = w |> unwrap_or(0)\n    j: int[0..9] = fp.unwrap_or(w, 0)",
