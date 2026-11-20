@@ -435,6 +435,16 @@ static void buf_put(AnimaBuf *b, const char *s) {
     b->len += n;
 }
 
+static void buf_putn(AnimaBuf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        b->cap = (b->len + n + 1) * 2;
+        b->p = realloc(b->p, b->cap);
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
 static void v_fmt_key(AnimaBuf *b, const char *k) {
     char esc[8];
     buf_put(b, "\"");
@@ -867,19 +877,96 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
 }
 
 // ─── std.requests (HTTP/HTTPS over POSIX + OpenSSL) ───
-// Whether raw holds a whole answer: its head, and as many bytes of body as
-// its Content-Length says. One without that header ends when the server
-// closes the connection.
-static bool http_complete(const char *raw, size_t total) {
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// How the head of an answer says its body ends.
+enum { HTTP_UNTIL_CLOSE, HTTP_LENGTH, HTTP_CHUNKED, HTTP_NO_BODY };
+typedef struct {
+    size_t head_len; int status; int mode; size_t want;
+    size_t chunk_at;  // in a chunked body: where the first chunk not all there yet starts
+} HttpHead;
+
+// Reads the head of the answer in raw, once all of it is there. Chunked
+// wins over a Content-Length, and 204 and 304 have no body, as in Go.
+static bool http_head(const char *raw, HttpHead *h) {
     const char *head_end = strstr(raw, "\r\n\r\n");
     if (!head_end) return false;
-    size_t head_len = (size_t)(head_end - raw) + 4;
+    h->head_len = (size_t)(head_end - raw) + 4;
+    const char *sp = strchr(raw, ' ');
+    h->status = sp && sp < head_end ? atoi(sp + 1) : 200;
+    h->mode = HTTP_UNTIL_CLOSE;
+    h->want = 0;
+    h->chunk_at = 0;
+    bool chunked = false;
     for (const char *line = strstr(raw, "\r\n"); line && line < head_end; line = strstr(line + 2, "\r\n")) {
-        const char *h = line + 2;
-        if (strncasecmp(h, "Content-Length:", 15) == 0) {
-            long long want = atoll(h + 15);
-            return want >= 0 && total >= head_len + (size_t)want;
+        const char *f = line + 2;
+        const char *eol = strstr(f, "\r\n");
+        if (strncasecmp(f, "Content-Length:", 15) == 0) {
+            long long want = atoll(f + 15);
+            if (want >= 0) { h->mode = HTTP_LENGTH; h->want = (size_t)want; }
+        } else if (strncasecmp(f, "Transfer-Encoding:", 18) == 0) {
+            for (const char *p = f + 18; p + 7 <= eol; p++) {
+                if (strncasecmp(p, "chunked", 7) == 0) chunked = true;
+            }
         }
+    }
+    if (chunked) h->mode = HTTP_CHUNKED;
+    if (h->status == 204 || h->status == 304) h->mode = HTTP_NO_BODY;
+    return true;
+}
+
+// The chunks in p[0..n): 1 when they are all there, up to the last line of
+// the trailer; 0 when more is to come; -1 for a length that is not hex, -2
+// for a chunk that does not end in CRLF and -3 for a length of more than 16
+// digits, the most Go takes. The bytes of the chunks, without
+// their framing, are added to out when one is given. With at, reading
+// starts at *at and *at is left at the first chunk that is not all there:
+// a body in many chunks is then read once, not once for each read of the
+// socket.
+static int http_chunks(const char *p, size_t n, AnimaBuf *out, size_t *at) {
+    size_t i = at ? *at : 0;
+    for (;;) {
+        if (at) *at = i;
+        size_t j = i, size = 0;
+        int digits = 0;
+        while (j < n && isxdigit((unsigned char)p[j])) {
+            int c = tolower((unsigned char)p[j]);
+            if (++digits > 16) return -3;
+            size = size * 16 + (size_t)(c <= '9' ? c - '0' : c - 'a' + 10);
+            j++;
+        }
+        if (j >= n) return 0;
+        if (digits == 0 || (p[j] != '\r' && p[j] != ';' && p[j] != ' ' && p[j] != '\t')) return -1;
+        while (j + 1 < n && !(p[j] == '\r' && p[j + 1] == '\n')) j++;
+        if (j + 1 >= n) return 0;
+        i = j + 2;
+        if (size == 0) {
+            // The trailer: lines up to an empty one.
+            for (;;) {
+                j = i;
+                while (j + 1 < n && !(p[j] == '\r' && p[j + 1] == '\n')) j++;
+                if (j + 1 >= n) return 0;
+                if (j == i) return 1;
+                i = j + 2;
+            }
+        }
+        if (size > n - i || n - i - size < 2) return 0;
+        if (p[i + size] != '\r' || p[i + size + 1] != '\n') return -2;
+        if (out) buf_putn(out, p + i, size);
+        i += size + 2;
+    }
+}
+
+// Whether the answer in raw[0..total) needs no more reading.
+static bool http_complete(const char *raw, size_t total, HttpHead *h) {
+    switch (h->mode) {
+    case HTTP_NO_BODY: return true;
+    case HTTP_LENGTH: return total - h->head_len >= h->want;
+    case HTTP_CHUNKED: return http_chunks(raw + h->head_len, total - h->head_len, NULL, &h->chunk_at) != 0;
     }
     return false;
 }
@@ -899,7 +986,16 @@ static AnimaVal http_err(const char *method, const char *url, const char *why, c
     return r;
 }
 
+// Whether a TLS read or write gave up because the socket's time ran out.
+static bool http_tls_timed_out(SSL *ssl, int n) {
+    int e = SSL_get_error(ssl, n);
+    return e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE ||
+        (e == SSL_ERROR_SYSCALL && (errno == EAGAIN || errno == EWOULDBLOCK));
+}
+
 static AnimaVal http_do(const char *method, const char *url, const char *body, int64_t timeout_ms) {
+    // One time limit for the whole request, as http.Client.Timeout is.
+    int64_t deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 5000);
     bool is_https = strncmp(url, "https://", 8) == 0;
     const char *rest = is_https ? url + 8 : (strncmp(url, "http://", 7) == 0 ? url + 7 : url);
     const char *slash = strchr(rest, '/');
@@ -959,66 +1055,108 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         }
     }
 
-    char reqbuf[4096];
-    int reqlen = 0;
+    // The request is as long as its path and body make it.
+    AnimaBuf req = {0};
+    buf_put(&req, method); buf_put(&req, " "); buf_put(&req, path);
+    buf_put(&req, " HTTP/1.1\r\nHost: "); buf_put(&req, hostport);
+    buf_put(&req, "\r\nConnection: close\r\n");
     if (body && body[0] != '\0') {
-        reqlen = snprintf(reqbuf, sizeof(reqbuf),
-            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\nContent-Type: application/json\r\n\r\n%s",
-            method, path, hostport, strlen(body), body);
+        char len_line[64];
+        snprintf(len_line, sizeof(len_line), "Content-Length: %zu\r\n", strlen(body));
+        buf_put(&req, len_line);
+        buf_put(&req, "Content-Type: application/json\r\n\r\n");
+        buf_put(&req, body);
     } else {
-        reqlen = snprintf(reqbuf, sizeof(reqbuf),
-            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
-            method, path, hostport);
+        buf_put(&req, "\r\n");
     }
-    if (ssl) SSL_write(ssl, reqbuf, reqlen);
-    else send(fd, reqbuf, (size_t)reqlen, 0);
+    bool timed_out = false;
+    size_t sent = 0;
+    while (sent < req.len) {
+        int64_t left = deadline - mono_ms();
+        if (left <= 0) { timed_out = true; break; }
+        set_fd_timeout(fd, left);
+        size_t part = req.len - sent > 65536 ? 65536 : req.len - sent;
+        ssize_t n = ssl ? SSL_write(ssl, req.p + sent, (int)part) : send(fd, req.p + sent, part, MSG_NOSIGNAL);
+        if (n < 0 && !ssl && errno == EINTR) continue;
+        if (n <= 0) {
+            // A server may answer and close before it has read everything:
+            // what it said is read below.
+            timed_out = ssl ? http_tls_timed_out(ssl, (int)n) : (errno == EAGAIN || errno == EWOULDBLOCK);
+            break;
+        }
+        sent += (size_t)n;
+    }
+    free(req.p);
 
     size_t cap = 8192, total = 0;
     char *raw = malloc(cap);
-    bool timed_out = false;
-    for (;;) {
+    raw[0] = '\0';
+    HttpHead head = {0};
+    bool have_head = false;
+    while (!timed_out) {
         // Room for one more read and the terminator after it.
         if (total + 2048 + 1 > cap) { cap *= 2; raw = realloc(raw, cap); }
+        int64_t left = deadline - mono_ms();
+        if (left <= 0) { timed_out = true; break; }
+        set_fd_timeout(fd, left);
         ssize_t n = ssl ? SSL_read(ssl, raw + total, 2048) : recv(fd, raw + total, 2048, 0);
         if (n < 0 && !ssl && errno == EINTR) continue;
         if (n <= 0) {
-            if (ssl) timed_out = n < 0 && SSL_get_error(ssl, (int)n) == SSL_ERROR_WANT_READ;
+            if (ssl) timed_out = n < 0 && http_tls_timed_out(ssl, (int)n);
             else timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
             break;
         }
         total += (size_t)n;
-        // An answer that says how long it is ends there: the server may
-        // keep the connection open after it.
         raw[total] = '\0';
-        if (http_complete(raw, total)) break;
+        // An answer that says where it ends is read no further: the server
+        // may keep the connection open after it.
+        if (!have_head) have_head = http_head(raw, &head);
+        if (have_head && http_complete(raw, total, &head)) break;
     }
-    raw[total] = '\0';
     if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
     close(fd);
 
     // No answer is an error, as on the VM: not a response with status 200.
-    char *head_end = strstr(raw, "\r\n\r\n");
+    // What goes wrong once the head is read is the error of reading the
+    // body, which the VM gives without the request in front.
     if (timed_out) {
         free(raw);
-        return http_err(method, url, head_end
-            ? "context deadline exceeded (Client.Timeout or context cancellation while reading body)"
-            : "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
+        if (have_head) return v_err("context deadline exceeded (Client.Timeout or context cancellation while reading body)");
+        return http_err(method, url, "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
     }
     if (total == 0) { free(raw); return http_err(method, url, "EOF", NULL); }
     if (strncmp(raw, "HTTP/", 5) != 0) { free(raw); return http_err(method, url, "malformed HTTP response", NULL); }
+    if (!have_head) { free(raw); return http_err(method, url, "unexpected EOF", NULL); }
 
-    int status = 200;
-    if (strncmp(raw, "HTTP/", 5) == 0) {
-        const char *sp = strchr(raw, ' ');
-        if (sp) status = atoi(sp + 1);
+    const char *rbody = raw + head.head_len;
+    AnimaBuf dechunked = {0};
+    const char *bad = NULL;
+    switch (head.mode) {
+    case HTTP_NO_BODY:
+        rbody = "";
+        break;
+    case HTTP_LENGTH:
+        if (total - head.head_len < head.want) bad = "unexpected EOF";
+        else raw[head.head_len + head.want] = '\0';
+        break;
+    case HTTP_CHUNKED: {
+        buf_put(&dechunked, "");
+        int r = http_chunks(rbody, total - head.head_len, &dechunked, NULL);
+        if (r == 0) bad = "unexpected EOF";
+        else if (r == -1) bad = "invalid byte in chunk length";
+        else if (r == -2) bad = "malformed chunked encoding";
+        else if (r == -3) bad = "http chunk length too large";
+        else { dechunked.p[dechunked.len] = '\0'; rbody = dechunked.p; }
+        break;
     }
-    char *sep = strstr(raw, "\r\n\r\n");
-    const char *rbody = sep ? sep + 4 : raw;
+    }
+    if (bad) { free(raw); free(dechunked.p); return v_err(bad); }
     AnimaVal ent = v_entity_new("HttpResponse");
-    v_entity_set(ent, "status", v_int(status));
+    v_entity_set(ent, "status", v_int(head.status));
     v_entity_set(ent, "body", v_str(rbody));
-    v_entity_set(ent, "ok", v_bool(status >= 200 && status < 300));
+    v_entity_set(ent, "ok", v_bool(head.status >= 200 && head.status < 300));
     free(raw);
+    free(dechunked.p);
     return v_ok(ent);
 }
 
@@ -1297,16 +1435,6 @@ static void hdl_close(AnimaVal hv) {
 }
 
 // ─── std.fs & std.cli & std.time ───
-static void buf_putn(AnimaBuf *b, const char *s, size_t n) {
-    if (b->len + n + 1 > b->cap) {
-        b->cap = (b->len + n + 1) * 2;
-        b->p = realloc(b->p, b->cap);
-    }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = 0;
-}
-
 // An error of the file system reads as on the VM: "open /p: no such file
 // or directory".
 static AnimaVal fs_err(const char *op, const char *path, int e) {
