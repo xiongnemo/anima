@@ -470,6 +470,37 @@ func TestE2EBuiltinsAndStagesParity(t *testing.T) {
 	runOnBothBackends(t, "builtins_and_stages", builtinsAndStagesSrc, builtinsAndStagesWant)
 }
 
+// A failed assert reports its message and exits with 1 on both backends,
+// whatever the message is: one of a type sema does not know is still a value.
+func TestE2EFailedAssertParity(t *testing.T) {
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	for name, tc := range map[string]struct{ args, want string }{
+		"message":     {`x == 2, "boom"`, "runtime error: boom\n"},
+		"no_message":  {`x == 2`, "runtime error: assertion failed\n"},
+		"int_message": {`x == 2, g(123)`, "runtime error: 123\n"},
+	} {
+		src := "def main() -> int:\n    g = (v) => v\n    x = 1\n    print(\"before\")\n    assert(" + tc.args + ")\n    return 0\n"
+		path := filepath.Join(tmp, name+".anm")
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want := "before\n" + tc.want
+		vmOut, err := exec.Command(animaBin, "run", path).CombinedOutput()
+		if err == nil || string(vmOut) != want {
+			t.Errorf("%s: VM: err=%v, output:\n%s\nwant:\n%s", name, err, vmOut, want)
+		}
+		nativeBin := filepath.Join(tmp, name)
+		if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+			t.Fatalf("%s: anima build failed: %v\n%s", name, err, out)
+		}
+		natOut, err := exec.Command(nativeBin).CombinedOutput()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || string(natOut) != want {
+			t.Errorf("%s: native: err=%v, output:\n%s\nwant:\n%s", name, err, natOut, want)
+		}
+	}
+}
+
 const builtinsAndStagesSrc = `import std.fp as fp
 
 def main() -> int:
