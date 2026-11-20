@@ -135,6 +135,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_fork_element_write_race.anm", "writes m in place"},
 		{"../tests/bugs/sema_fork_branch_reads_assigned.anm", "which branch \"left\" assigns"},
 		{"../tests/bugs/sema_fork_branch_returns.anm", "return in branch"},
+		{"../tests/bugs/sema_workflow_variable_on_one_path.anm", "is not assigned on every path"},
 		{"../tests/bugs/sema_fork_branch_writes_field.anm", "writes acc in place"},
 		{"../tests/bugs/sema_fork_branches_write_one_entity.anm", "in place"},
 		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},

@@ -1,0 +1,26 @@
+# Only the path through yes assigns d. On the other d is (), which is not 0
+# to `!=` and is 0 to `/`: the workflow passed all three kernels and divided
+# by zero. Names were checked down the page, not along the paths.
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> fin:
+        d = 5
+    step no -> fin:
+        print("no")
+
+    step fin -> done:
+        if d != 0:
+            return 10 / d
+        return 1
+
+def main() -> int:
+    print(run_workflow W(0))
+    return 0
