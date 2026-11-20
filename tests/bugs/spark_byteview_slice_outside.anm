@@ -1,0 +1,11 @@
+# BUG: slice had no proof obligation, and its result no length. Both
+# backends bring the ends inside the view, so `s` below is 2 bytes long,
+# not 7: a program that goes on to count on the length it asked for is wrong.
+# Expected: SPARK FAILED [def:main.byteview_bounds]
+import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_str("ABCD")
+    s = bv.slice(2, 9)
+    print(s.len())
+    return 0

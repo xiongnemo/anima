@@ -698,8 +698,14 @@ static int hex_nibble(char c) {
     return 0;
 }
 
+// from_hex of anything but pairs of hex digits is an empty view, as on the VM.
 static AnimaVal bytes_from_hex(const char *hx) {
-    size_t n = strlen(hx) / 2;
+    size_t len = strlen(hx);
+    size_t n = len / 2;
+    if (len % 2 != 0) n = 0;
+    for (size_t i = 0; i < len && n > 0; i++) {
+        if (!isxdigit((unsigned char)hx[i])) n = 0;
+    }
     AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
     h->kind = HDL_BYTEVIEW;
     h->bytes_len = n;

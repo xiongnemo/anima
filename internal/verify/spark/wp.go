@@ -265,7 +265,10 @@ func (e *symEnv) rename(from, to string) {
 // freshLen is a length nothing is known about.
 func (e *symEnv) freshLen(of string) smt.LinearTerm {
 	t := smt.Var(e.freshVar("len(" + of + ")"))
+	// A length is counted in an int64: without the upper end, arithmetic on
+	// it (len(xs) - 1) could not be shown to stay inside one.
 	e.assume(smt.Ge(t, smt.Const(0)))
+	e.assume(smt.FitsInt64(t))
 	return t
 }
 
@@ -492,6 +495,7 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 		lt := smt.Var(lenName)
 		env.listLens[name] = lt
 		env.assume(smt.Ge(lt, smt.Const(0)))
+		env.assume(smt.FitsInt64(lt))
 		if t.HasCap {
 			env.assume(smt.Le(lt, smt.Const(t.Cap)))
 		}
@@ -1115,8 +1119,11 @@ func (v *verifier) setField(path string, value ast.Expr, term smt.LinearTerm, en
 		env.unbind(path)
 		env.boolTerms[path] = v.evalBool(value, env, scope)
 	default:
-		// A string is as long as the value it is given.
+		// A string or a byte view is as long as the value it is given.
 		lt, known := v.lenOfValue(value, env)
+		if !known {
+			lt, known = v.newViewLen(value, env, scope)
+		}
 		env.unbind(path)
 		env.intTerms[path] = term
 		if known {
@@ -1202,6 +1209,8 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 						}
 						if lt, ok := v.lenOfValue(arg.Value, env); ok {
 							env.listLens[name+"."+field] = lt
+						} else if lt, ok := v.newViewLen(arg.Value, env, scope); ok {
+							env.listLens[name+"."+field] = lt
 						}
 					}
 				}
@@ -1236,18 +1245,8 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 				}
 			}
 		case *sema.HandleType:
-			if rt.Name == "bytes.ByteView" {
-				if ce, ok := rhs.(*ast.CallExpr); ok && len(ce.Args) >= 1 {
-					if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-						if sl, ok := ce.Args[0].Value.(*ast.StrLit); ok {
-							if fe.Field == "from_hex" {
-								env.listLens[name] = smt.Const(int64(len(sl.Value) / 2))
-							} else if fe.Field == "from_str" {
-								env.listLens[name] = smt.Const(int64(len(sl.Value)))
-							}
-						}
-					}
-				}
+			if lt, ok := v.newViewLen(rhs, env, scope); ok {
+				env.listLens[name] = lt
 			}
 		}
 	}
@@ -1549,6 +1548,15 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 							lt = env.freshLen("arg")
 						}
 						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+					case *sema.HandleType:
+						// A byte view is as long as the caller knows it to be.
+						if isByteView(pt) {
+							lt, known := v.newViewLen(a.Value, env, scope)
+							if !known {
+								lt = env.freshLen("arg")
+							}
+							binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+						}
 					case *sema.ListType:
 						argID, _ := a.Value.(*ast.Ident)
 						lt, known := v.lenOfValue(a.Value, env)
@@ -1564,10 +1572,11 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					case *sema.EntityType:
 						argID, _ := a.Value.(*ast.Ident)
 						for _, f := range pt.Fields {
-							// The lists and strings in the fields are as long as the caller knows.
+							// The lists, strings and byte views in the fields are as
+							// long as the caller knows.
 							switch f.Type.(type) {
-							case *sema.ListType, sema.StrType:
-								if argID != nil {
+							case *sema.ListType, sema.StrType, *sema.HandleType:
+								if argID != nil && (isByteView(f.Type) || f.Type.Kind() != sema.KindHandle) {
 									lt := env.lenOf(argID.Name + "." + f.Name)
 									path := p.Name + "." + f.Name
 									binds = append(binds, func(c *symEnv) { c.listLens[path] = lt })
@@ -1609,33 +1618,7 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 				modelled = true
 			}
 		}
-		// Check ByteView bounds (std.bytes)
-		if fe, ok := e.Callee.(*ast.FieldExpr); ok {
-			if objTy, ok := v.info.ExprTypes[fe.Object]; ok {
-				if ht, ok := objTy.(*sema.HandleType); ok && ht.Name == "bytes.ByteView" && len(e.Args) >= 1 {
-					width := int64(0)
-					switch fe.Field {
-					case "read_u8":
-						width = 1
-					case "read_u16_be":
-						width = 2
-					case "read_u32_be":
-						width = 4
-					}
-					if width > 0 {
-						off := v.evalInt(e.Args[0].Value, env, scope, true)
-						var bvLen smt.LinearTerm
-						if id, ok := fe.Object.(*ast.Ident); ok {
-							bvLen = env.lenOf(id.Name)
-						} else {
-							bvLen = env.freshLen("bytes")
-						}
-						v.prove(scope+".byteview_bounds", scope, e.Span, env,
-							smt.And(smt.Ge(off, smt.Const(0)), smt.Le(off.Add(smt.Const(width)), bvLen)))
-					}
-				}
-			}
-		}
+		v.checkViewCall(e, nil, env, scope)
 	case *ast.PipeExpr:
 		if call := v.pipedCall(e); call != nil {
 			v.evalSideEffects(call, env, scope)
@@ -1643,6 +1626,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		}
 		v.evalSideEffects(e.Left, env, scope)
 		v.evalSideEffects(e.Right, env, scope)
+		// `off |> bv.read_u8()` is bv.read_u8(off).
+		if call, ok := e.Right.(*ast.CallExpr); ok {
+			v.checkViewCall(call, e.Left, env, scope)
+		}
 		// A map stage given to a list[int[1..9]]: what the lambda yields.
 		if it := elemRange(v.info.LiteralTargets[e]); it != nil {
 			iv := v.pipeElemInterval(e, env, scope)
@@ -2430,6 +2417,10 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 			return dv
 		}
 	case *ast.CallExpr:
+		// bv.len() is the length of the view.
+		if fe, ok := e.Callee.(*ast.FieldExpr); ok && fe.Field == "len" && len(e.Args) == 0 && isByteView(v.info.ExprTypes[fe.Object]) {
+			return v.viewLen(fe.Object, env)
+		}
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			// The length of what a variable holds, or a field of one.
 			if path, ok := mutArgPath(e.Args[0].Value); ok {

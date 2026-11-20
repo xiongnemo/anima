@@ -1,0 +1,10 @@
+# BUG: a read of a view that sema has no type for (the parameter of a
+# lambda) was not checked at all. The call below reads byte 3 of a view of
+# one byte.
+# Expected: SPARK FAILED [def:main.byteview_bounds]
+import std.bytes as bytes
+
+def main() -> int:
+    g = (bv) => bv.read_u8(3)
+    print(g(bytes.from_str("A")))
+    return 0
