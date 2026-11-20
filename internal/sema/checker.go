@@ -2388,18 +2388,56 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return dt, nil
+			// What the variant holds, or the default: the range is that of
+			// both, and no range when what it holds is not known.
+			adt, ok := lhsTy.(*ADTType)
+			if !ok || len(adt.TypeArgs) == 0 || adt.TypeArgs[0].Kind() == KindUnknown {
+				return widenInt(dt), nil
+			}
+			held := adt.TypeArgs[0]
+			if dt.Kind() != KindUnknown && dt.Kind() != held.Kind() {
+				return nil, fmt.Errorf("%s: unwrap_or on %s takes a default that is %s, got %s", callArgs[0].Value.GetSpan(), lhsTy, held, dt)
+			}
+			return unifyTypes(held, dt), nil
 		}
 	case "and_then":
 		if len(callArgs) == 1 {
 			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
 				var okTy Type = UnknownType{}
-				if adt, ok := lhsTy.(*ADTType); ok && len(adt.TypeArgs) >= 1 {
+				adt, known := lhsTy.(*ADTType)
+				if known && len(adt.TypeArgs) >= 1 {
 					okTy = adt.TypeArgs[0]
 				}
 				lsc := newScope(sc)
 				lsc.defineLocal(lam.Params[0], varBinding{ty: okTy, span: lam.Span})
-				return c.checkExpr(lam.Body, lsc)
+				bty, err := c.checkExpr(lam.Body, lsc)
+				if err != nil {
+					return nil, err
+				}
+				// A None or an Err is passed on as it is, so the function
+				// gives the same kind of variant.
+				if bty.Kind() == KindUnknown {
+					return bty, nil
+				}
+				bdt, ok := bty.(*ADTType)
+				if !ok || (bdt.Name != "Option" && bdt.Name != "Result") || (known && bdt.Name != adt.Name) {
+					want := "an Option or a Result"
+					if known {
+						want = "an " + adt.Name
+						if adt.Name == "Result" {
+							want = "a Result"
+						}
+					}
+					return nil, fmt.Errorf("%s: the function of and_then gives %s, got %s", lam.Body.GetSpan(), want, bty)
+				}
+				if known && adt.Name == "Result" && len(adt.TypeArgs) == 2 && len(bdt.TypeArgs) == 2 {
+					le, be := adt.TypeArgs[1], bdt.TypeArgs[1]
+					if le.Kind() != KindUnknown && be.Kind() != KindUnknown && le.Kind() != be.Kind() {
+						return nil, fmt.Errorf("%s: the function of and_then gives a Result with the error of %s, got %s", lam.Body.GetSpan(), lhsTy, bty)
+					}
+					return c.instantiateADT("Result", []Type{bdt.TypeArgs[0], unifyTypes(le, be)}), nil
+				}
+				return bty, nil
 			}
 		}
 	}

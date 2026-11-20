@@ -1,0 +1,6 @@
+# unwrap_or gives what the Option holds when it holds something: the range of
+# the default says nothing about that value.
+def main() -> int:
+    o: Option[int] = Some(0)
+    print(10 / (o |> unwrap_or(1)))
+    return 0

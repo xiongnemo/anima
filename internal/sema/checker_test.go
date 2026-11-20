@@ -979,7 +979,7 @@ def f(n: int, p: int[1..9], xs: list[int], rs: list[int[1..9]], o: Option[int], 
 // they take: both backends read arguments by position without counting
 // them, and an argument that is not given is None when the program runs.
 func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
-	const head = "import std.fp as fp\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n"
+	const head = "import std.fp as fp\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n"
 	rejected := map[string]string{
 		"g = (a, b) => b\n    n = g(1)":          "this function takes 2 arguments, got 1",
 		"g = (a) => a\n    n = g(1, 2)":          "this function takes 1 argument, got 2",
@@ -1023,6 +1023,12 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"n = abs(\"a\")":                         "argument 1 of abs() is an int, got str",
 		"n = min(\"a\", \"b\")":                  "argument 1 of min() is an int, got str",
 		"n = len(5)":                             "len() takes a list, a map or a string, got",
+		"n = o |> unwrap_or(\"x\")":              "unwrap_or on Option[int] takes a default that is int, got str",
+		"p = o |> and_then(v => 1)":              "the function of and_then gives an Option, got",
+		"p = o |> and_then(v => Ok(v))":          "the function of and_then gives an Option, got",
+		"p = fp.and_then(o, v => 1)":             "the function of and_then gives an Option, got",
+		"p = r |> and_then(v => Some(v))":        "the function of and_then gives a Result, got",
+		"p = r |> and_then(v => Err(5))":         "gives a Result with the error of Result[int, str], got",
 	}
 	for body, want := range rejected {
 		prog, err := parser.Parse("call.anm", head+"    "+body+"\n    return 0\n")
@@ -1046,6 +1052,9 @@ func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
 		"ys = fp.map(xs, x => x)\n    n = fp.fold(xs, 0, (a, x) => x)\n    m = fp.sum(xs)\n    zs = fp.take(xs, 2)",
 		"n = abs(0 - 3) + min(1, 2) + max(1, 2) + len(xs) + len(\"ab\")\n    s = str(5)",
 		"assert(1 == 1)\n    assert(1 == 1, \"ok\")",
+		"p = o |> and_then(v => Some(v))\n    q = o |> and_then(v => None)",
+		"u = r |> and_then(v => Ok(\"s\"))\n    e = r |> and_then(v => Err(\"bad\"))\n    n = r |> unwrap_or(0)",
+		"k: int[0..9] = w |> unwrap_or(0)\n    j: int[0..9] = fp.unwrap_or(w, 0)",
 	}
 	for _, body := range accepted {
 		prog, err := parser.Parse("call.anm", head+"    "+body+"\n    return 0\n")

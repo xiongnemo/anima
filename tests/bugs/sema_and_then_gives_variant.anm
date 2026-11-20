@@ -1,0 +1,6 @@
+# and_then passes a None on as it is, so its result is not the int its
+# function gives. None divides as 0.
+def main() -> int:
+    o: Option[int] = None
+    print(10 / (o |> and_then(v => 1)))
+    return 0

@@ -133,6 +133,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_compare_unlike.anm", "they are never equal"},
 		{"../tests/bugs/sema_lambda_argument_missing.anm", "this function takes 2 arguments, got 1"},
 		{"../tests/bugs/sema_stage_function_arity.anm", "the function of map takes 1 parameter, got one with 2"},
+		{"../tests/bugs/spark_unwrap_or_default_range.anm", "div_nonzero"},
+		{"../tests/bugs/sema_and_then_gives_variant.anm", "the function of and_then gives an Option, got"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},
