@@ -1,0 +1,20 @@
+# x holds what a function with no return type gives, and an int on one path
+# only: after the if it was read as an int and was (), which is not 0 to
+# `!=` and is 0 to `/`. Both backends divided by zero.
+import std.concurrent as conc
+
+def pass():
+    return [1]
+
+def nothing():
+    print("n")
+
+def main() -> int:
+    xs = [1, 2]
+    c = len(xs) > 5
+    x = nothing()
+    if c:
+        x = 5
+    if x != 0:
+        print(10 / x)
+    return 0

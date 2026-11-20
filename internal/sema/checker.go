@@ -60,6 +60,21 @@ type varBinding struct {
 	mutable bool
 	isParam bool
 	span    ast.Span
+	lam     *namedLambda // the lambda with parameters the name was given
+}
+
+// namedLambda is a lambda with parameters that was given a name. Nothing
+// says what its parameters are where it is written, so its body is checked
+// there with parameters of any type, and again at its first use with the
+// types it is given: those are the types it takes from then on. It is only
+// used by its name, called or given to a stage, so that no use goes
+// unchecked.
+type namedLambda struct {
+	expr   *ast.LambdaExpr
+	sc     *scope
+	params []Type
+	ret    Type
+	fixed  bool
 }
 
 func newScope(parent *scope) *scope {
@@ -448,6 +463,15 @@ func (c *checker) resolveTypeExpr(te ast.TypeExpr) (Type, error) {
 	switch t := te.(type) {
 	case *ast.SimpleType:
 		if ty, ok := c.info.Types[t.Name]; ok {
+			// `Option` on its own is an Option of anything: what it holds
+			// is of unknown type.
+			if adt, ok := ty.(*ADTType); ok && len(adt.TypeParams) > 0 && len(adt.TypeArgs) == 0 {
+				cp := *adt
+				for range adt.TypeParams {
+					cp.TypeArgs = append(cp.TypeArgs, UnknownType{})
+				}
+				return &cp, nil
+			}
 			return ty, nil
 		}
 		if strings.Contains(t.Name, ".") {
@@ -543,6 +567,11 @@ func (c *checker) resolveTypeExpr(te ast.TypeExpr) (Type, error) {
 					}
 					args = append(args, ra)
 				}
+				// `Option` on its own is an Option of anything: what it
+				// holds is of unknown type.
+				for len(args) < len(adt.TypeParams) {
+					args = append(args, UnknownType{})
+				}
 				cp := *adt
 				cp.TypeArgs = args
 				return &cp, nil
@@ -578,7 +607,7 @@ func (c *checker) checkEntity(ent *ast.EntityDecl) error {
 		if err != nil {
 			return err
 		}
-		if ty.Kind() != KindBool && ty.Kind() != KindUnknown {
+		if !boolLike(ty) {
 			return fmt.Errorf("%s: entity %s invariant must be bool, got %s", inv.GetSpan(), ent.Name, ty)
 		}
 	}
@@ -603,7 +632,7 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 		if err != nil {
 			return err
 		}
-		if ty.Kind() != KindBool && ty.Kind() != KindUnknown {
+		if !boolLike(ty) {
 			return fmt.Errorf("%s: requires clause must be bool, got %s", req.GetSpan(), ty)
 		}
 	}
@@ -612,7 +641,7 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 		if err != nil {
 			return err
 		}
-		if ty.Kind() != KindInt && ty.Kind() != KindUnknown {
+		if !intLike(ty) {
 			return fmt.Errorf("%s: decreases expression must be int, got %s", fn.Decreases.GetSpan(), ty)
 		}
 	}
@@ -632,7 +661,7 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 		if err != nil {
 			return err
 		}
-		if ty.Kind() != KindBool && ty.Kind() != KindUnknown {
+		if !boolLike(ty) {
 			return fmt.Errorf("%s: ensures clause must be bool, got %s", ens.GetSpan(), ty)
 		}
 	}
@@ -703,7 +732,7 @@ func (c *checker) checkMachine(m *ast.MachineDecl) error {
 			if err != nil {
 				return err
 			}
-			if ty.Kind() != KindBool && ty.Kind() != KindUnknown {
+			if !boolLike(ty) {
 				return fmt.Errorf("%s: state %s invariant must be bool", inv.GetSpan(), st.Name)
 			}
 		}
@@ -716,7 +745,7 @@ func (c *checker) checkMachine(m *ast.MachineDecl) error {
 				if err != nil {
 					return err
 				}
-				if gty.Kind() != KindBool && gty.Kind() != KindUnknown {
+				if !boolLike(gty) {
 					return fmt.Errorf("%s: transition guard must be bool", tr.Guard.GetSpan())
 				}
 			}
@@ -796,7 +825,7 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 					if err != nil {
 						return err
 					}
-					if ty.Kind() != KindBool && ty.Kind() != KindUnknown {
+					if !boolLike(ty) {
 						return fmt.Errorf("%s: choice guard must be bool, got %s", br.Guard.GetSpan(), ty)
 					}
 				}
@@ -839,6 +868,28 @@ func (c *checker) checkSystem(sys *ast.SystemDecl) error {
 func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 	switch s := stmt.(type) {
 	case *ast.LetAssignStmt:
+		prevLam, isLam := sc.lookup(s.Name)
+		if isLam && prevLam.lam != nil {
+			return fmt.Errorf("%s: %s names a lambda and is not assigned again", s.Span, s.Name)
+		}
+		if lam, ok := s.Value.(*ast.LambdaExpr); ok && len(lam.Params) > 0 && s.TypeAnno == nil {
+			if isLam {
+				return fmt.Errorf("%s: %s is a %s: a lambda with parameters is given a name of its own", s.Span, s.Name, prevLam.ty)
+			}
+			types := make([]Type, len(lam.Params))
+			for i := range types {
+				types[i] = UnknownType{Generic: true}
+			}
+			ft, err := c.checkLambdaWith(lam, sc, types)
+			if err != nil {
+				return err
+			}
+			if c.curFuncInfo != nil {
+				c.addUnique(&c.curFuncInfo.Frame.Writes, s.Name)
+			}
+			sc.set(s.Name, varBinding{ty: ft, mutable: true, span: s.Span, lam: &namedLambda{expr: lam, sc: sc}})
+			return nil
+		}
 		valTy, err := c.checkExpr(s.Value, sc)
 		if err != nil {
 			return err
@@ -912,7 +963,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if err != nil {
 			return err
 		}
-		if lhsTy.Kind() != KindInt || (rhsTy.Kind() != KindInt && rhsTy.Kind() != KindUnknown) {
+		if lhsTy.Kind() != KindInt || (!intLike(rhsTy)) {
 			return fmt.Errorf("%s: compound assignment %s requires int operands", s.Span, s.Op)
 		}
 		if root, ok := elementOwnerPath(s.Target); ok {
@@ -1000,7 +1051,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			if cty.Kind() != KindBool && cty.Kind() != KindUnknown {
+			if !boolLike(cty) {
 				return fmt.Errorf("%s: if condition must be bool, got %s", br.Cond.GetSpan(), cty)
 			}
 			sub := newScope(sc)
@@ -1035,7 +1086,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				if err != nil {
 					return err
 				}
-				if gty.Kind() != KindBool && gty.Kind() != KindUnknown {
+				if !boolLike(gty) {
 					return fmt.Errorf("%s: match guard must be bool", arm.Guard.GetSpan())
 				}
 			}
@@ -1070,9 +1121,11 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			var elem Type = UnknownType{}
+			var elem Type = UnknownType{Generic: generic(ity)}
 			if lt, ok := ity.(*ListType); ok {
 				elem = lt.Elem
+			} else if opaque(ity) {
+				return unknownUse(s.Iterable.GetSpan(), "for over")
 			}
 			if err := keepsElements(sc, s.Var, elem, s.Span); err != nil {
 				return err
@@ -1091,7 +1144,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		if err != nil {
 			return err
 		}
-		if cty.Kind() != KindBool && cty.Kind() != KindUnknown {
+		if !boolLike(cty) {
 			return fmt.Errorf("%s: while condition must be bool", s.Cond.GetSpan())
 		}
 		for _, inv := range s.Invariants {
@@ -1099,7 +1152,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			if ity.Kind() != KindBool && ity.Kind() != KindUnknown {
+			if !boolLike(ity) {
 				return fmt.Errorf("%s: loop invariant must be bool", inv.GetSpan())
 			}
 		}
@@ -1108,7 +1161,7 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 			if err != nil {
 				return err
 			}
-			if dty.Kind() != KindInt && dty.Kind() != KindUnknown {
+			if !intLike(dty) {
 				return fmt.Errorf("%s: decreases must be int", s.Decreases.GetSpan())
 			}
 		}
@@ -1222,6 +1275,9 @@ func (c *checker) bindPattern(pat ast.Pattern, subjTy Type, sc *scope) error {
 		for i, subPat := range p.Fields {
 			fty := vi.Fields[i].Type
 			if tv, isTV := fty.(TypeVar); isTV {
+				// What a variant with no type argument holds is of
+				// unknown type.
+				fty = UnknownType{}
 				if rep, ok := subMap[tv.Name]; ok {
 					fty = rep
 				}
@@ -1272,6 +1328,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return StrType{}, nil
 	case *ast.Ident:
 		if b, ok := sc.lookup(e.Name); ok {
+			if b.lam != nil {
+				return nil, fmt.Errorf("%s: %s is a lambda with parameters and is used by its name only: call it, or give it to a pipeline stage", e.Span, e.Name)
+			}
 			if c.curFuncInfo != nil {
 				c.addUnique(&c.curFuncInfo.Frame.Reads, e.Name)
 			}
@@ -1301,7 +1360,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		if e.Op == "not" {
-			if knownType(ity) && ity.Kind() != KindBool {
+			if !boolLike(ity) {
 				return nil, fmt.Errorf("%s: not needs a bool, got %s", e.Span, ity)
 			}
 			return BoolType{}, nil
@@ -1328,7 +1387,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			if lt.Kind() == KindStr && e.Op == "+" {
 				return StrType{}, nil
 			}
-			if (lt.Kind() != KindInt && lt.Kind() != KindUnknown) || (rt.Kind() != KindInt && rt.Kind() != KindUnknown) {
+			if (!intLike(lt)) || (!intLike(rt)) {
 				return nil, fmt.Errorf("%s: arithmetic %s requires int, got %s and %s", e.Span, e.Op, lt, rt)
 			}
 			return NewUnboundedInt(), nil
@@ -1350,7 +1409,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return &ListType{Elem: NewUnboundedInt()}, nil
 
 	case *ast.ListLit:
-		var elem Type = UnknownType{}
+		var elem Type = UnknownType{Empty: true}
 		for _, el := range e.Elems {
 			et, err := c.checkExpr(el, sc)
 			if err != nil {
@@ -1366,7 +1425,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		return &ListType{Elem: elem, Cap: int64(len(e.Elems)), HasCap: false}, nil
 
 	case *ast.MapLit:
-		var kt, vt Type = StrType{}, UnknownType{}
+		var kt, vt Type = StrType{}, UnknownType{Empty: true}
 		for i, ent := range e.Entries {
 			k, err := c.checkExpr(ent.Key, sc)
 			if err != nil {
@@ -1380,7 +1439,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 				return nil, fmt.Errorf("%s: map keys must have one type, got %s and %s", e.Span, kt, k)
 			}
 			kt = k
-			if vt.Kind() == KindUnknown {
+			if i == 0 {
 				vt = v
 			} else {
 				vt = unifyTypes(vt, v)
@@ -1485,7 +1544,10 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		case KindInt, KindBool, KindStr, KindList, KindMap:
 			return nil, fmt.Errorf("%s: a value of type %s has no member %q", e.Span, objTy, e.Field)
 		}
-		return UnknownType{}, nil
+		if opaque(objTy) {
+			return nil, unknownUse(e.Span, fmt.Sprintf("member %q of", e.Field))
+		}
+		return UnknownType{Generic: generic(objTy)}, nil
 
 	case *ast.IndexExpr:
 		lty, err := c.checkExpr(e.List, sc)
@@ -1497,7 +1559,7 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		if lt, ok := lty.(*ListType); ok {
-			if ity.Kind() != KindInt && ity.Kind() != KindUnknown {
+			if !intLike(ity) {
 				return nil, fmt.Errorf("%s: list index must be int, got %s", e.Span, ity)
 			}
 			return lt.Elem, nil
@@ -1508,7 +1570,13 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if lty.Kind() == KindStr {
 			return StrType{}, nil
 		}
-		return UnknownType{}, nil
+		if generic(lty) {
+			return lty, nil
+		}
+		if opaque(lty) {
+			return nil, unknownUse(e.Span, "an index into")
+		}
+		return nil, fmt.Errorf("%s: a value of type %s is not indexed", e.Span, lty)
 
 	case *ast.TryExpr:
 		innerTy, err := c.checkExpr(e.Inner, sc)
@@ -1523,14 +1591,17 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 				return adt.TypeArgs[0], nil
 			}
 		}
-		return UnknownType{}, nil
+		if generic(innerTy) {
+			return innerTy, nil
+		}
+		return nil, fmt.Errorf("%s: ? takes a Result or an Option, got %s", e.Span, innerTy)
 
 	case *ast.MatchExpr:
 		sty, err := c.checkExpr(e.Subject, sc)
 		if err != nil {
 			return nil, err
 		}
-		var resTy Type = UnknownType{}
+		var resTy Type = UnknownType{Empty: true}
 		for _, arm := range e.Arms {
 			armSc := newScope(sc)
 			if err := c.bindPattern(arm.Pattern, sty, armSc); err != nil {
@@ -1587,17 +1658,11 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 
 	case *ast.LambdaExpr:
 		// When checked standalone without pipe context, infer params as Unknown
-		lsc := newScope(sc)
-		var ps []FuncParamInfo
-		for _, pname := range e.Params {
-			lsc.defineLocal(pname, varBinding{ty: UnknownType{}, span: e.Span})
-			ps = append(ps, FuncParamInfo{Name: pname, Type: UnknownType{}})
+		types := make([]Type, len(e.Params))
+		for i := range types {
+			types[i] = UnknownType{}
 		}
-		rt, err := c.checkExpr(e.Body, lsc)
-		if err != nil {
-			return nil, err
-		}
-		return &FuncType{Params: ps, Return: rt}, nil
+		return c.checkLambdaWith(e, sc, types)
 
 	case *ast.PipeExpr:
 		return c.checkPipeExpr(e, sc)
@@ -1623,6 +1688,48 @@ var builtinCallables = map[string]bool{
 // would check the function.
 // knownType is false for a type sema could not work out: nothing is said
 // about such an operand.
+// generic reports whether t is the type of a parameter of a named lambda
+// where the lambda is written.
+func generic(t Type) bool {
+	u, ok := t.(UnknownType)
+	return ok && u.Generic
+}
+
+// opaque reports whether t is the type of a value sema cannot tell the type
+// of: nothing is done with it but passing it on.
+func opaque(t Type) bool {
+	u, ok := t.(UnknownType)
+	return ok && !u.Generic
+}
+
+// vacuous reports whether t is the type argument that no value has.
+func vacuous(t Type) bool {
+	u, ok := t.(UnknownType)
+	return ok && u.Empty
+}
+
+// untyped reports whether t is the type of a value that is only passed on:
+// one of unknown type, or what a function with no return type gives.
+func untyped(t Type) bool {
+	return t != nil && (t.Kind() == KindVoid || (opaque(t) && !vacuous(t)))
+}
+
+// untypedName names such a value in an error.
+func untypedName(t Type) string {
+	if t.Kind() == KindVoid {
+		return "what a function with no return type gives"
+	}
+	return "a value of unknown type"
+}
+
+func intLike(t Type) bool  { return t != nil && (t.Kind() == KindInt || generic(t)) }
+func boolLike(t Type) bool { return t != nil && (t.Kind() == KindBool || generic(t)) }
+
+// unknownUse is the error for doing op with a value of unknown type.
+func unknownUse(span ast.Span, op string) error {
+	return fmt.Errorf("%s: %s a value of unknown type: sema cannot tell what it is, so it is only passed on, printed or matched; give the value a type where it is made", span, op)
+}
+
 func knownType(t Type) bool {
 	if t == nil {
 		return false
@@ -1659,8 +1766,19 @@ func sameSort(a, b Type) bool {
 // name in a pattern all write the one variable, and what it holds after an
 // if, a loop or a match is read with one type, whichever branch ran.
 func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
-	if prev, found := sc.lookup(name); found && !sameSort(prev.ty, ty) {
+	prev, found := sc.lookup(name)
+	if !found {
+		return nil
+	}
+	if !sameSort(prev.ty, ty) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps its sort", span, name, prev.ty, ty)
+	}
+	// Nor is it of a type on one path and of none on another.
+	switch {
+	case knownType(prev.ty) && untyped(ty):
+		return fmt.Errorf("%s: %s is a %s and cannot be given %s: a variable keeps its sort", span, name, prev.ty, untypedName(ty))
+	case untyped(prev.ty) && knownType(ty):
+		return fmt.Errorf("%s: %s holds %s and cannot be given a %s: a variable keeps its sort", span, name, untypedName(prev.ty), ty)
 	}
 	return nil
 }
@@ -1715,6 +1833,9 @@ func sameRange(a, b Type) bool {
 // Both backends run any of them on any two values, and do not agree on the
 // answer when the operands are not what the operator is for.
 func checkComparison(e *ast.BinaryExpr, lt, rt Type) error {
+	if opaque(rt) || (opaque(lt) && e.Op != "in") {
+		return unknownUse(e.Span, e.Op+" on")
+	}
 	switch e.Op {
 	case "==", "!=":
 		if !sameSort(lt, rt) {
@@ -1790,8 +1911,11 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				return nil, err
 			}
 			switch at.Kind() {
-			case KindList, KindMap, KindStr, KindUnknown:
+			case KindList, KindMap, KindStr:
 			default:
+				if generic(at) {
+					break
+				}
 				return nil, fmt.Errorf("%s: len() takes a list, a map or a string, got %s", e.Args[0].Value.GetSpan(), at)
 			}
 			return NewIntRange(0, DefaultMaxInt, ""), nil
@@ -1831,7 +1955,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return c.instantiateADT("Result", []Type{widenInt(vt), UnknownType{}}), nil
+			return c.instantiateADT("Result", []Type{widenInt(vt), UnknownType{Empty: true}}), nil
 		case "Err":
 			if len(e.Args) != 1 {
 				return nil, fmt.Errorf("%s: Err() expects 1 argument", e.Span)
@@ -1840,7 +1964,7 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return c.instantiateADT("Result", []Type{UnknownType{}, widenInt(et)}), nil
+			return c.instantiateADT("Result", []Type{UnknownType{Empty: true}, widenInt(et)}), nil
 		}
 
 		// Entity constructor: Account(balance=10, frozen=0)
@@ -1965,7 +2089,29 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		}
 		// std.concurrent.Channel[T](cap=N) or ThreadPool(workers, queue_cap)
 		if mt, ok := objTy.(*ModuleType); ok && mt.Path == "std.concurrent" {
-			for _, a := range e.Args {
+			// The function of parallel_map is called with an element of
+			// the list, and its results are those of the list it gives.
+			var mapped Type
+			for i, a := range e.Args {
+				// The list is the first argument, or the piped value.
+				var list ast.Expr
+				if piped := c.piped[e]; piped != nil && len(e.Args) == 1 {
+					list = piped
+				} else if i == 1 && len(e.Args) == 2 {
+					list = e.Args[0].Value
+				}
+				if fe.Field == "parallel_map" && list != nil {
+					if lt, ok := c.info.ExprTypes[list].(*ListType); ok {
+						ret, ok, err := c.stageFn(a.Value, sc, lt.Elem)
+						if err != nil {
+							return nil, err
+						}
+						if ok {
+							mapped = widenInt(ret)
+							continue
+						}
+					}
+				}
 				if _, err := c.checkExpr(a.Value, sc); err != nil {
 					return nil, err
 				}
@@ -1992,19 +2138,58 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			case "Semaphore":
 				return &HandleType{Name: "conc.Semaphore"}, nil
 			case "parallel_map":
+				if mapped != nil {
+					return &ListType{Elem: mapped}, nil
+				}
 				return &ListType{Elem: UnknownType{}}, nil
 			}
 			return nil, fmt.Errorf("%s: module std.concurrent has no member %q", e.Span, fe.Field)
 		}
 	}
 
+	if nl, name := namedLambdaOf(e.Callee, sc); nl != nil {
+		var types []Type
+		for _, a := range e.Args {
+			if a.Name != "" {
+				return nil, fmt.Errorf("%s: a lambda takes its arguments by position", a.Span)
+			}
+			at, err := c.checkExpr(a.Value, sc)
+			if err != nil {
+				return nil, err
+			}
+			types = append(types, at)
+		}
+		if err := c.checkCallAliasing(e.Args, true); err != nil {
+			return nil, err
+		}
+		ret, err := c.useLambda(nl, name, types, e.Span)
+		if err != nil {
+			return nil, err
+		}
+		c.info.ExprTypes[e.Callee] = &FuncType{Return: ret}
+		return ret, nil
+	}
 	c.callee = e.Callee
 	calleeTy, err := c.checkExpr(e.Callee, sc)
 	c.callee = nil
 	if err != nil {
 		return nil, err
 	}
+	// The function of with_lock is called with what the mutex holds.
+	var held Type
+	if fe, ok := e.Callee.(*ast.FieldExpr); ok && fe.Field == "with_lock" && len(e.Args) == 1 {
+		if ht, ok := c.info.ExprTypes[fe.Object].(*HandleType); ok && ht.Name == "conc.Mutex" && ht.Elem != nil {
+			held = ht.Elem
+		}
+	}
 	for _, a := range e.Args {
+		if held != nil {
+			if _, ok, err := c.stageFn(a.Value, sc, held); err != nil {
+				return nil, err
+			} else if ok {
+				continue
+			}
+		}
 		if _, err := c.checkExpr(a.Value, sc); err != nil {
 			return nil, err
 		}
@@ -2029,6 +2214,13 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			return nil, err
 		} else if mt, ok := c.info.ExprTypes[e.Callee.(*ast.FieldExpr).Object].(*ModuleType); ok && mt.Path == "std.requests" && e.Callee.(*ast.FieldExpr).Field == "gather" {
 			return c.gatherType(e)
+		} else if ht, ok := c.info.ExprTypes[e.Callee.(*ast.FieldExpr).Object].(*HandleType); ok && ht.Name == "conc.ThreadPool" && e.Callee.(*ast.FieldExpr).Field == "submit" {
+			// The future of a task holds what the task gives.
+			if args := c.stdArgs(e); len(args) == 1 {
+				if task, ok := c.info.ExprTypes[args[0].Value].(*FuncType); ok && task.Return != nil {
+					return &HandleType{Name: "Future", Elem: widenInt(task.Return)}, nil
+				}
+			}
 		}
 		return ft.Return, nil
 	}
@@ -2038,7 +2230,10 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 	case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
 		return nil, fmt.Errorf("%s: a value of type %s cannot be called", e.Span, calleeTy)
 	}
-	return UnknownType{}, nil
+	if opaque(calleeTy) {
+		return nil, unknownUse(e.Span, "a call of")
+	}
+	return UnknownType{Generic: generic(calleeTy)}, nil
 }
 
 // checkBuiltinArgs checks the arguments of a built-in function, which both
@@ -2054,7 +2249,7 @@ func (c *checker) checkBuiltinArgs(e *ast.CallExpr, sc *scope, kinds ...TypeKind
 		if a.Name != "" {
 			return fmt.Errorf("%s: %s() takes its arguments by position", a.Span, name)
 		}
-		if i < len(kinds) && kinds[i] != KindUnknown && at.Kind() != kinds[i] && at.Kind() != KindUnknown {
+		if i < len(kinds) && kinds[i] != KindUnknown && at.Kind() != kinds[i] && !generic(at) {
 			return fmt.Errorf("%s: argument %d of %s() is %s, got %s", a.Value.GetSpan(), i+1, name, kindNoun(kinds[i]), at)
 		}
 	}
@@ -2120,7 +2315,7 @@ func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *sc
 		if it.Lo < 1 || it.Hi > 300_000 {
 			return fmt.Errorf("%s: timeout_ms range [%d..%d] exceeds legal contract int[1..300_000]", timeoutExpr.GetSpan(), it.Lo, it.Hi)
 		}
-	} else if ty.Kind() != KindInt && ty.Kind() != KindUnknown {
+	} else if !intLike(ty) {
 		return fmt.Errorf("%s: timeout_ms must be int[1..300_000], got %s", timeoutExpr.GetSpan(), ty)
 	}
 	return nil
@@ -2194,6 +2389,16 @@ func (c *checker) checkFuncArgs(name string, fi *FuncInfo, args []ast.CallArg, s
 // type, so the two types are the same one; with one of them unknown, the
 // value has no type the kernel could read a range from.
 func eitherOf(a, b Type) (Type, bool) {
+	// The type argument no value has leaves the other; a value of
+	// unknown type on one side makes the result one.
+	switch {
+	case vacuous(a):
+		return b, true
+	case vacuous(b):
+		return a, true
+	case untyped(a) || untyped(b):
+		return UnknownType{}, true
+	}
 	if keepsType(a) || keepsType(b) {
 		if !knownType(a) || !knownType(b) {
 			return UnknownType{}, true
@@ -2266,7 +2471,7 @@ func (c *checker) checkStage(name string, shape stageShape, lhsTy Type, args []a
 		if err != nil {
 			return err
 		}
-		if at.Kind() != KindInt && at.Kind() != KindUnknown {
+		if !intLike(at) {
 			return fmt.Errorf("%s: %s takes an int, got %s", args[0].Value.GetSpan(), name, at)
 		}
 	}
@@ -2278,6 +2483,8 @@ func (c *checker) checkStage(name string, shape stageShape, lhsTy Type, args []a
 	params := -1
 	if lam, ok := fn.(*ast.LambdaExpr); ok {
 		params = len(lam.Params)
+	} else if nl, _ := namedLambdaOf(fn, sc); nl != nil {
+		params = len(nl.expr.Params)
 	} else {
 		at, err := c.checkExpr(fn, sc)
 		if err != nil {
@@ -2326,7 +2533,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		fnName, direct = rhs.Name, true
 	}
 
-	var elemTy Type = UnknownType{}
+	var elemTy Type = UnknownType{Generic: generic(lhsTy)}
 	if lt, ok := lhsTy.(*ListType); ok {
 		elemTy = lt.Elem
 	}
@@ -2348,6 +2555,9 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	// position without looking at how many there are, and call its function
 	// with one element (fold: the sum so far and one element).
 	if shape, ok := stageShapes[stage]; ok {
+		if opaque(lhsTy) && !vacuous(lhsTy) {
+			return nil, unknownUse(e.Left.GetSpan(), "the stage "+fnName+" on")
+		}
 		if err := c.checkStage(fnName, shape, lhsTy, callArgs, e, sc); err != nil {
 			return nil, err
 		}
@@ -2356,32 +2566,23 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	switch stage {
 	case "filter":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: elemTy, span: lam.Span})
-				bty, err := c.checkExpr(lam.Body, lsc)
-				if err != nil {
-					return nil, err
-				}
-				if bty.Kind() != KindBool && bty.Kind() != KindUnknown {
-					return nil, fmt.Errorf("%s: filter predicate must return bool, got %s", lam.Span, bty)
-				}
-				c.info.ExprTypes[lam] = &FuncType{Params: []FuncParamInfo{{Name: lam.Params[0], Type: elemTy}}, Return: BoolType{}}
-				return lhsTy, nil
+			bty, ok, err := c.stageFn(callArgs[0].Value, sc, elemTy)
+			if err != nil {
+				return nil, err
+			}
+			if ok && !boolLike(bty) {
+				return nil, fmt.Errorf("%s: filter predicate must return bool, got %s", callArgs[0].Value.GetSpan(), bty)
 			}
 		}
 		return lhsTy, nil
 
 	case "map":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: elemTy, span: lam.Span})
-				rty, err := c.checkExpr(lam.Body, lsc)
-				if err != nil {
-					return nil, err
-				}
-				c.info.ExprTypes[lam] = &FuncType{Params: []FuncParamInfo{{Name: lam.Params[0], Type: elemTy}}, Return: rty}
+			rty, ok, err := c.stageFn(callArgs[0].Value, sc, elemTy)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				var capVal int64
 				var hasCap bool
 				if lt, ok := lhsTy.(*ListType); ok {
@@ -2394,14 +2595,11 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 
 	case "flat_map":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: elemTy, span: lam.Span})
-				rty, err := c.checkExpr(lam.Body, lsc)
-				if err != nil {
-					return nil, err
-				}
-				c.info.ExprTypes[lam] = &FuncType{Params: []FuncParamInfo{{Name: lam.Params[0], Type: elemTy}}, Return: rty}
+			rty, ok, err := c.stageFn(callArgs[0].Value, sc, elemTy)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				if rlt, ok := rty.(*ListType); ok {
 					return rlt, nil
 				}
@@ -2416,23 +2614,16 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			if lam, ok := callArgs[1].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 2 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: accTy, span: lam.Span})
-				lsc.defineLocal(lam.Params[1], varBinding{ty: elemTy, span: lam.Span})
-				rty, err := c.checkExpr(lam.Body, lsc)
-				if err != nil {
-					return nil, err
-				}
-				c.info.ExprTypes[lam] = &FuncType{
-					Params: []FuncParamInfo{{Name: lam.Params[0], Type: accTy}, {Name: lam.Params[1], Type: elemTy}},
-					Return: rty,
-				}
+			rty, ok, err := c.stageFn(callArgs[1].Value, sc, accTy, elemTy)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				// The start when the list is empty, else what the
 				// function gave last.
 				ty, ok := eitherOf(accTy, rty)
 				if !ok {
-					return nil, fmt.Errorf("%s: the function of fold gives %s as fold starts with, got %s", lam.Body.GetSpan(), accTy, rty)
+					return nil, fmt.Errorf("%s: the function of fold gives %s as fold starts with, got %s", stageBody(callArgs[1].Value).GetSpan(), accTy, rty)
 				}
 				return ty, nil
 			}
@@ -2442,23 +2633,15 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		return NewUnboundedInt(), nil
 	case "any", "all":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: elemTy, span: lam.Span})
-				if _, err := c.checkExpr(lam.Body, lsc); err != nil {
-					return nil, err
-				}
+			if _, _, err := c.stageFn(callArgs[0].Value, sc, elemTy); err != nil {
+				return nil, err
 			}
 		}
 		return BoolType{}, nil
 	case "find":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: elemTy, span: lam.Span})
-				if _, err := c.checkExpr(lam.Body, lsc); err != nil {
-					return nil, err
-				}
+			if _, _, err := c.stageFn(callArgs[0].Value, sc, elemTy); err != nil {
+				return nil, err
 			}
 		}
 		return c.instantiateADT("Option", []Type{elemTy}), nil
@@ -2499,18 +2682,17 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		}
 	case "and_then":
 		if len(callArgs) == 1 {
-			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
-				var okTy Type = UnknownType{}
-				adt, known := lhsTy.(*ADTType)
-				if known && len(adt.TypeArgs) >= 1 {
-					okTy = adt.TypeArgs[0]
-				}
-				lsc := newScope(sc)
-				lsc.defineLocal(lam.Params[0], varBinding{ty: okTy, span: lam.Span})
-				bty, err := c.checkExpr(lam.Body, lsc)
-				if err != nil {
-					return nil, err
-				}
+			var okTy Type = UnknownType{Generic: generic(lhsTy)}
+			adt, known := lhsTy.(*ADTType)
+			if known && len(adt.TypeArgs) >= 1 {
+				okTy = adt.TypeArgs[0]
+			}
+			bty, isFn, err := c.stageFn(callArgs[0].Value, sc, okTy)
+			if err != nil {
+				return nil, err
+			}
+			if isFn {
+				body := stageBody(callArgs[0].Value)
 				// A None or an Err is passed on as it is, so the function
 				// gives the same kind of variant.
 				if bty.Kind() == KindUnknown {
@@ -2525,7 +2707,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 							want = "a Result"
 						}
 					}
-					return nil, fmt.Errorf("%s: the function of and_then gives %s, got %s", lam.Body.GetSpan(), want, bty)
+					return nil, fmt.Errorf("%s: the function of and_then gives %s, got %s", body.GetSpan(), want, bty)
 				}
 				if bdt.Name == "Result" && len(bdt.TypeArgs) == 2 {
 					// The error is the one it is given or the one it gives.
@@ -2535,7 +2717,7 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 					}
 					et, ok := eitherOf(le, bdt.TypeArgs[1])
 					if !ok {
-						return nil, fmt.Errorf("%s: the function of and_then gives a Result with the error of %s, got %s", lam.Body.GetSpan(), lhsTy, bty)
+						return nil, fmt.Errorf("%s: the function of and_then gives a Result with the error of %s, got %s", body.GetSpan(), lhsTy, bty)
 					}
 					return c.instantiateADT("Result", []Type{bdt.TypeArgs[0], et}), nil
 				}
@@ -2599,6 +2781,103 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		}
 	}
 	return UnknownType{}, nil
+}
+
+// stageBody is the body of the lambda a stage is given, or what it is
+// given when that is the name of one.
+func stageBody(fn ast.Expr) ast.Expr {
+	if lam, ok := fn.(*ast.LambdaExpr); ok {
+		return lam.Body
+	}
+	return fn
+}
+
+// checkLambdaWith checks the body of lam with its parameters of the given
+// types, and records the type of the lambda.
+func (c *checker) checkLambdaWith(lam *ast.LambdaExpr, sc *scope, types []Type) (*FuncType, error) {
+	lsc := newScope(sc)
+	ps := make([]FuncParamInfo, len(lam.Params))
+	for i, pname := range lam.Params {
+		lsc.defineLocal(pname, varBinding{ty: types[i], span: lam.Span})
+		ps[i] = FuncParamInfo{Name: pname, Type: types[i]}
+	}
+	rt, err := c.checkExpr(lam.Body, lsc)
+	if err != nil {
+		return nil, err
+	}
+	ft := &FuncType{Params: ps, Return: rt}
+	c.info.ExprTypes[lam] = ft
+	return ft, nil
+}
+
+// useLambda is a use of the named lambda nl with arguments of the given
+// types: the first fixes the types of its parameters, an int as an int of
+// any range, and checks its body with them; the others are given those.
+func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.Span) (Type, error) {
+	if len(args) != len(nl.expr.Params) {
+		return nil, fmt.Errorf("%s: this function takes %s, got %d", span, plural(len(nl.expr.Params), "argument"), len(args))
+	}
+	for _, a := range args {
+		if generic(a) {
+			return UnknownType{Generic: true}, nil
+		}
+	}
+	if !nl.fixed {
+		params := make([]Type, len(args))
+		for i, a := range args {
+			params[i] = widenInt(a)
+		}
+		ft, err := c.checkLambdaWith(nl.expr, nl.sc, params)
+		if err != nil {
+			return nil, fmt.Errorf("%w (the lambda %s, as it is first used at %s)", err, name, span)
+		}
+		nl.params, nl.ret, nl.fixed = params, ft.Return, true
+		return nl.ret, nil
+	}
+	for i, a := range args {
+		if !c.assignable(nl.params[i], a, nil) || !isAssignable(nl.params[i], a) {
+			return nil, fmt.Errorf("%s: %s takes %s where it is first used, got %s: a lambda takes the same types at every use", span, name, nl.params[i], a)
+		}
+	}
+	return nl.ret, nil
+}
+
+// namedLambdaOf is the named lambda e is the name of.
+func namedLambdaOf(e ast.Expr, sc *scope) (*namedLambda, string) {
+	if id, ok := e.(*ast.Ident); ok {
+		if b, found := sc.lookup(id.Name); found && b.lam != nil {
+			return b.lam, id.Name
+		}
+	}
+	return nil, ""
+}
+
+// stageFn checks the function a stage or a standard call is given, a lambda
+// or the name of one, with the types it is called with. ok is false for
+// anything else.
+func (c *checker) stageFn(fn ast.Expr, sc *scope, params ...Type) (Type, bool, error) {
+	if lam, ok := fn.(*ast.LambdaExpr); ok {
+		if len(lam.Params) != len(params) {
+			return nil, false, nil
+		}
+		ft, err := c.checkLambdaWith(lam, sc, params)
+		if err != nil {
+			return nil, true, err
+		}
+		return ft.Return, true, nil
+	}
+	if nl, name := namedLambdaOf(fn, sc); nl != nil {
+		if len(nl.expr.Params) != len(params) {
+			return nil, false, nil
+		}
+		ret, err := c.useLambda(nl, name, params, fn.GetSpan())
+		if err != nil {
+			return nil, true, err
+		}
+		c.info.ExprTypes[fn] = &FuncType{Return: ret}
+		return ret, true, nil
+	}
+	return nil, false, nil
 }
 
 // checkCallAliasing rejects a call whose mut argument overlaps another
@@ -2920,6 +3199,11 @@ func isAssignable(expected, actual Type) bool {
 	if expected == nil || actual == nil {
 		return true
 	}
+	// A value of unknown type is not one of a type that is known: nothing
+	// says it is. The type argument no value has is any type.
+	if untyped(actual) && knownType(expected) {
+		return false
+	}
 	if expected.Kind() == KindUnknown || actual.Kind() == KindUnknown || expected.Kind() == KindTypeVar || actual.Kind() == KindTypeVar {
 		return true
 	}
@@ -2945,6 +3229,20 @@ func isAssignable(expected, actual Type) bool {
 			}
 			return true
 		}
+	}
+	// A handle is a reference: the two sides read and write what it holds,
+	// so they agree on its type.
+	if eh, ok := expected.(*HandleType); ok {
+		ah, ok := actual.(*HandleType)
+		if !ok || ah.Name != eh.Name {
+			return false
+		}
+		if eh.Elem == nil || ah.Elem == nil {
+			return eh.Elem == nil && ah.Elem == nil
+		}
+		return untyped(eh.Elem) == untyped(ah.Elem) &&
+			isAssignable(eh.Elem, ah.Elem) && isAssignable(ah.Elem, eh.Elem) &&
+			sameElemRange(eh.Elem, ah.Elem) && sameElemRange(ah.Elem, eh.Elem)
 	}
 	return expected.Equals(actual)
 }
@@ -3015,6 +3313,11 @@ func isMapStage(e ast.Expr) bool {
 // since the elements written so far were not proved in that range.
 func fillUnknown(prev, val Type, inContainer bool) (Type, bool) {
 	if prev == nil || prev.Kind() == KindUnknown {
+		// A variable of unknown type stays one: a branch may leave in it
+		// the value it had.
+		if untyped(prev) {
+			return prev, true
+		}
 		if inContainer && hasBoundedInt(val) {
 			return prev, false
 		}
@@ -3179,6 +3482,12 @@ func (c *checker) assignable(expected, actual Type, expr ast.Expr) bool {
 }
 
 func unifyTypes(a, b Type) Type {
+	// One of the two may be of unknown type, so the value is.
+	for _, t := range []Type{a, b} {
+		if untyped(t) {
+			return t
+		}
+	}
 	if a == nil || a.Kind() == KindUnknown {
 		return b
 	}

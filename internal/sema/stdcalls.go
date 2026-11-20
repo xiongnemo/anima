@@ -239,7 +239,7 @@ func (c *checker) checkStdArg(a ast.CallArg, at Type, p stdParam, what string, n
 	if at == nil {
 		return nil
 	}
-	unknown := at.Kind() == KindUnknown
+	unknown := generic(at)
 	switch p.kind {
 	case argInt:
 		if at.Kind() != KindInt && !unknown {

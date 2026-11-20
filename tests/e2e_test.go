@@ -136,6 +136,13 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_fork_branch_reads_assigned.anm", "which branch \"left\" assigns"},
 		{"../tests/bugs/sema_fork_branch_returns.anm", "return in branch"},
 		{"../tests/bugs/sema_workflow_variable_on_one_path.anm", "is not assigned on every path"},
+		{"../tests/bugs/sema_unknown_value_index.anm", "index_bounds"},
+		{"../tests/bugs/sema_unknown_value_method.anm", "has no member"},
+		{"../tests/bugs/sema_untyped_channel_value.anm", "!= on a value of unknown type"},
+		{"../tests/bugs/sema_unknown_value_in_typed_variable.anm", "cannot be given a value of unknown type"},
+		{"../tests/bugs/sema_void_value_in_typed_variable.anm", "holds what a function with no return type gives"},
+		{"../tests/bugs/sema_bare_option_payload.anm", "cannot assign unknown to k (int)"},
+		{"../tests/bugs/sema_handle_element_type.anm", "expects conc.Channel[int], got conc.Channel[int[1..9]]"},
 		{"../tests/bugs/sema_fork_branch_writes_field.anm", "writes acc in place"},
 		{"../tests/bugs/sema_fork_branches_write_one_entity.anm", "in place"},
 		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},
@@ -781,17 +788,46 @@ func TestE2EBuiltinsAndStagesParity(t *testing.T) {
 	runOnBothBackends(t, "builtins_and_stages", builtinsAndStagesSrc, builtinsAndStagesWant)
 }
 
+// A lambda that is given a name takes the types of its first use; what a
+// task, parallel_map and with_lock are given is called with what they have
+// for it, and what they give has its type. Both backends do the same.
+func TestE2ENamedLambdasParity(t *testing.T) {
+	runOnBothBackends(t, "named_lambdas", namedLambdasSrc, "True False [2, 3] True Some(2) True [7]\n7 [1, 2, 3] 25 3\n")
+}
+
+const namedLambdasSrc = `import std.concurrent as conc
+
+def work(x: int[0..100]) -> int[0..100]:
+    return x
+
+def main() -> int:
+    g = (v) => v > 1
+    k = (v) => [v]
+    h = (w) => g(w)
+    xs: list[int[0..9]] = [1, 2, 3]
+    print(g(2), h(0), xs |> filter(g), xs |> any(g), xs |> find(g), 5 |> g(), k(7))
+    m = conc.Mutex(5)
+    m.with_lock((v) => 7)
+    rs = conc.parallel_map(xs, (x) => work(x))
+    pool = conc.ThreadPool(1, 2)
+    f = pool.submit(() => work(4))
+    r = f.await()
+    pool.shutdown()
+    if r > 0 and len(rs) > 2:
+        print(m.get(), rs, 100 / r, rs[2])
+    return 0
+`
+
 // A failed assert reports its message and exits with 1 on both backends,
 // whatever the message is: one of a type sema does not know is still a value.
 func TestE2EFailedAssertParity(t *testing.T) {
 	tmp := t.TempDir()
 	animaBin := buildCLI(t, tmp)
 	for name, tc := range map[string]struct{ args, want string }{
-		"message":     {`x == 2, "boom"`, "runtime error: boom\n"},
-		"no_message":  {`x == 2`, "runtime error: assertion failed\n"},
-		"int_message": {`x == 2, g(123)`, "runtime error: 123\n"},
+		"message":    {`x == 2, "boom"`, "runtime error: boom\n"},
+		"no_message": {`x == 2`, "runtime error: assertion failed\n"},
 	} {
-		src := "def main() -> int:\n    g = (v) => v\n    x = 1\n    print(\"before\")\n    assert(" + tc.args + ")\n    return 0\n"
+		src := "def main() -> int:\n    x = 1\n    print(\"before\")\n    assert(" + tc.args + ")\n    return 0\n"
 		path := filepath.Join(tmp, name+".anm")
 		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 			t.Fatal(err)

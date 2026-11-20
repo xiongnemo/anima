@@ -1,0 +1,14 @@
+# `Option` written without its type holds anything, and what it held was
+# given to any type: n is a list and was declared an int. The VM divided by
+# zero, the native backend printed 0.
+def f() -> Option:
+    return Some([1])
+
+def main() -> int:
+    match f():
+        Some(n) ->
+            k: int = n
+            if k != 0:
+                print(10 / k)
+        None -> print("none")
+    return 0
