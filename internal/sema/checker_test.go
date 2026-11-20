@@ -1188,6 +1188,11 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"(\"s\" |> bv.read_u8()) |> m.set()":                    "argument 1 of read_u8() of a bytes.ByteView is an int, got str",
 		"s = 5 |> crypto.hmac_sha256(\"a\" |> crypto.sha256())": "argument 1 of std.crypto.hmac_sha256 is a str, got int",
 		"s = \"k\" |> crypto.hmac_sha256(5 |> crypto.sha256())": "argument 1 of std.crypto.sha256 is a str, got int",
+		// The timeout of a piped request is where the call has it.
+		"r = \"u\" |> sess.get()":      "'get' requires explicit bounded 'timeout_ms: int[1..300_000]'",
+		"r = \"u\" |> req.post(\"b\")": "'post' requires explicit bounded 'timeout_ms: int[1..300_000]'",
+		"r = \"u\" |> sess.get(\"v\")": "timeout_ms must be int[1..300_000], got str",
+		"r = \"u\" |> req.get(0)":      "timeout_ms range [0..0] exceeds legal contract int[1..300_000]",
 		// What is not there.
 		"x = conc.nope()":                      "module std.concurrent has no member \"nope\"",
 		"rs = conc.gather([1])":                "module std.concurrent has no member \"gather\"",
@@ -1222,6 +1227,7 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"m.set(0)\n    m.set(n)\n    held.set(zs)\n    held.with_lock((v) => zs)\n    m.with_lock((v) => 7)\n    k = m.get()",
 		"sem.acquire()\n    sem.release()",
 		"(0 |> bv.read_u8()) |> m.set()\n    s = \"k\" |> crypto.hmac_sha256(\"a\" |> crypto.sha256())\n    h = (\"a\" |> crypto.sha256()) |> crypto.sha256()",
+		"r = \"u\" |> req.get(5)\n    p = \"u\" |> req.post(\"b\", 5)\n    q = \"u\" |> sess.get(small)",
 		"m2 = 5 |> conc.Mutex()\n    m2.set(0)\n    ((v) => zs) |> held.with_lock()\n    r = \"u\" |> sess.get(timeout_ms=5)",
 		"s = \"abc\" |> crypto.sha256()\n    h = \"k\" |> crypto.hmac_sha256(\"abc\")\n    ok = 5 |> ch.send()\n    b = 1 |> bv.read_u8()\n    n |> time.sleep_ms()",
 		"k = bytes.from_str(\"ab\").len()\n    g = (ms) => time.sleep_ms(ms)\n    g(1)",

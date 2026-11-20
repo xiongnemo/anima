@@ -2053,7 +2053,8 @@ func plural(n int, noun string) string {
 // timeout whose type has a range is checked here; the kernel proves the
 // value in 1..300_000 whatever its type (ProgramInfo.TimeoutArgs).
 func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *scope) error {
-	args, span := call.Args, call.Span
+	// With the piped value first: `url |> sess.get(5)` is sess.get(url, 5).
+	args, span := c.stdArgs(call), call.Span
 	var timeoutExpr ast.Expr
 	for _, a := range args {
 		if a.Name == "timeout_ms" {

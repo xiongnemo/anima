@@ -2707,6 +2707,21 @@ def wait(t: int) -> int:
 		"unbounded parameter":    wait("    timeout = 1", "t"),
 		"computed zero":          wait("    timeout = 1 - 1", "timeout"),
 		"too long":               wait("    timeout = 300_000", "timeout + 1"),
+		// A piped request is the same call: `u |> f(t)` is f(u, t).
+		"piped, by keyword": `
+import std.requests as req
+
+def ask(t: int) -> int:
+    r = "http://127.0.0.1:1/" |> req.get(timeout_ms=t)
+    return 0
+`,
+		"piped, by position": `
+import std.requests as req
+
+def ask(t: int) -> int:
+    r = "http://127.0.0.1:1/" |> req.get(t)
+    return 0
+`,
 	}
 	for name, src := range rejected {
 		failed := strings.Join(failedVCs(verifySrc(t, src)), "\n")
