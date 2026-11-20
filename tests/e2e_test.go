@@ -458,6 +458,45 @@ def main() -> int:
 `, "Get \"http://127.0.0.1:1/a\": dial tcp 127.0.0.1:1: connect: connection refused\npost failed\npost failed\nget failed\nTrue\n")
 }
 
+// An answer that says how long it is (Content-Length) is whole once that
+// much has come, on both backends: a server that keeps the connection open
+// after it does not turn the answer into a timeout.
+func TestE2EAnswerEndsAtItsLength(t *testing.T) {
+	runOnBothBackends(t, "answer_then_open", `import std.socket as sock
+import std.requests as req
+import std.concurrent as conc
+import std.time as time
+
+def serve(ln: sock.TcpListener) -> int:
+    match ln.accept(timeout_ms=3000):
+        Ok(conn) ->
+            match conn.recv_text(4096):
+                Ok(s) -> print("asked")
+                Err(e) -> print("nothing read")
+            match conn.send_text("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"):
+                Ok(n) -> print("answered")
+                Err(e) -> print("not sent")
+            time.sleep_ms(1500)
+            conn.close()
+        Err(e) -> print("no client")
+    return 0
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            url = f"http://127.0.0.1:{ln.port()}/"
+            pool = conc.ThreadPool(1, 2)
+            _ = pool.submit(() => serve(ln))
+            match req.get(url, 500):
+                Ok(resp) -> print(resp.status, resp.body)
+                Err(e) -> print("failed")
+            pool.shutdown()
+            ln.close()
+        Err(e) -> print("no listener")
+    return 0
+`, "asked\nanswered\n200 hi\n")
+}
+
 // A connection moved into a worker must stay open when the function that
 // moved it later returns early through `?`.
 func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {

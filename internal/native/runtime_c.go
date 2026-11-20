@@ -8,6 +8,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
@@ -837,6 +838,23 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
 }
 
 // ─── std.requests (HTTP/HTTPS over POSIX + OpenSSL) ───
+// Whether raw holds a whole answer: its head, and as many bytes of body as
+// its Content-Length says. One without that header ends when the server
+// closes the connection.
+static bool http_complete(const char *raw, size_t total) {
+    const char *head_end = strstr(raw, "\r\n\r\n");
+    if (!head_end) return false;
+    size_t head_len = (size_t)(head_end - raw) + 4;
+    for (const char *line = strstr(raw, "\r\n"); line && line < head_end; line = strstr(line + 2, "\r\n")) {
+        const char *h = line + 2;
+        if (strncasecmp(h, "Content-Length:", 15) == 0) {
+            long long want = atoll(h + 15);
+            return want >= 0 && total >= head_len + (size_t)want;
+        }
+    }
+    return false;
+}
+
 // A request that fails reads as on the VM: Get "url": why.
 static AnimaVal http_err(const char *method, const char *url, const char *why, const char *more) {
     AnimaBuf b = {0};
@@ -939,6 +957,10 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
             break;
         }
         total += (size_t)n;
+        // An answer that says how long it is ends there: the server may
+        // keep the connection open after it.
+        raw[total] = '\0';
+        if (http_complete(raw, total)) break;
     }
     raw[total] = '\0';
     if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
