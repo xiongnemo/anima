@@ -1262,3 +1262,49 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		}
 	}
 }
+
+// A function that returns a value returns one on every path: where it ended
+// without a return it gave (), and its caller was told the declared type.
+func TestSemaEveryPathReturns(t *testing.T) {
+	rejected := map[string]string{
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n":                                             "function f can end without a return",
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n    elif n < 0:\n        return 2\n":          "can end without a return",
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n    else:\n        print(n)\n":                "can end without a return",
+		"def f(n: int) -> str:\n    print(n)\n":                                                                "it returns str",
+		"def f(o: Option[int]) -> int:\n    match o:\n        Some(v) -> return v\n        None -> print(1)\n": "can end without a return",
+		"def f(xs: list[int]) -> int:\n    for x in xs:\n        return x\n":                                   "can end without a return",
+		"def f(n: int) -> int:\n    while n > 0:\n        return 1\n":                                          "can end without a return",
+		"def f(n: int) -> int:\n    while False:\n        return 1\n":                                          "can end without a return",
+		"def f(r: Result[int, str]) -> Result[int, str]:\n    v = r?\n":                                        "can end without a return",
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n    return\n":                                 "return needs a value of type int",
+		"def f(n: int) -> list[int]:\n    return\n":                                                            "return needs a value of type list[int]",
+	}
+	for src, want := range rejected {
+		prog, err := parser.Parse("ret.anm", src)
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", src, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: expected an error with %q, got %v", src, want, err)
+		}
+	}
+	accepted := []string{
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n    return 2\n",
+		"def f(n: int) -> int:\n    if n > 0:\n        return 1\n    elif n < 0:\n        return 2\n    else:\n        return 3\n",
+		"def f(o: Option[int]) -> int:\n    match o:\n        Some(v) -> return v\n        None -> return 0\n",
+		"def f(o: Option[int]) -> int:\n    match o:\n        Some(v) ->\n            if v > 0:\n                return v\n            else:\n                return 0\n        None -> return 0\n",
+		"def f(n: int) -> int:\n    while True:\n        if n > 0:\n            return 1\n",
+		"def f(n: int) -> int:\n    return 1\n    print(n)\n",
+		// A function that returns nothing may end anywhere.
+		"def f(n: int):\n    if n > 0:\n        return\n    print(n)\n",
+	}
+	for _, src := range accepted {
+		prog, err := parser.Parse("ret.anm", src)
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", src, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%q: expected no error, got %v", src, err)
+		}
+	}
+}

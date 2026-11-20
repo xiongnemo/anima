@@ -186,6 +186,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_match_nested_variant_missing.anm", "no arm for Some(Some(_))"},
 		{"../tests/bugs/spark_match_str_no_default.anm", "match_exhaustive_default"},
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
+		{"../tests/bugs/sema_function_ends_without_return.anm", "can end without a return"},
+		{"../tests/bugs/sema_return_without_value.anm", "return needs a value"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},
 		{"../tests/bugs/dining_philosophers_deadlock.anm", "DEADLOCK"},
 		{"../tests/bugs/lts_livelock_progress.anm", "PROGRESS"},
