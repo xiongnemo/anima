@@ -1472,6 +1472,8 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("conc_mutex_new(%s)", iv)
 	case "std.concurrent.Semaphore":
 		return fmt.Sprintf("conc_sem_new((%s).u.i)", args[0])
+	case "std.concurrent.parallel_map":
+		return fmt.Sprintf("conc_parallel_map(%s, %s)", args[0], args[1])
 	case "std.json.encode":
 		return fmt.Sprintf("json_encode(%s)", args[0])
 	case "std.json.decode":
@@ -1500,6 +1502,8 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("fs_open((%s).u.s, %s)", args[0], mode)
 	case "std.fs.read_text":
 		return fmt.Sprintf("fs_read_text((%s).u.s)", args[0])
+	case "std.fs.write_atomic":
+		return fmt.Sprintf("fs_write_atomic((%s).u.s, (%s).u.s)", args[0], args[1])
 	case "std.cli.args":
 		tmp := g.freshTmp("cargs")
 		g.line("AnimaVal %s = v_list_new(0, NULL); for (int _ai = 0; _ai < g_argc; _ai++) v_list_push(%s, v_str(g_argv[_ai]));", tmp, tmp)
@@ -1533,6 +1537,9 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 	}
 	if timeoutArg == "" && len(args) >= 2 && (method == "get" || method == "get_async") {
 		timeoutArg = args[1]
+	}
+	if timeoutArg == "" && len(args) >= 3 && method == "post" {
+		timeoutArg = args[2]
 	}
 	if timeoutArg == "" {
 		timeoutArg = "v_int(5000)"
@@ -1578,6 +1585,15 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 	case "set":
 		g.line("pthread_mutex_lock(&(%s).u.hdl->mu); (%s).u.hdl->cell_val = %s; pthread_mutex_unlock(&(%s).u.hdl->mu);", recv, recv, args[0], recv)
 		return "v_void()"
+	case "with_lock":
+		g.line("conc_mutex_with_lock(%s, %s);", recv, args[0])
+		return "v_void()"
+	case "read_text":
+		return fmt.Sprintf("fs_file_read_text(%s)", recv)
+	case "write_text":
+		return fmt.Sprintf("fs_file_write_text(%s, (%s).u.s)", recv, args[0])
+	case "slice":
+		return fmt.Sprintf("bytes_slice(%s, (%s).u.i, (%s).u.i)", recv, args[0], args[1])
 	case "acquire":
 		g.line("hdl_sem_acquire((%s).u.hdl);", recv)
 		return "v_void()"

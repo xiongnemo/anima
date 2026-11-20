@@ -315,6 +315,149 @@ func runOnBothBackends(t *testing.T, name, src, want string) {
 	}
 }
 
+// Every standard function and handle method that sema accepts does the
+// same on both backends. The native backend had no File.read_text,
+// File.write_text, fs.write_atomic, conc.parallel_map, Mutex.with_lock or
+// ByteView.slice: each gave `()`, and a match on that ran no arm.
+func TestE2ENativeStandardLibraryParity(t *testing.T) {
+	dir := t.TempDir()
+	files := strings.ReplaceAll(`import std.fs as fs
+
+def main() -> int:
+    match fs.open("DIR/a.txt", "w"):
+        Ok(f) ->
+            match f.write_text("hello"):
+                Ok(n) -> print(n)
+                Err(e) -> print(e)
+            match f.read_text():
+                Ok(s) -> print("rest", s)
+                Err(e) -> print(e)
+            f.close()
+        Err(e) -> print(e)
+    match fs.open("DIR/a.txt", "r"):
+        Ok(f) ->
+            match f.write_text("zz"):
+                Ok(n) -> print(n)
+                Err(e) -> print(e)
+            match f.read_text():
+                Ok(s) -> print("all", s)
+                Err(e) -> print(e)
+            match f.read_text():
+                Ok(s) -> print("rest", s)
+                Err(e) -> print(e)
+            f.close()
+        Err(e) -> print(e)
+    match fs.write_atomic("DIR/b.txt", "atom"):
+        Ok(n) -> print(n)
+        Err(e) -> print(e)
+    match fs.read_text("DIR/b.txt"):
+        Ok(s) -> print(s)
+        Err(e) -> print(e)
+    match fs.write_atomic("DIR/none/b.txt", "atom"):
+        Ok(n) -> print(n)
+        Err(e) -> print("not written")
+    match fs.read_text("DIR/missing.txt"):
+        Ok(s) -> print(s)
+        Err(e) -> print(e)
+    match fs.read_text("DIR"):
+        Ok(s) -> print(s)
+        Err(e) -> print(e)
+    match fs.open("DIR/none/a.txt", "r"):
+        Ok(f) -> f.close()
+        Err(e) -> print(e)
+    match fs.open("DIR", "w"):
+        Ok(f) -> f.close()
+        Err(e) -> print(e)
+    return 0
+`, "DIR", dir)
+	want := strings.ReplaceAll(`5
+rest 
+write DIR/a.txt: bad file descriptor
+all hello
+rest 
+4
+atom
+not written
+open DIR/missing.txt: no such file or directory
+read DIR: is a directory
+open DIR/none/a.txt: no such file or directory
+open DIR: is a directory
+`, "DIR", dir)
+	runOnBothBackends(t, "native_files", files, want)
+
+	runOnBothBackends(t, "native_concurrent", `import std.concurrent as conc
+
+def main() -> int:
+    xs = [1, 2, 3]
+    print(conc.parallel_map(xs, (x) => [x, x]))
+    none: list[int] = []
+    print(conc.parallel_map(none, (x) => x))
+    ch = conc.Channel[int](cap=8)
+    oks = conc.parallel_map(xs, (x) => ch.send(x))
+    print(len(oks))
+    for i in 0..3:
+        match ch.recv():
+            Some(v) -> print("got")
+            None -> print("closed")
+    m = conc.Mutex(5)
+    m.with_lock((v) => 7)
+    print(m.get())
+    held = conc.Mutex([1])
+    held.with_lock((v) => [2, 3])
+    print(held.get())
+    return 0
+`, "[[1, 1], [2, 2], [3, 3]]\n[]\n3\ngot\ngot\ngot\n7\n[2, 3]\n")
+
+	// The ends of a slice are brought inside the view: slice(1, 0) was a Go
+	// panic on the VM.
+	runOnBothBackends(t, "native_slice", `import std.bytes as bytes
+
+def main() -> int:
+    bv = bytes.from_str("ABCDEF")
+    s = bv.slice(1, 3)
+    print(s.len(), bv.len())
+    print(bv.slice(1, 0).len(), bv.slice(4, 100).len(), bv.slice(9, 12).len(), bv.slice(0 - 3, 2).len(), bv.slice(2, 0 - 1).len())
+    t = bv.slice(2, 6).slice(1, 3)
+    print(t.len())
+    return 0
+`, "2 6\n0 2 0 2 0\n2\n")
+}
+
+// A request that gets no answer is an Err on both backends, with the same
+// text, and the timeout of a post given by position is the one that is
+// used. The native backend gave Ok with status 200 for a request that timed
+// out, after 5 s whatever the timeout.
+func TestE2ERequestWithoutAnswerParity(t *testing.T) {
+	runOnBothBackends(t, "request_no_answer", `import std.socket as sock
+import std.requests as req
+import std.time as time
+
+def main() -> int:
+    match req.get("http://127.0.0.1:1/a", timeout_ms=500):
+        Ok(resp) -> print("ok", resp.status)
+        Err(e) -> print(e)
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            url = f"http://127.0.0.1:{ln.port()}/"
+            sess = req.Session(1)
+            t0 = time.now_ms()
+            match sess.post(url, "b", 300):
+                Ok(resp) -> print("ok", resp.status)
+                Err(e) -> print("post failed")
+            match req.post(url, "b", 300):
+                Ok(resp) -> print("ok", resp.status)
+                Err(e) -> print("post failed")
+            match sess.get(url, 300):
+                Ok(resp) -> print("ok", resp.status)
+                Err(e) -> print("get failed")
+            print(time.now_ms() - t0 < 3000)
+            sess.close()
+            ln.close()
+        Err(e) -> print("no listener")
+    return 0
+`, "Get \"http://127.0.0.1:1/a\": dial tcp 127.0.0.1:1: connect: connection refused\npost failed\npost failed\nget failed\nTrue\n")
+}
+
 // A connection moved into a worker must stay open when the function that
 // moved it later returns early through `?`.
 func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {

@@ -675,13 +675,20 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 			off := int(args[0].Int)
 			return VInt(int64(binary.BigEndian.Uint32(h.Bytes[off : off+4]))), nil
 		case "slice":
-			lo := int(args[0].Int)
-			hi := int(args[1].Int)
+			// The ends are brought inside the view, as on the native
+			// backend: an empty view rather than a panic.
+			lo, hi := args[0].Int, args[1].Int
+			if hi > int64(len(h.Bytes)) {
+				hi = int64(len(h.Bytes))
+			}
+			if hi < 0 {
+				hi = 0
+			}
 			if lo < 0 {
 				lo = 0
 			}
-			if hi > len(h.Bytes) {
-				hi = len(h.Bytes)
+			if lo > hi {
+				lo = hi
 			}
 			return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleByteView, Bytes: h.Bytes[lo:hi]}}, nil
 		}
