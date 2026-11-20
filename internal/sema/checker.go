@@ -945,6 +945,13 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 				}
 			}
 		}
+		// `_` is where a handle is left to itself, a future to its pool:
+		// it takes one of any type, so what its handle holds has none.
+		if ht, ok := valTy.(*HandleType); ok && s.Name == "_" && ht.Elem != nil {
+			cp := *ht
+			cp.Elem = UnknownType{}
+			valTy = &cp
+		}
 		if err := keepsSort(sc, s.Name, valTy, s.Span); err != nil {
 			return err
 		}
@@ -1776,8 +1783,7 @@ func keepsSort(sc *scope, name string, ty Type, span ast.Span) error {
 	// A handle is read as a handle of what its variable holds, whichever
 	// path gave it, and a lambda that names the variable keeps the handle it
 	// had: the variable keeps the type of what its handle holds.
-	// `_` leaves a handle to itself: a future given to it is never read.
-	if _, ok := prev.ty.(*HandleType); ok && name != "_" && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
+	if _, ok := prev.ty.(*HandleType); ok && knownType(ty) && !(isAssignable(prev.ty, ty) && isAssignable(ty, prev.ty)) {
 		return fmt.Errorf("%s: %s is a %s and cannot be given a %s: a variable keeps the type of what its handle holds", span, name, prev.ty, ty)
 	}
 	// Nor is it of a type on one path and of none on another.
@@ -3290,6 +3296,47 @@ func isAssignable(expected, actual Type) bool {
 // have to agree on.
 func sameHeld(a, b Type) bool {
 	return isAssignable(a, b) && isAssignable(b, a) && sameElemRange(a, b) && sameElemRange(b, a)
+}
+
+// sameWhole reports whether a and b are one type, part by part: a part no
+// value has typed is the same as such a part only, where sameHeld takes it
+// for any type.
+func sameWhole(a, b Type) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	switch x := a.(type) {
+	case UnknownType:
+		y, ok := b.(UnknownType)
+		return ok && x == y
+	case *IntType:
+		y, ok := b.(*IntType)
+		return ok && x.IsBounded == y.IsBounded && (!x.IsBounded || (x.Lo == y.Lo && x.Hi == y.Hi))
+	case *ListType:
+		y, ok := b.(*ListType)
+		return ok && sameWhole(x.Elem, y.Elem)
+	case *MapType:
+		y, ok := b.(*MapType)
+		return ok && sameWhole(x.Key, y.Key) && sameWhole(x.Val, y.Val)
+	case *HandleType:
+		y, ok := b.(*HandleType)
+		return ok && x.Name == y.Name && sameWhole(x.Elem, y.Elem)
+	case *ADTType:
+		y, ok := b.(*ADTType)
+		if !ok || x.Name != y.Name || len(x.TypeArgs) != len(y.TypeArgs) {
+			return false
+		}
+		for i := range x.TypeArgs {
+			if !sameWhole(x.TypeArgs[i], y.TypeArgs[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, unknown := b.(UnknownType); unknown {
+		return false
+	}
+	return a.Kind() == b.Kind() && a.Equals(b) && b.Equals(a)
 }
 
 // sameElemRange reports whether two element types of a list or map agree on

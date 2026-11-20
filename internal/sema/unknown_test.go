@@ -203,6 +203,23 @@ func TestSemaUnknownValueIsOnlyPassedOn(t *testing.T) {
                 k: int = v
                 print(k)
             Err(e) -> print(e)`, "cannot assign unknown to k (int)"},
+		{"a future left to its pool is not read as one of a type", `    pool = conc.ThreadPool(1, 2)
+    _ = pool.submit(() => outOfRange())
+    if sent:
+        _ = pool.submit(() => inRange())
+    match _.await():
+        Some(n) -> print(10 / n)
+        None -> print("none")
+    pool.shutdown()`, "arithmetic / requires int, got int[10..10] and unknown"},
+		{"two Oks gathered", `    pool = conc.ThreadPool(2, 2)
+    f1 = pool.submit(() => Ok(1))
+    f2 = pool.submit(() => Ok(2))
+    rs = req.gather([f1, f2])
+    pool.shutdown()
+    for r in rs:
+        match r:
+            Ok(n) -> print(n > 1)
+            Err(e) -> print("err")`, ""},
 		// Futures gathered into one list give one type, ranges included.
 		{"futures of two ranges gathered", `    pool = conc.ThreadPool(2, 2)
     f1 = pool.submit(() => inRange())
