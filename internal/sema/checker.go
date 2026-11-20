@@ -744,9 +744,15 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 	defer func() { c.curReturn = nil }()
 
 	// First pass: check start & step bodies so variables bound before fork/choice are visible
+	starts := 0
 	for _, n := range wf.Nodes {
 		switch node := n.(type) {
 		case *ast.StartNode:
+			// A workflow starts in one place: the backends would run the
+			// last start and never the others.
+			if starts++; starts > 1 {
+				return fmt.Errorf("%s: workflow %s has more than one start", node.Span, wf.Name)
+			}
 			for _, st := range node.Body {
 				if err := c.checkStmt(st, sc); err != nil {
 					return err

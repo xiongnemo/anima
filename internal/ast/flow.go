@@ -31,9 +31,8 @@ func NewFlow(wf *WorkflowDecl) *Flow {
 	for _, n := range wf.Nodes {
 		switch x := n.(type) {
 		case *StartNode:
-			if f.Start == nil {
-				f.Start = x
-			}
+			// Sema refuses a second start; the backends would run the last.
+			f.Start = x
 		case *StepNode:
 			f.steps[x.Name] = x
 			first(f.stepAfter, x.After, x.Name)
