@@ -589,6 +589,7 @@ type futureCheck struct {
 	fn      string
 	tasks   []namedFuture   // futures of pool tasks that were given a name
 	awaited map[string]bool // names awaited or gathered outside a closure
+	named   ast.Expr        // the call whose future the statement gives a name
 	errs    []string
 	seen    map[string]bool
 }
@@ -612,14 +613,20 @@ func (c *futureCheck) leak(open map[ast.Span]string, when string) {
 	}
 }
 
-// exprs walks the expressions of a statement. An await or a gather that the
-// statement always runs ends the wait for the requests its name holds: one
-// in a closure, on the right of `and`, `or` or `implies`, or in an arm of a
-// match expression may not run. A `?` may return early, leaving what is
-// still open. A name in a pattern is written, so it holds nothing known.
+// exprs walks the expressions of a statement, in the order they run. An
+// await or a gather that the statement always runs ends the wait for the
+// requests its name holds: one in a closure, on the right of `and`, `or` or
+// `implies`, or in an arm of a match expression may not run. A `?` may
+// return early, leaving what is open when it is reached. A name in a pattern
+// is written, so it holds nothing known. A request is started where its
+// future is given a name (c.named): anywhere else nothing could wait for it.
 func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
-	try := false
 	maybe := map[any]bool{} // sub-expressions that may not run
+	unnamed := func(n any) {
+		if x, ok := n.(*ast.CallExpr); ok && ast.Expr(x) != c.named && futureKind(c.info, x) == "request" {
+			c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the request started here is not given a name (f = ...get_async(...)), so nothing can wait for it", x.Span, c.fn))
+		}
+	}
 	skipped := 0
 	done := func(e ast.Expr) {
 		id, ok := e.(*ast.Ident)
@@ -642,6 +649,7 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 				if maybe[n] {
 					skipped--
 				}
+				visit(reflect.ValueOf(x.Body), func(n any) bool { unnamed(n); return true }, func(any) {})
 				return false
 			case *ast.BinaryExpr:
 				if x.Op == "and" || x.Op == "or" || x.Op == "implies" {
@@ -656,9 +664,8 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 				}
 			case *ast.VarPat:
 				c.leak(st.assign(x.Name, "", nil), "before the name is given another value")
-			case *ast.TryExpr:
-				try = true
 			case *ast.CallExpr:
+				unnamed(n)
 				fe, ok := x.Callee.(*ast.FieldExpr)
 				if !ok {
 					break
@@ -681,10 +688,11 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 			if maybe[n] {
 				skipped--
 			}
+			if _, ok := n.(*ast.TryExpr); ok {
+				// What it is applied to has run; what follows has not.
+				c.leak(st.open, "where `?` may return early")
+			}
 		})
-	}
-	if try {
-		c.leak(st.open, "where `?` may return early")
 	}
 }
 
@@ -694,22 +702,23 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.LetAssignStmt:
+			c.named = s.Value
 			c.exprs(st, s.Value)
+			c.named = nil
 			from := ""
 			if id, ok := s.Value.(*ast.Ident); ok {
 				// A second name for a future holds the same request.
 				from = id.Name
 			}
 			var made *ast.Span
-			switch {
-			case !isFutureProducer(c.info, s.Value):
-			case isPoolSubmit(c.info, s.Value):
+			switch kind := futureKind(c.info, s.Value); {
+			case kind == "task":
 				if s.Name != "_" {
 					c.tasks = append(c.tasks, namedFuture{s.Name, s.Span})
 				}
-			case s.Name == "_":
+			case kind == "request" && s.Name == "_":
 				c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", s.Span, c.fn))
-			default:
+			case kind == "request":
 				made = &s.Span
 			}
 			c.leak(st.assign(s.Name, from, made), "before the name is given another value")
@@ -830,29 +839,33 @@ func visit(v reflect.Value, pre func(any) bool, post func(any)) {
 	}
 }
 
-// isFutureProducer reports whether e is a call that starts a task or a request.
-func isFutureProducer(info *sema.ProgramInfo, e ast.Expr) bool {
+// futureKind tells what the future of the call e waits for: "task" for
+// pool.submit(...), whose pool waits for it too, "request" for get_async(...),
+// which nothing else waits for, and "" when e makes no future.
+func futureKind(info *sema.ProgramInfo, e ast.Expr) string {
 	ce, ok := e.(*ast.CallExpr)
 	if !ok {
-		return false
-	}
-	if ht, ok := info.ExprTypes[e].(*sema.HandleType); ok {
-		return ht.Name == "Future"
+		return ""
 	}
 	fe, ok := ce.Callee.(*ast.FieldExpr)
-	return ok && (fe.Field == "get_async" || fe.Field == "submit")
-}
-
-// isPoolSubmit reports whether e is pool.submit(...) on a thread pool.
-func isPoolSubmit(info *sema.ProgramInfo, e ast.Expr) bool {
-	ce, ok := e.(*ast.CallExpr)
 	if !ok {
-		return false
+		return ""
 	}
-	fe, ok := ce.Callee.(*ast.FieldExpr)
-	if !ok || fe.Field != "submit" {
-		return false
+	if ht, ok := info.ExprTypes[fe.Object].(*sema.HandleType); ok {
+		switch {
+		case ht.Name == "conc.ThreadPool" && fe.Field == "submit":
+			return "task"
+		case ht.Name == "req.Session" && fe.Field == "get_async":
+			return "request"
+		}
+		return ""
 	}
-	ht, ok := info.ExprTypes[fe.Object].(*sema.HandleType)
-	return ok && ht.Name == "conc.ThreadPool"
+	// A receiver sema could not type: go by the name of the method.
+	switch fe.Field {
+	case "submit":
+		return "task"
+	case "get_async":
+		return "request"
+	}
+	return ""
 }
