@@ -584,10 +584,11 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 	}
 
 	var stack []Value
-	// Handles stored in this frame that a failing `?` closes on its early
-	// return. Sockets and files are excluded: the ownership checker rejects `?`
-	// while the function owns an open one, so any still reachable here is
-	// either borrowed or was moved to another owner (possibly another thread).
+	// Handles stored in this frame, closed when it ends in a runtime error
+	// (the program stops). A `?` that returns early closes none of them: a
+	// local may be another name for a handle of the caller (`c = ch`), or
+	// hold one that was handed on. Sockets and files are never here: their
+	// owner is proved to close them.
 	var ownedHandles []*HandleValue
 	cleanupHandles := func(except Value) {
 		for _, h := range ownedHandles {
@@ -867,12 +868,12 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 					}
 					continue
 				case "Err", "None":
-					cleanupHandles(VVoid())
+					// An early return closes nothing, as on the native
+					// backend: what this frame holds may be the caller's.
 					return v, true, locals, nil
 				}
 			}
 			if v.Kind == ValNone {
-				cleanupHandles(VVoid())
 				return v, true, locals, nil
 			}
 			push(v)

@@ -558,6 +558,43 @@ def main() -> int:
 `, "67 -1\n1094861636 1128547654 -1 17220 0\n66 2 67\n3 12 11\n0 0\n68 1\n")
 }
 
+// A `?` that returns early closes nothing, on either backend. The VM closed
+// every channel a local of the returning function held, also one that was
+// only another name for a channel of the caller: the caller's next send
+// failed and its recv gave None, where the native build went on.
+func TestE2EEarlyReturnClosesNothing(t *testing.T) {
+	runOnBothBackends(t, "try_keeps_channel", `import std.concurrent as conc
+
+def step(ch: conc.Channel[int], r: Result[int, str]) -> Result[int, str]:
+    c = ch
+    v = r?
+    return Ok(v)
+
+def pick(ch: conc.Channel[int], o: Option[int]) -> Option[int]:
+    c = ch
+    v = o?
+    return Some(v)
+
+def main() -> int:
+    ch = conc.Channel[int](cap=2)
+    match step(ch, Err("boom")):
+        Ok(v) -> print("ok", v)
+        Err(e) -> print("failed", e)
+    print("sent", ch.send(1))
+    match pick(ch, None):
+        Some(v) -> print("some", v)
+        None -> print("none")
+    print("sent", ch.send(2))
+    match ch.recv():
+        Some(v) -> print("got", v)
+        None -> print("closed")
+    match ch.recv():
+        Some(v) -> print("got", v)
+        None -> print("closed")
+    return 0
+`, "failed boom\nsent True\nnone\nsent True\ngot 1\ngot 2\n")
+}
+
 // A connection moved into a worker must stay open when the function that
 // moved it later returns early through `?`.
 func TestE2EMovedHandleSurvivesEarlyReturn(t *testing.T) {
