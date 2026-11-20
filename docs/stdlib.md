@@ -71,6 +71,15 @@ Every socket has one owner that closes it on every path; none is used after it i
 | `json.encode` | `value` |
 | `json.decode` | `text`; `json.decode[EntityType](text)` to decode into an entity |
 
+`json.encode` writes the same text on both backends:
+
+- an entity and a map are objects with their keys sorted, a list is an array;
+- a string is escaped as Go's `encoding/json` escapes it: `<`, `>`, `&` and the control characters with no short escape are `\u00XX`, a byte that is not UTF-8 is `\ufffd`;
+- a variant is the string of its text: `Some(4)` is `"Some(4)"`, `None` is `null`;
+- a value met again inside itself is `null`.
+
+`json.decode` reads these escapes back, a `\uXXXX` pair of surrogates as one character and half a pair as U+FFFD. A text with `\u0000` in a string or a key is an `Err` on both backends: a string of the native backend ends at a NUL.
+
 `json.decode[EntityType]` checks what it reads at the boundary: every `int[lo..hi]` range of the entity and its `invariant`. Without a type, what it gives is of unknown type: [language.md](language.md#values-of-unknown-type).
 
 ## `std.bytes` and `std.crypto`

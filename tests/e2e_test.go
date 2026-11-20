@@ -912,6 +912,134 @@ def main() -> int:
     return 0
 `
 
+// json.encode writes the same text on both backends: keys sorted, strings
+// escaped as Go's encoding/json escapes them, a variant as its text. The
+// native runtime wrote the fields of an entity in the order they are
+// declared, control characters as they are, and null for a variant.
+func TestE2EJsonEncodeParity(t *testing.T) {
+	runOnBothBackends(t, "json_encode", jsonEncodeSrc, "{\"age\":-5,\"name\":\"a\\\"b\\\\c\\u003cd\\u003e\\u0026e\\n\\tf\",\"ok\":true,\"tags\":[\"x\",\"\xc3\xa9\"]}\n{\"a\":1,\"b\":2}\n[\"Circle(3)\",\"Dot\"]\nnull\n\"Some(4)\"\n\"s\" 7 false []\n\"c:\\u0001\\b\\f\x7f\\u001f|\"\n\"u:\\u2028\\u2029\xe2\x82\xac\xf0\x9f\x98\x80|\"\n\"bad:\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd\\ufffd|\\ufffd\"\n{\"a\\n\":[],\"q\\\"k\\u003c\":[{\"k\":\"v\"}]}\n[\"Word(say \\\"hi\\\" \\u0026 \\u003cgo\\u003e)\",\"Blank\"]\n[\"Node(...)\"]\n[[1,2],[]] {\"n\":null}\n")
+}
+
+const jsonEncodeSrc = "import std.json as json\n" +
+	"\n" +
+	"type Shape = Circle(r: int) | Dot\n" +
+	"type T = Node(kids: list[T]) | Leaf\n" +
+	"type W = Word(s: str) | Blank\n" +
+	"\n" +
+	"entity P:\n" +
+	"    name: str\n" +
+	"    age: int\n" +
+	"    tags: list[str]\n" +
+	"    ok: bool\n" +
+	"\n" +
+	"entity In:\n" +
+	"    k: str\n" +
+	"\n" +
+	"def main() -> int:\n" +
+	"    p = P(name=\"a\\\"b\\\\c<d>&e\\n\\tf\", age=-5, tags=[\"x\", \"\xc3\xa9\"], ok=True)\n" +
+	"    print(json.encode(p))\n" +
+	"    m: map[str, int] = {\"b\": 2, \"a\": 1}\n" +
+	"    print(json.encode(m))\n" +
+	"    print(json.encode([Circle(3), Dot]))\n" +
+	"    o: Option[int] = None\n" +
+	"    print(json.encode(o))\n" +
+	"    print(json.encode(Some(4)))\n" +
+	"    print(json.encode(\"s\"), json.encode(7), json.encode(False), json.encode([]))\n" +
+	"    print(json.encode(\"c:\x01\x08\x0c\x7f\x1f|\"))\n" +
+	"    print(json.encode(\"u:\xe2\x80\xa8\xe2\x80\xa9\xe2\x82\xac\xf0\x9f\x98\x80|\"))\n" +
+	"    print(json.encode(\"bad:\xff\xe2\x80|\xc0\x80|\xed\xa0\x80|\xf4\x90\x80\x80|\xe2\"))\n" +
+	"    mm: map[str, list[In]] = {\"q\\\"k<\": [In(k=\"v\")], \"a\\n\": []}\n" +
+	"    print(json.encode(mm))\n" +
+	"    print(json.encode([Word(\"say \\\"hi\\\" & <go>\"), Blank]))\n" +
+	"    ks = [Leaf]\n" +
+	"    ks[0] = Node(ks)\n" +
+	"    print(json.encode(ks))\n" +
+	"    print(json.encode([[1, 2], []]), json.encode({\"n\": None}))\n" +
+	"    return 0\n"
+
+// What json.encode writes, json.decode reads back on both backends: the
+// native parser took the u of a \u escape for a letter. A handle and a
+// lambda have the same text on both, in print and inside an encoded variant.
+func TestE2EJsonRoundTripParity(t *testing.T) {
+	runOnBothBackends(t, "json_round_trip", jsonRoundTripSrc, "True\n\"\xc3\xa9 \xf0\x9f\x98\x80 \xef\xbf\xbdx \xef\xbf\xbd \xef\xbf\xbdA / \\b\\f \xe2\x82\xac\"\n<handle:9> Some(<handle:9>) <handle:4> <fn>\n\"Some(\\u003chandle:9\\u003e)\" [null]\n")
+}
+
+const jsonRoundTripSrc = "import std.json as json\n" +
+	"import std.bytes as bytes\n" +
+	"import std.concurrent as conc\n" +
+	"\n" +
+	"entity Msg:\n" +
+	"    text: str\n" +
+	"\n" +
+	"def show(t: str):\n" +
+	"    match json.decode[Msg](t):\n" +
+	"        Ok(back) ->\n" +
+	"            print(json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"\n" +
+	"def main() -> int:\n" +
+	"    m = Msg(text=\"a&b<c>d\\n\\te \\\"q\\\" \\\\ \xc3\xa9\")\n" +
+	"    s = json.encode(m)\n" +
+	"    match json.decode[Msg](s):\n" +
+	"        Ok(back) ->\n" +
+	"            print(back.text == m.text)\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    show(\"{\\\"text\\\":\\\"\\\\u00e9 \\\\ud83d\\\\ude00 \\\\ud800x \\\\udc00 \\\\ud83d\\\\u0041 \\\\/ \\\\b\\\\f \\\\u20AC\\\"}\")\n" +
+	"    bv = bytes.from_str(\"A\")\n" +
+	"    ch = conc.Channel[int](cap=1)\n" +
+	"    g = () => 1\n" +
+	"    print(bv, Some(bv), ch, g)\n" +
+	"    print(json.encode(Some(bv)), json.encode([bv]))\n" +
+	"    return 0\n"
+
+// A JSON text with \u0000 in a string or a key is an Err on both backends:
+// a native string ends at a NUL, so it read "ab\u0000cd" as "ab" where the
+// VM read five characters. An escaped backslash before u0000 is no NUL, and
+// a NUL in a member that a later one with the same key replaces is one.
+func TestE2EJsonDecodeNULParity(t *testing.T) {
+	runOnBothBackends(t, "json_decode_nul", jsonDecodeNULSrc, "err\nerr\nok 8 \"a\\\\u0000b\"\nerr\nerr\nok 15 \"q\\\\\\\\u0000 \\\"u0000\"\n")
+}
+
+const jsonDecodeNULSrc = "import std.json as json\n" +
+	"\n" +
+	"entity Msg:\n" +
+	"    text: str\n" +
+	"\n" +
+	"def main() -> int:\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"ab\\\\u0000cd\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"te\\\\u0000xt\\\":\\\"q\\\", \\\"text\\\":\\\"z\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"a\\\\\\\\u0000b\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"z\\\", \\\"more\\\":[{\\\"k\\\":\\\"\\\\u0000\\\"}]}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"a\\\\u0000\\\", \\\"text\\\":\\\"z\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    match json.decode[Msg](\"{\\\"text\\\":\\\"q\\\\\\\\\\\\\\\\u0000 \\\\\\\"u0000\\\"}\"):\n" +
+	"        Ok(back) ->\n" +
+	"            print(\"ok\", len(back.text), json.encode(back.text))\n" +
+	"        Err(e) ->\n" +
+	"            print(\"err\")\n" +
+	"    return 0\n"
+
 // A lambda in a fork branch is a function of its own. The native build wrote
 // it inside the function of the branch and did not compile.
 func TestE2EForkBranchLambdaParity(t *testing.T) {
