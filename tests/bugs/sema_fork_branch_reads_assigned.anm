@@ -1,0 +1,24 @@
+# The branches of a fork run at the same time. The VM gives each branch a
+# copy of the variables, so `right` reads a = 0 and divides by zero; the
+# native backend runs the branches on the variables themselves and printed
+# 11 in most runs. The kernel ran `left` and then `right` and saw a = 1.
+workflow W(n: int[0..100]) -> int:
+    verify: sound
+
+    start -> split:
+        a = 0
+        b = 0
+
+    fork split:
+        branch left:
+            a = 1
+        branch right:
+            b = 10 / a
+    join both
+
+    step fin after both -> done:
+        return a + b
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0

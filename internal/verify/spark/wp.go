@@ -770,18 +770,26 @@ func (v *verifier) walkWorkflow(flow *ast.Flow, cur string, env *symEnv, scope s
 			return
 		}
 		if fk := flow.Fork(cur); fk != nil {
-			for _, br := range fk.Branches {
-				for _, op := range br.Ops {
-					if op.Kind == ast.BranchStmt && op.Stmt != nil {
-						v.execStmt(op.Stmt, env, scope)
-					}
-				}
-			}
+			v.execFork(fk, env, scope)
 			cur, at = flow.AfterFork(), fk.Span
 			continue
 		}
 		jn := flow.Join(cur)
 		cur, at = flow.AfterJoin(jn), jn.Span
+	}
+}
+
+// execFork runs the statements of the branches of a fork one branch after
+// the other. Sema keeps a branch from naming a variable another one assigns
+// and from writing anything in place (checkForkBranches), so every order
+// in which the branches run gives what this one does.
+func (v *verifier) execFork(fk *ast.ForkNode, env *symEnv, scope string) {
+	for _, br := range fk.Branches {
+		for _, op := range br.Ops {
+			if op.Kind == ast.BranchStmt && op.Stmt != nil {
+				v.execStmt(op.Stmt, env, scope)
+			}
+		}
 	}
 }
 
