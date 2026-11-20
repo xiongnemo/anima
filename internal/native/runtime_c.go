@@ -159,6 +159,29 @@ static char **g_argv = NULL;
 static AnimaVal v_void(void) { AnimaVal v = {0}; v.kind = VAL_VOID; return v; }
 static AnimaVal v_none(void) { AnimaVal v = {0}; v.kind = VAL_NONE; return v; }
 static AnimaVal v_int(int64_t x) { AnimaVal v = {0}; v.kind = VAL_INT; v.u.i = x; return v; }
+
+// Division as on the VM. A divisor of 0 stops the program with the VM's
+// message instead of a signal: no verified program divides by zero, this is
+// for the one the kernel got wrong. INT64_MIN / -1 wraps, as in Go.
+static AnimaVal v_div(AnimaVal l, AnimaVal r, int line) {
+    if (r.u.i == 0) {
+        fflush(stdout);
+        fprintf(stderr, "runtime error: runtime division by zero at line %d\n", line);
+        exit(1);
+    }
+    if (r.u.i == -1) return v_int((int64_t)(0 - (uint64_t)l.u.i));
+    return v_int(l.u.i / r.u.i);
+}
+
+static AnimaVal v_mod(AnimaVal l, AnimaVal r, int line) {
+    if (r.u.i == 0) {
+        fflush(stdout);
+        fprintf(stderr, "runtime error: runtime modulo by zero at line %d\n", line);
+        exit(1);
+    }
+    if (r.u.i == -1) return v_int(0);
+    return v_int(l.u.i % r.u.i);
+}
 static AnimaVal v_bool(bool b) { AnimaVal v = {0}; v.kind = VAL_BOOL; v.u.b = b; return v; }
 static AnimaVal v_str(const char *s) {
     AnimaVal v = {0}; v.kind = VAL_STR;
