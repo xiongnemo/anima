@@ -1102,6 +1102,20 @@ func (vm *VM) RunWorkflow(wfName string, args []Value) (Value, error) {
 			}
 			break
 		}
+
+		// A merge is where the branches of a choice come together: it
+		// does nothing itself.
+		if mg, ok := wfc.Merges[cur]; ok {
+			if mg.Target != "" {
+				cur = mg.Target
+				continue
+			}
+			if nextSt := findStepAfter(wfc, cur); nextSt != nil {
+				cur = nextSt.Name
+				continue
+			}
+			break
+		}
 		break
 	}
 	return VVoid(), nil

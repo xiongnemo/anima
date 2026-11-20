@@ -774,8 +774,12 @@ func (v *verifier) walkWorkflow(flow *ast.Flow, cur string, env *symEnv, scope s
 			cur, at = flow.AfterFork(), fk.Span
 			continue
 		}
-		jn := flow.Join(cur)
-		cur, at = flow.AfterJoin(jn), jn.Span
+		if jn := flow.Join(cur); jn != nil {
+			cur, at = flow.AfterJoin(jn), jn.Span
+			continue
+		}
+		mn := flow.Merge(cur)
+		cur, at = flow.AfterMerge(mn), mn.Span
 	}
 }
 
