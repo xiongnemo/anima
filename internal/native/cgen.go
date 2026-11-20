@@ -1061,9 +1061,9 @@ func (g *cgen) emitExprInline(expr ast.Expr) string {
 		case "*":
 			return fmt.Sprintf("v_int((%s).u.i * (%s).u.i)", l, r)
 		case "/":
-			return fmt.Sprintf("v_int((%s).u.i / (%s).u.i)", l, r)
+			return fmt.Sprintf("v_div(%s, %s, %d)", l, r, e.Span.Line)
 		case "%":
-			return fmt.Sprintf("v_int((%s).u.i %% (%s).u.i)", l, r)
+			return fmt.Sprintf("v_mod(%s, %s, %d)", l, r, e.Span.Line)
 		case "==":
 			return fmt.Sprintf("v_bool(v_eq(%s, %s))", l, r)
 		case "!=":

@@ -26,7 +26,7 @@
    - Exports ISO `.pnml` XML.
 4. **OCaml-Style Dual Execution Backends + 8 Formally Verified Standard Libraries**:
    - **Bytecode VM (`anima run`)**: Compiles to 32-bit fixed-width `.anbc` bytecode with deterministic workflow/fiber scheduling, CLI `--animate`, and `--replay` counterexample reproduction.
-   - **Native ELF Backend (`anima build`)**: Transpiles verified models to standalone C11 (`pthreads` + POSIX sockets + OpenSSL 3.0) and invokes `gcc -O2` to emit native executables. Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`).
+   - **Native ELF Backend (`anima build`)**: Transpiles verified models to standalone C11 (`pthreads` + POSIX sockets + OpenSSL 3.0) and invokes `gcc -O2` to emit native executables. Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`). A division or modulo by zero, which no verified program reaches, stops a native program with the VM's message and exit code 1 rather than a signal.
    - **Embedded Dark Material Studio (`anima studio`)**: Single-binary Orchis-dark web studio projecting UML Class, Statechart, Petri Token Animation, and Counterexample Sequence diagrams.
 
 ## Quick Start
