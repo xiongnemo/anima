@@ -469,84 +469,114 @@ func checkAsyncResourceFutures(info *sema.ProgramInfo, fn *ast.FuncDecl) []strin
 	return c.errs
 }
 
-// pendingFutures is what a path knows of the requests it has started: those
-// not awaited yet, by where they were made, and the requests each name may
-// hold. Two names may hold one request, and awaiting either ends its wait.
+// pendingFutures is what is known, where a statement is reached, of the
+// requests started before it. open are those some path has not awaited yet.
+// holders[r] are the names that hold r on every path on which r is still
+// open: awaiting one of them ends the wait for r. A name holds one future on
+// any one path, so an await never ends the wait for a request on a path
+// where the name holds another.
 type pendingFutures struct {
-	open map[ast.Span]string // request -> the name it was made under
-	held map[string][]ast.Span
+	open    map[ast.Span]string // request -> the name it was made under
+	holders map[ast.Span]map[string]bool
 }
 
 func newPending() *pendingFutures {
-	return &pendingFutures{open: map[ast.Span]string{}, held: map[string][]ast.Span{}}
+	return &pendingFutures{open: map[ast.Span]string{}, holders: map[ast.Span]map[string]bool{}}
 }
 
 func (p *pendingFutures) clone() *pendingFutures {
 	cp := newPending()
-	for k, v := range p.open {
-		cp.open[k] = v
-	}
-	for k, v := range p.held {
-		cp.held[k] = append([]ast.Span(nil), v...)
+	for sp, name := range p.open {
+		cp.open[sp] = name
+		cp.holders[sp] = map[string]bool{}
+		for h := range p.holders[sp] {
+			cp.holders[sp][h] = true
+		}
 	}
 	return cp
 }
 
-// become makes p what may be so on any of the paths.
-func (p *pendingFutures) become(paths []*pendingFutures) {
-	joined := newPending()
+// join is what is known where the paths meet: a request is open when a path
+// left it open, and held by the names that hold it on each of those paths.
+func join(paths []*pendingFutures) *pendingFutures {
+	out := newPending()
 	for _, q := range paths {
 		for sp, name := range q.open {
-			joined.open[sp] = name
-		}
-		for name, spans := range q.held {
-			for _, sp := range spans {
-				if !hasSpan(joined.held[name], sp) {
-					joined.held[name] = append(joined.held[name], sp)
+			if _, seen := out.open[sp]; !seen {
+				out.open[sp] = name
+				out.holders[sp] = map[string]bool{}
+				for h := range q.holders[sp] {
+					out.holders[sp][h] = true
+				}
+				continue
+			}
+			for h := range out.holders[sp] {
+				if !q.holders[sp][h] {
+					delete(out.holders[sp], h)
 				}
 			}
 		}
 	}
-	*p = *joined
+	return out
 }
 
-// await ends the wait for every request name may hold.
+func (p *pendingFutures) same(q *pendingFutures) bool {
+	if len(p.open) != len(q.open) {
+		return false
+	}
+	for sp := range p.open {
+		if _, ok := q.open[sp]; !ok || len(p.holders[sp]) != len(q.holders[sp]) {
+			return false
+		}
+		for h := range p.holders[sp] {
+			if !q.holders[sp][h] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// await ends the wait for the requests name holds.
 func (p *pendingFutures) await(name string) {
-	for _, sp := range p.held[name] {
-		delete(p.open, sp)
+	for sp := range p.open {
+		if p.holders[sp][name] {
+			delete(p.open, sp)
+			delete(p.holders, sp)
+		}
 	}
 }
 
-// drop is called when name is given another value. It returns the requests
-// that no name holds any more and were not awaited.
-func (p *pendingFutures) drop(name string) map[ast.Span]string {
+// assign gives name another value: what from holds when from is a name, a
+// new request when made is set, anything else otherwise. It returns the
+// requests that are still open and that no name holds any more.
+func (p *pendingFutures) assign(name, from string, made *ast.Span) map[ast.Span]string {
 	lost := map[ast.Span]string{}
-	old := p.held[name]
-	delete(p.held, name)
-	for _, sp := range old {
-		made, open := p.open[sp]
-		if !open {
-			continue
+	if name != "_" {
+		for sp := range p.open {
+			keeps := from != "" && from != name && p.holders[sp][from]
+			if from == name {
+				keeps = p.holders[sp][name]
+			}
+			if keeps {
+				p.holders[sp][name] = true
+				continue
+			}
+			if p.holders[sp][name] {
+				delete(p.holders[sp], name)
+				if len(p.holders[sp]) == 0 {
+					lost[sp] = p.open[sp]
+					delete(p.open, sp)
+					delete(p.holders, sp)
+				}
+			}
 		}
-		reachable := false
-		for _, spans := range p.held {
-			reachable = reachable || hasSpan(spans, sp)
-		}
-		if !reachable {
-			lost[sp] = made
-			delete(p.open, sp)
-		}
+	}
+	if made != nil {
+		p.open[*made] = name
+		p.holders[*made] = map[string]bool{name: true}
 	}
 	return lost
-}
-
-func hasSpan(spans []ast.Span, sp ast.Span) bool {
-	for _, have := range spans {
-		if have == sp {
-			return true
-		}
-	}
-	return false
 }
 
 type namedFuture struct {
@@ -582,23 +612,50 @@ func (c *futureCheck) leak(open map[ast.Span]string, when string) {
 	}
 }
 
-// exprs walks the expressions of a statement: an await or a gather outside a
-// closure ends the wait for the futures it names. A `?` may return early,
-// leaving what is still pending.
+// exprs walks the expressions of a statement. An await or a gather that the
+// statement always runs ends the wait for the requests its name holds: one
+// in a closure, on the right of `and`, `or` or `implies`, or in an arm of a
+// match expression may not run. A `?` may return early, leaving what is
+// still open. A name in a pattern is written, so it holds nothing known.
 func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 	try := false
+	maybe := map[any]bool{} // sub-expressions that may not run
+	skipped := 0
 	done := func(e ast.Expr) {
-		if id, ok := e.(*ast.Ident); ok {
-			c.awaited[id.Name] = true
+		id, ok := e.(*ast.Ident)
+		if !ok {
+			return
+		}
+		c.awaited[id.Name] = true
+		if skipped == 0 {
 			st.await(id.Name)
 		}
 	}
 	for _, n := range nodes {
 		visit(reflect.ValueOf(n), func(n any) bool {
+			if maybe[n] {
+				skipped++
+			}
 			switch x := n.(type) {
 			case *ast.LambdaExpr:
 				// A closure runs later, if at all.
+				if maybe[n] {
+					skipped--
+				}
 				return false
+			case *ast.BinaryExpr:
+				if x.Op == "and" || x.Op == "or" || x.Op == "implies" {
+					maybe[x.Right] = true
+				}
+			case *ast.MatchExpr:
+				for _, arm := range x.Arms {
+					if arm.Guard != nil {
+						maybe[arm.Guard] = true
+					}
+					maybe[arm.Value] = true
+				}
+			case *ast.VarPat:
+				c.leak(st.assign(x.Name, "", nil), "before the name is given another value")
 			case *ast.TryExpr:
 				try = true
 			case *ast.CallExpr:
@@ -620,7 +677,11 @@ func (c *futureCheck) exprs(st *pendingFutures, nodes ...any) {
 				}
 			}
 			return true
-		}, func(any) {})
+		}, func(n any) {
+			if maybe[n] {
+				skipped--
+			}
+		})
 	}
 	if try {
 		c.leak(st.open, "where `?` may return early")
@@ -634,24 +695,12 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 		switch s := stmt.(type) {
 		case *ast.LetAssignStmt:
 			c.exprs(st, s.Value)
-			// A second name for a future holds the same requests.
-			var same []ast.Span
+			from := ""
 			if id, ok := s.Value.(*ast.Ident); ok {
-				same = append(same, st.held[id.Name]...)
+				// A second name for a future holds the same request.
+				from = id.Name
 			}
-			if s.Name != "_" {
-				lost := st.drop(s.Name)
-				for sp := range lost {
-					if hasSpan(same, sp) {
-						delete(lost, sp)
-						st.open[sp] = s.Name
-					}
-				}
-				c.leak(lost, "before the name is given another value")
-				if len(same) > 0 {
-					st.held[s.Name] = same
-				}
-			}
+			var made *ast.Span
 			switch {
 			case !isFutureProducer(c.info, s.Value):
 			case isPoolSubmit(c.info, s.Value):
@@ -661,9 +710,9 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 			case s.Name == "_":
 				c.report(fmt.Sprintf("%s: Petri Future token leak in %s: the future made here is discarded and nothing waits for it", s.Span, c.fn))
 			default:
-				st.open[s.Span] = s.Name
-				st.held[s.Name] = []ast.Span{s.Span}
+				made = &s.Span
 			}
+			c.leak(st.assign(s.Name, from, made), "before the name is given another value")
 
 		case *ast.IfStmt:
 			// A condition is only reached when those before it were false.
@@ -682,13 +731,17 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 			if len(live) == 0 {
 				return true
 			}
-			st.become(live)
+			*st = *join(live)
 
 		case *ast.MatchStmt:
 			c.exprs(st, s.Subject)
 			var live []*pendingFutures
 			for _, arm := range s.Arms {
+				// The arm writes the names of its pattern, then runs its
+				// guard; a later arm may be reached whether the guard ran
+				// or not.
 				b := st.clone()
+				c.exprs(b, arm.Pattern)
 				if arm.Guard != nil {
 					c.exprs(b, arm.Guard)
 				}
@@ -696,18 +749,21 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 					live = append(live, b)
 				}
 			}
-			if len(live) == 0 && len(s.Arms) > 0 {
+			if len(s.Arms) == 0 {
+				continue
+			}
+			if len(live) == 0 {
 				return true
 			}
-			st.become(live)
+			*st = *join(live)
 
 		case *ast.WhileStmt:
 			c.exprs(st, s.Cond)
-			c.loop(s.Body, st)
+			c.loop("", s.Body, st)
 
 		case *ast.ForStmt:
 			c.exprs(st, s.Iterable)
-			c.loop(s.Body, st)
+			c.loop(s.Var, s.Body, st)
 
 		case *ast.ReturnStmt:
 			c.exprs(st, s.Value)
@@ -723,17 +779,30 @@ func (c *futureCheck) block(stmts []ast.Stmt, st *pendingFutures) bool {
 
 // loop walks a loop body, which may run any number of times: a request it
 // starts is awaited in the same pass, and an await in it does not count for
-// a request started before the loop.
-func (c *futureCheck) loop(body []ast.Stmt, st *pendingFutures) {
-	b := st.clone()
-	c.block(body, b)
-	made := map[ast.Span]string{}
-	for sp, name := range b.open {
-		if _, before := st.open[sp]; !before {
-			made[sp] = name
+// a request started before the loop. What the body does to the names is
+// followed until another pass changes nothing.
+func (c *futureCheck) loop(loopVar string, body []ast.Stmt, st *pendingFutures) {
+	for {
+		b := st.clone()
+		if loopVar != "" {
+			c.leak(b.assign(loopVar, "", nil), "before the name is given another value")
 		}
+		c.block(body, b)
+		made := map[ast.Span]string{}
+		for sp, name := range b.open {
+			if _, before := st.open[sp]; !before {
+				made[sp] = name
+				delete(b.open, sp)
+				delete(b.holders, sp)
+			}
+		}
+		c.leak(made, "in the pass of the loop that makes it")
+		after := join([]*pendingFutures{st, b})
+		if after.same(st) {
+			return
+		}
+		*st = *after
 	}
-	c.leak(made, "in the pass of the loop that makes it")
 }
 
 // visit walks every AST node reachable from v, whatever statement or
