@@ -974,3 +974,117 @@ def f(n: int, p: int[1..9], xs: list[int], rs: list[int[1..9]], o: Option[int], 
 		t.Errorf("recorded assignments per variable: %v", got)
 	}
 }
+
+// A lambda, a built-in function and a pipeline stage are called with what
+// they take: both backends read arguments by position without counting
+// them, and an argument that is not given is None when the program runs.
+func TestSemaCallsAreGivenWhatTheyTake(t *testing.T) {
+	const head = "import std.fp as fp\n\ntype Shape = Circle(r: int[1..9]) | Dot\n\nentity Box:\n    n: int[1..9]\n\ndef main() -> int:\n    xs: list[int[1..9]] = [1, 2, 3]\n    ss: list[str] = [\"a\"]\n    o: Option[int] = Some(1)\n    r: Result[int, str] = Ok(1)\n    w: Option[int[1..9]] = Some(1)\n    ol: Option[list[int]] = None\n    on: Option[Option[int[1..9]]] = None\n    ow: Option[list[int[1..9]]] = None\n    rl: Result[int, list[int[1..9]]] = Err(xs)\n"
+	rejected := map[string]string{
+		"g = (a, b) => b\n    n = g(1)":          "this function takes 2 arguments, got 1",
+		"g = (a) => a\n    n = g(1, 2)":          "this function takes 1 argument, got 2",
+		"g = () => 5\n    n = g(1)":              "this function takes 0 arguments, got 1",
+		"g = (a) => a\n    n = g(a=1)":           "a lambda takes its arguments by position",
+		"ys = xs |> map((a, b) => b)":            "the function of map takes 1 parameter, got one with 2",
+		"ys = xs |> filter(() => True)":          "the function of filter takes 1 parameter, got one with 0",
+		"n = xs |> fold(5, (a, x, z) => z)":      "the function of fold takes 2 parameters, got one with 3",
+		"n = xs |> fold(5, (a) => a)":            "the function of fold takes 2 parameters, got one with 1",
+		"ys = xs |> flat_map((a, b) => [b])":     "the function of flat_map takes 1 parameter",
+		"b = xs |> any((a, b) => a > 1)":         "the function of any takes 1 parameter",
+		"g = (a, b) => b\n    ys = xs |> map(g)": "the function of map takes 1 parameter, got one with 2",
+		"ys = xs |> take()":                      "take takes 1 argument after the value it works on, got 0",
+		"ys = xs |> drop()":                      "drop takes 1 argument",
+		"ys = xs |> map()":                       "map takes 1 argument",
+		"b = xs |> any()":                        "any takes 1 argument",
+		"n = xs |> sum(1)":                       "sum takes 0 arguments",
+		"ys = xs |> filter_ok(1)":                "filter_ok takes 0 arguments",
+		"ys = xs |> filter(x => x > 1, 2)":       "filter takes 1 argument",
+		"n = xs |> fold((a, x) => a)":            "fold takes 2 arguments",
+		"n = o |> unwrap_or()":                   "unwrap_or takes 1 argument",
+		"ys = 5 |> take(1)":                      "take takes a list, got",
+		"n = xs |> unwrap_or(0)":                 "unwrap_or takes an Option or a Result, got",
+		"ys = o |> map(x => x)":                  "map takes a list, got",
+		"ys = xs |> and_then(x => x)":            "and_then takes an Option or a Result, got",
+		"ys = xs |> take(\"a\")":                 "take takes an int, got str",
+		"n = ss |> sum()":                        "sum takes a list of int, got",
+		"ys = xs |> map(5)":                      "map takes a function, got",
+		"ys = xs |> fp.take()":                   "take takes 1 argument",
+		"ys = fp.take(xs)":                       "take takes 1 argument",
+		"ys = fp.take()":                         "take takes the value it works on as its first argument",
+		"ys = fp.map(xs, (a, b) => b)":           "the function of map takes 1 parameter",
+		"ys = fp.nope(xs)":                       "module std.fp has no member",
+		"n = abs()":                              "abs() takes 1 argument, got 0",
+		"n = min(1)":                             "min() takes 2 arguments, got 1",
+		"n = max(1, 2, 3)":                       "max() takes 2 arguments, got 3",
+		"s = str()":                              "str() takes 1 argument, got 0",
+		"assert()":                               "assert() takes 1 argument, got 0",
+		"assert(5)":                              "argument 1 of assert() is a bool, got",
+		"assert(1 == 2, 3)":                      "argument 2 of assert() is a str, got",
+		"n = abs(\"a\")":                         "argument 1 of abs() is an int, got str",
+		"n = min(\"a\", \"b\")":                  "argument 1 of min() is an int, got str",
+		"n = len(5)":                             "len() takes a list, a map or a string, got",
+		"oz: Option[int] = Some(0)\n    a = on |> unwrap_or(oz)":     "takes a default that is Option[int[1..9]], got Option[int]",
+		"zs: list[int] = [0]\n    ys = zs |> fold(xs, (a, x) => zs)": "the function of fold gives list[int[1..9]] as fold starts with, got list[int]",
+		"n = xs |> fold(0, (a, x) => \"s\")":                         "the function of fold gives int[0..0] as fold starts with, got str",
+		"ys = ol |> unwrap_or(xs)":                                   "unwrap_or on Option[list[int]] takes a default that is list[int], got list[int[1..9]]",
+		"ys = fp.unwrap_or(ol, xs)":                                  "takes a default that is list[int], got list[int[1..9]]",
+		"g = (v) => [v]\n    d = g(0)\n    ys = ow |> unwrap_or(d)":  "takes a default that is list[int[1..9]], got list[unknown]",
+		"zs: list[int] = [0]\n    q = rl |> and_then(v => Err(zs))":  "gives a Result with the error of Result[int, list[int[1..9]]], got",
+		"g = (v) => v\n    n = 1 |> g(2)":                            "this function takes 1 argument, got 2",
+		"g = (a, b) => b\n    n = 1 |> g":                            "this function takes 2 arguments, got 1",
+		"n = \"a\" |> abs()":                                         "argument 1 of abs() is an int, got str",
+		"n = 1 |> min()":                                             "min() takes 2 arguments, got 1",
+		"p = 1 |> Some()":                                            "Some makes a value and is not a pipeline stage",
+		"p = 1 |> Some":                                              "Some makes a value and is not a pipeline stage",
+		"p = 1 |> Ok()":                                              "Ok makes a value and is not a pipeline stage",
+		"b = 1 |> Box()":                                             "Box makes a value and is not a pipeline stage",
+		"c = 1 |> Circle()":                                          "Circle makes a value and is not a pipeline stage",
+		"n = o |> unwrap_or(\"x\")":                                  "unwrap_or on Option[int] takes a default that is int, got str",
+		"p = o |> and_then(v => 1)":                                  "the function of and_then gives an Option, got",
+		"p = o |> and_then(v => Ok(v))":                              "the function of and_then gives an Option, got",
+		"p = fp.and_then(o, v => 1)":                                 "the function of and_then gives an Option, got",
+		"p = r |> and_then(v => Some(v))":                            "the function of and_then gives a Result, got",
+		"p = r |> and_then(v => Err(5))":                             "gives a Result with the error of Result[int, str], got",
+	}
+	for body, want := range rejected {
+		prog, err := parser.Parse("call.anm", head+"    "+body+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", body, err)
+		}
+		if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: expected %q, got %v", body, want, err)
+		}
+	}
+	accepted := []string{
+		"g = (a, b) => b\n    n = g(1, 2)",
+		"k = () => 7\n    n = k()",
+		"g = (v) => v > 1\n    ys = xs |> filter(g)\n    b = xs |> any(g)",
+		"ys = xs |> map(x => x) |> take(2) |> drop(1)",
+		"n = xs |> fold(0, (a, x) => x)",
+		"ys = xs |> fold(xs, (a, x) => a)\n    s = ss |> fold(\"\", (a, w) => w)\n    b = xs |> fold(True, (a, x) => x > 1)",
+		"n = xs |> sum()",
+		"n = o |> unwrap_or(0)\n    p = o |> and_then(v => Some(v))",
+		"f = xs |> find(x => x > 1)\n    b = xs |> all(x => x > 0)",
+		"ys = xs |> fp.map(x => x)\n    n = xs |> fp.sum()",
+		"ys = fp.map(xs, x => x)\n    n = fp.fold(xs, 0, (a, x) => x)\n    m = fp.sum(xs)\n    zs = fp.take(xs, 2)",
+		"n = abs(0 - 3) + min(1, 2) + max(1, 2) + len(xs) + len(\"ab\")\n    s = str(5)",
+		"assert(1 == 1)\n    assert(1 == 1, \"ok\")",
+		"g = (v) => v\n    h = (a, b) => b\n    n = 1 |> g()\n    m = 1 |> g\n    k = 1 |> h(2)",
+		"n = (0 - 3 |> abs()) + (2 |> min(1)) + (\"ab\" |> len()) + (xs |> len)\n    s = 5 |> str()\n    7 |> print()",
+		"p = o |> and_then(v => Some(v))\n    q = o |> and_then(v => None)",
+		"u = r |> and_then(v => Ok(\"s\"))\n    e = r |> and_then(v => Err(\"bad\"))\n    n = r |> unwrap_or(0)",
+		"k: int[0..9] = w |> unwrap_or(0)\n    j: int[0..9] = fp.unwrap_or(w, 0)",
+		"a = on |> unwrap_or(Some(1))\n    b = on |> unwrap_or(None)\n    c = on |> unwrap_or(w)",
+		"ys = ow |> unwrap_or(xs)\n    zs = ow |> unwrap_or([])\n    ws = ow |> unwrap_or([1, 2])\n    q = rl |> and_then(v => Err(xs))",
+		"oo: Option[Option[int]] = None\n    om: Option[map[str, int]] = None\n    a = oo |> unwrap_or(None)\n    b = oo |> unwrap_or(Some(1))\n    c = om |> unwrap_or({})",
+	}
+	for _, body := range accepted {
+		prog, err := parser.Parse("call.anm", head+"    "+body+"\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%q: parse error: %v", body, err)
+		}
+		if _, err := Check(prog); err != nil {
+			t.Errorf("%q: expected no error, got %v", body, err)
+		}
+	}
+}

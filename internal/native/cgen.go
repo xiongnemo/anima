@@ -1273,6 +1273,9 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 	if fe, ok := e.Callee.(*ast.FieldExpr); ok {
 		if objID, ok := fe.Object.(*ast.Ident); ok {
 			if modPath, isImp := g.info.Imports[objID.Name]; isImp {
+				if modPath == "std.fp" {
+					return g.emitPrelude(fe.Field, e)
+				}
 				return g.emitStdlibCall(modPath, fe.Field, e)
 			}
 			if _, isPort := g.info.Ports[objID.Name]; isPort {
@@ -1333,12 +1336,20 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 			return fmt.Sprintf("__fn_%s(%s)", id.Name, strings.Join(items, ", "))
 		}
 
-		// Prelude / fp combinators
+		return g.emitPrelude(id.Name, e)
+	}
+	return "v_void()"
+}
+
+// emitPrelude emits a call of the built-in function or pipeline stage name,
+// however the program names it: `take(...)` in a pipeline or `fp.take(...)`.
+func (g *cgen) emitPrelude(name string, e *ast.CallExpr) string {
+	{
 		var args []string
 		for _, a := range e.Args {
 			args = append(args, g.emitExpr(a.Value))
 		}
-		switch id.Name {
+		switch name {
 		case "len":
 			return fmt.Sprintf("v_int(anima_len(%s))", args[0])
 		case "print":
@@ -1362,7 +1373,12 @@ func (g *cgen) emitCallExpr(e *ast.CallExpr) string {
 		case "max":
 			return fmt.Sprintf("(((%s).u.i > (%s).u.i) ? (%s) : (%s))", args[0], args[1], args[0], args[1])
 		case "assert":
-			g.line("if (!v_truthy(%s)) { fprintf(stderr, \"assertion failed\\n\"); exit(1); }", args[0])
+			// As on the VM: the message, when one is given, is what is reported.
+			if len(args) >= 2 {
+				g.line("if (!v_truthy(%s)) { fflush(stdout); fprintf(stderr, \"runtime error: %%s\\n\", v_to_cstr(%s)); exit(1); }", args[0], args[1])
+			} else {
+				g.line("if (!v_truthy(%s)) { fflush(stdout); fprintf(stderr, \"runtime error: assertion failed\\n\"); exit(1); }", args[0])
+			}
 			return "v_void()"
 		case "Some":
 			return fmt.Sprintf("v_some(%s)", args[0])

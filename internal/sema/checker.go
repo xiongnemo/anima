@@ -1738,31 +1738,35 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			if len(e.Args) != 1 {
 				return nil, fmt.Errorf("%s: len() takes 1 argument", e.Span)
 			}
-			if _, err := c.checkExpr(e.Args[0].Value, sc); err != nil {
+			at, err := c.checkExpr(e.Args[0].Value, sc)
+			if err != nil {
 				return nil, err
 			}
+			switch at.Kind() {
+			case KindList, KindMap, KindStr, KindUnknown:
+			default:
+				return nil, fmt.Errorf("%s: len() takes a list, a map or a string, got %s", e.Args[0].Value.GetSpan(), at)
+			}
 			return NewIntRange(0, DefaultMaxInt, ""), nil
-		case "print", "assert":
+		case "print":
 			for _, a := range e.Args {
 				if _, err := c.checkExpr(a.Value, sc); err != nil {
 					return nil, err
 				}
 			}
 			return VoidType{}, nil
+		case "assert":
+			// assert(condition) or assert(condition, message).
+			if len(e.Args) == 2 {
+				return VoidType{}, c.checkBuiltinArgs(e, sc, KindBool, KindStr)
+			}
+			return VoidType{}, c.checkBuiltinArgs(e, sc, KindBool)
 		case "str", "to_str":
-			for _, a := range e.Args {
-				if _, err := c.checkExpr(a.Value, sc); err != nil {
-					return nil, err
-				}
-			}
-			return StrType{}, nil
-		case "abs", "min", "max":
-			for _, a := range e.Args {
-				if _, err := c.checkExpr(a.Value, sc); err != nil {
-					return nil, err
-				}
-			}
-			return NewUnboundedInt(), nil
+			return StrType{}, c.checkBuiltinArgs(e, sc, KindUnknown)
+		case "abs":
+			return NewUnboundedInt(), c.checkBuiltinArgs(e, sc, KindInt)
+		case "min", "max":
+			return NewUnboundedInt(), c.checkBuiltinArgs(e, sc, KindInt, KindInt)
 		case "Some":
 			if len(e.Args) != 1 {
 				return nil, fmt.Errorf("%s: Some() expects 1 argument", e.Span)
@@ -1867,6 +1871,16 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		if err != nil {
 			return nil, err
 		}
+		// `fp.take(xs, 2)` is `xs |> take(2)`.
+		if mt, ok := objTy.(*ModuleType); ok && mt.Path == "std.fp" {
+			if _, ok := stageShapes[fe.Field]; ok {
+				if len(e.Args) == 0 || e.Args[0].Name != "" || e.Args[0].Mut || e.Args[0].Own {
+					return nil, fmt.Errorf("%s: %s takes the value it works on as its first argument", e.Span, fe.Field)
+				}
+				stage := &ast.CallExpr{Span: e.Span, Callee: e.Callee, Args: e.Args[1:]}
+				return c.checkPipeExpr(&ast.PipeExpr{Span: e.Span, Left: e.Args[0].Value, Right: stage}, sc)
+			}
+		}
 		// Enforce std.requests explicit bounded timeout_ms contract!
 		if mt, ok := objTy.(*ModuleType); ok && mt.Path == "std.requests" {
 			if fe.Field == "get" || fe.Field == "post" {
@@ -1942,6 +1956,19 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		return nil, err
 	}
 	if ft, ok := calleeTy.(*FuncType); ok {
+		// A lambda takes its arguments by position, and one it is not given
+		// is None when it runs. The members of a module or a handle are
+		// checked where they are looked up.
+		if _, member := e.Callee.(*ast.FieldExpr); !member {
+			for _, a := range e.Args {
+				if a.Name != "" {
+					return nil, fmt.Errorf("%s: a lambda takes its arguments by position", a.Span)
+				}
+			}
+			if len(e.Args) != len(ft.Params) {
+				return nil, fmt.Errorf("%s: this function takes %s, got %d", e.Span, plural(len(ft.Params), "argument"), len(e.Args))
+			}
+		}
 		return ft.Return, nil
 	}
 	// A value of a type that is known and is not a function cannot be
@@ -1951,6 +1978,50 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 		return nil, fmt.Errorf("%s: a value of type %s cannot be called", e.Span, calleeTy)
 	}
 	return UnknownType{}, nil
+}
+
+// checkBuiltinArgs checks the arguments of a built-in function, which both
+// backends take by position and read without looking at how many there are:
+// one argument of each kind in kinds, KindUnknown standing for any value.
+func (c *checker) checkBuiltinArgs(e *ast.CallExpr, sc *scope, kinds ...TypeKind) error {
+	name := e.Callee.(*ast.Ident).Name
+	for i, a := range e.Args {
+		at, err := c.checkExpr(a.Value, sc)
+		if err != nil {
+			return err
+		}
+		if a.Name != "" {
+			return fmt.Errorf("%s: %s() takes its arguments by position", a.Span, name)
+		}
+		if i < len(kinds) && kinds[i] != KindUnknown && at.Kind() != kinds[i] && at.Kind() != KindUnknown {
+			return fmt.Errorf("%s: argument %d of %s() is %s, got %s", a.Value.GetSpan(), i+1, name, kindNoun(kinds[i]), at)
+		}
+	}
+	if len(e.Args) != len(kinds) {
+		return fmt.Errorf("%s: %s() takes %s, got %d", e.Span, name, plural(len(kinds), "argument"), len(e.Args))
+	}
+	return nil
+}
+
+func kindNoun(k TypeKind) string {
+	switch k {
+	case KindInt:
+		return "an int"
+	case KindBool:
+		return "a bool"
+	case KindStr:
+		return "a str"
+	case KindList:
+		return "a list"
+	}
+	return "a value"
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // checkRequestsTimeout requires a blocking call to name its timeout. A
@@ -2055,6 +2126,122 @@ func (c *checker) checkFuncArgs(name string, fi *FuncInfo, args []ast.CallArg, s
 	return c.checkCallAliasing(args, true)
 }
 
+// eitherOf is the type of a value that is one of type a or one of type b,
+// and whether there is such a type. An int has the range of both. A list, a
+// map or a variant is a reference whose element ranges are part of its
+// type, so the two types are the same one; with one of them unknown, the
+// value has no type the kernel could read a range from.
+func eitherOf(a, b Type) (Type, bool) {
+	if keepsType(a) || keepsType(b) {
+		if !knownType(a) || !knownType(b) {
+			return UnknownType{}, true
+		}
+		return a, isAssignable(a, b) && isAssignable(b, a)
+	}
+	if !knownType(a) || !knownType(b) {
+		if knownType(a) {
+			return widenInt(a), true
+		}
+		return widenInt(b), true
+	}
+	if a.Kind() != b.Kind() || !sameSort(a, b) {
+		return nil, false
+	}
+	return unifyTypes(a, b), true
+}
+
+// stageShape is what a pipeline stage takes after the piped value.
+type stageShape struct {
+	args    int  // how many arguments
+	fn      int  // which of them is the function, -1 for none
+	arity   int  // how many parameters that function has
+	variant bool // the piped value is an Option or a Result, not a list
+}
+
+var stageShapes = map[string]stageShape{
+	"filter":    {args: 1, fn: 0, arity: 1},
+	"map":       {args: 1, fn: 0, arity: 1},
+	"flat_map":  {args: 1, fn: 0, arity: 1},
+	"any":       {args: 1, fn: 0, arity: 1},
+	"all":       {args: 1, fn: 0, arity: 1},
+	"find":      {args: 1, fn: 0, arity: 1},
+	"fold":      {args: 2, fn: 1, arity: 2},
+	"sum":       {args: 0, fn: -1},
+	"take":      {args: 1, fn: -1},
+	"drop":      {args: 1, fn: -1},
+	"filter_ok": {args: 0, fn: -1},
+	"unwrap_or": {args: 1, fn: -1, variant: true},
+	"and_then":  {args: 1, fn: 0, arity: 1, variant: true},
+}
+
+func (c *checker) checkStage(name string, shape stageShape, lhsTy Type, args []ast.CallArg, e *ast.PipeExpr, sc *scope) error {
+	if len(args) != shape.args {
+		return fmt.Errorf("%s: %s takes %s after the value it works on, got %d", e.Right.GetSpan(), name, plural(shape.args, "argument"), len(args))
+	}
+	for _, a := range args {
+		if a.Name != "" || a.Mut || a.Own {
+			return fmt.Errorf("%s: %s takes its arguments by position", a.Span, name)
+		}
+	}
+	switch lt := lhsTy.(type) {
+	case UnknownType:
+	case *ListType:
+		if shape.variant {
+			return fmt.Errorf("%s: %s takes an Option or a Result, got %s", e.Left.GetSpan(), name, lhsTy)
+		}
+		if name == "sum" && lt.Elem.Kind() != KindInt && lt.Elem.Kind() != KindUnknown {
+			return fmt.Errorf("%s: sum takes a list of int, got %s", e.Left.GetSpan(), lhsTy)
+		}
+	case *ADTType:
+		if !shape.variant || (lt.Name != "Option" && lt.Name != "Result") {
+			return fmt.Errorf("%s: %s takes %s, got %s", e.Left.GetSpan(), name, stageInput(shape), lhsTy)
+		}
+	default:
+		return fmt.Errorf("%s: %s takes %s, got %s", e.Left.GetSpan(), name, stageInput(shape), lhsTy)
+	}
+	if name == "take" || name == "drop" {
+		at, err := c.checkExpr(args[0].Value, sc)
+		if err != nil {
+			return err
+		}
+		if at.Kind() != KindInt && at.Kind() != KindUnknown {
+			return fmt.Errorf("%s: %s takes an int, got %s", args[0].Value.GetSpan(), name, at)
+		}
+	}
+	if shape.fn < 0 {
+		return nil
+	}
+	// The function is a lambda or a variable holding one.
+	fn := args[shape.fn].Value
+	params := -1
+	if lam, ok := fn.(*ast.LambdaExpr); ok {
+		params = len(lam.Params)
+	} else {
+		at, err := c.checkExpr(fn, sc)
+		if err != nil {
+			return err
+		}
+		switch at.Kind() {
+		case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
+			return fmt.Errorf("%s: %s takes a function, got %s", fn.GetSpan(), name, at)
+		}
+		if ft, ok := at.(*FuncType); ok {
+			params = len(ft.Params)
+		}
+	}
+	if params >= 0 && params != shape.arity {
+		return fmt.Errorf("%s: the function of %s takes %s, got one with %d", fn.GetSpan(), name, plural(shape.arity, "parameter"), params)
+	}
+	return nil
+}
+
+func stageInput(shape stageShape) string {
+	if shape.variant {
+		return "an Option or a Result"
+	}
+	return "a list"
+}
+
 func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	lhsTy, err := c.checkExpr(e.Left, sc)
 	if err != nil {
@@ -2095,24 +2282,12 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 		stage = ""
 	}
 
-	// The function a stage takes is a lambda or a variable holding one.
-	fnArg := -1
-	switch stage {
-	case "filter", "map", "flat_map", "any", "all", "find", "and_then":
-		fnArg = 0
-	case "fold":
-		fnArg = 1
-	}
-	if fnArg >= 0 && fnArg < len(callArgs) {
-		if _, isLam := callArgs[fnArg].Value.(*ast.LambdaExpr); !isLam {
-			at, err := c.checkExpr(callArgs[fnArg].Value, sc)
-			if err != nil {
-				return nil, err
-			}
-			switch at.Kind() {
-			case KindInt, KindBool, KindStr, KindList, KindMap, KindADT, KindEntity:
-				return nil, fmt.Errorf("%s: %s takes a function, got %s", callArgs[fnArg].Value.GetSpan(), fnName, at)
-			}
+	// A stage is given what it takes: both backends read its arguments by
+	// position without looking at how many there are, and call its function
+	// with one element (fold: the sum so far and one element).
+	if shape, ok := stageShapes[stage]; ok {
+		if err := c.checkStage(fnName, shape, lhsTy, callArgs, e, sc); err != nil {
+			return nil, err
 		}
 	}
 
@@ -2191,7 +2366,13 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 					Params: []FuncParamInfo{{Name: lam.Params[0], Type: accTy}, {Name: lam.Params[1], Type: elemTy}},
 					Return: rty,
 				}
-				return unifyTypes(accTy, rty), nil
+				// The start when the list is empty, else what the
+				// function gave last.
+				ty, ok := eitherOf(accTy, rty)
+				if !ok {
+					return nil, fmt.Errorf("%s: the function of fold gives %s as fold starts with, got %s", lam.Body.GetSpan(), accTy, rty)
+				}
+				return ty, nil
 			}
 			return accTy, nil
 		}
@@ -2237,18 +2418,66 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			if err != nil {
 				return nil, err
 			}
-			return dt, nil
+			// What the variant holds, or the default.
+			var held Type = UnknownType{}
+			if adt, ok := lhsTy.(*ADTType); ok && len(adt.TypeArgs) > 0 {
+				held = adt.TypeArgs[0]
+			}
+			ty, ok := eitherOf(held, dt)
+			// The default is given to what the variant holds as a value is
+			// to a variable of that type: a literal or a constructor call is
+			// a new value that takes the type, and the kernel proves it.
+			if keepsType(held) && c.assignable(held, dt, callArgs[0].Value) {
+				ty, ok = held, true
+			}
+			if !ok {
+				return nil, fmt.Errorf("%s: unwrap_or on %s takes a default that is %s, got %s", callArgs[0].Value.GetSpan(), lhsTy, held, dt)
+			}
+			return ty, nil
 		}
 	case "and_then":
 		if len(callArgs) == 1 {
 			if lam, ok := callArgs[0].Value.(*ast.LambdaExpr); ok && len(lam.Params) == 1 {
 				var okTy Type = UnknownType{}
-				if adt, ok := lhsTy.(*ADTType); ok && len(adt.TypeArgs) >= 1 {
+				adt, known := lhsTy.(*ADTType)
+				if known && len(adt.TypeArgs) >= 1 {
 					okTy = adt.TypeArgs[0]
 				}
 				lsc := newScope(sc)
 				lsc.defineLocal(lam.Params[0], varBinding{ty: okTy, span: lam.Span})
-				return c.checkExpr(lam.Body, lsc)
+				bty, err := c.checkExpr(lam.Body, lsc)
+				if err != nil {
+					return nil, err
+				}
+				// A None or an Err is passed on as it is, so the function
+				// gives the same kind of variant.
+				if bty.Kind() == KindUnknown {
+					return bty, nil
+				}
+				bdt, ok := bty.(*ADTType)
+				if !ok || (bdt.Name != "Option" && bdt.Name != "Result") || (known && bdt.Name != adt.Name) {
+					want := "an Option or a Result"
+					if known {
+						want = "an " + adt.Name
+						if adt.Name == "Result" {
+							want = "a Result"
+						}
+					}
+					return nil, fmt.Errorf("%s: the function of and_then gives %s, got %s", lam.Body.GetSpan(), want, bty)
+				}
+				if bdt.Name == "Result" && len(bdt.TypeArgs) == 2 {
+					// The error is the one it is given or the one it gives.
+					var le Type = UnknownType{}
+					if known && len(adt.TypeArgs) == 2 {
+						le = adt.TypeArgs[1]
+					}
+					et, ok := eitherOf(le, bdt.TypeArgs[1])
+					if !ok {
+						return nil, fmt.Errorf("%s: the function of and_then gives a Result with the error of %s, got %s", lam.Body.GetSpan(), lhsTy, bty)
+					}
+					return c.instantiateADT("Result", []Type{bdt.TypeArgs[0], et}), nil
+				}
+				return bty, nil
 			}
 		}
 	}
@@ -2268,6 +2497,23 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			return nil, err
 		}
 		return fi.Type.Return, nil
+	}
+	// `x |> g(a)` and `x |> g` call g(x, a) on both backends, whatever g
+	// is: a lambda in a variable, a built-in function, a constructor.
+	if _, isStage := stageShapes[fnName]; direct && !isStage {
+		// The kernel proves the fields of an entity or a variant where it
+		// is made, and that is a call.
+		_, isEntity := c.info.Entities[fnName]
+		_, isVariant := c.info.Variants[fnName]
+		if isEntity || isVariant || fnName == "Some" || fnName == "Ok" || fnName == "Err" {
+			return nil, fmt.Errorf("%s: %s makes a value and is not a pipeline stage: write %s(...)", e.Right.GetSpan(), fnName, fnName)
+		}
+		call := &ast.CallExpr{Span: e.Span, Callee: &ast.Ident{Span: e.Right.GetSpan(), Name: fnName}}
+		if rhs, ok := e.Right.(*ast.CallExpr); ok {
+			call.Callee, call.TypeArgs = rhs.Callee, rhs.TypeArgs
+		}
+		call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+		return c.checkExpr(call, sc)
 	}
 	if _, err := c.checkExpr(e.Right, sc); err != nil {
 		return nil, err
@@ -2496,7 +2742,9 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 	case "std.concurrent":
 		return &FuncType{Return: UnknownType{}}, nil
 	case "std.fp":
-		return &FuncType{Return: UnknownType{}}, nil
+		if _, ok := stageShapes[member]; ok {
+			return &FuncType{Return: UnknownType{}}, nil
+		}
 	}
 	return nil, fmt.Errorf("%s: module %s has no member %q", span, modPath, member)
 }
