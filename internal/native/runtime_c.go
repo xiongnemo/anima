@@ -948,7 +948,8 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     char *raw = malloc(cap);
     bool timed_out = false;
     for (;;) {
-        if (total + 2048 > cap) { cap *= 2; raw = realloc(raw, cap); }
+        // Room for one more read and the terminator after it.
+        if (total + 2048 + 1 > cap) { cap *= 2; raw = realloc(raw, cap); }
         ssize_t n = ssl ? SSL_read(ssl, raw + total, 2048) : recv(fd, raw + total, 2048, 0);
         if (n < 0 && !ssl && errno == EINTR) continue;
         if (n <= 0) {
