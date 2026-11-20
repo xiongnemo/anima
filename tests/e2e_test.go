@@ -806,6 +806,71 @@ func TestE2ENamedLambdasParity(t *testing.T) {
 	runOnBothBackends(t, "named_lambdas", namedLambdasSrc, "True False [2, 3] True Some(2) True [7]\n7 [1, 2, 3] 25 3\n")
 }
 
+// A lambda copies every variable its body names, wherever in the body the
+// name is: in a pipe, an f-string, a map literal or a lambda inside it. The
+// native build left those out or wrote the inner lambda inside the outer
+// one, and did not compile.
+func TestE2ELambdaCapturesParity(t *testing.T) {
+	runOnBothBackends(t, "lambda_captures", lambdaCapturesSrc, "[2, 2] [1-3, 2-3] [{\"k\": 3}, {\"k\": 3}]\n[[4, 5], [6]] [[], [3]]\n[2, 2] [2, 2] 3-2 0\nTrue [2, 6]\n")
+}
+
+const lambdaCapturesSrc = `import std.concurrent as conc
+
+def main() -> int:
+    n: int[0..9] = 3
+    xs: list[int[0..9]] = [1, 2]
+    xss: list[list[int[0..9]]] = [[1, 2], [3]]
+    o: Option[int[0..9]] = Some(2)
+    a = xs |> map((q) => ([q, n] |> len()))
+    b = xs |> map((q) => f"{q}-{n}")
+    c = xs |> map((q) => {"k": n})
+    print(a, b, c)
+    e = xss |> map((ys) => (ys |> map((q) => q + n)))
+    f = xss |> map((ys) => (ys |> filter((q) => q > len(ys))))
+    print(e, f)
+    u = xs |> map((q) => (o |> unwrap_or(n)))
+    rs = conc.parallel_map(xs, (x) => ([x, n] |> len()))
+    pool = conc.ThreadPool(1, 2)
+    fut = pool.submit(() => f"{n}-{len(xs)}")
+    r = fut.await()
+    pool.shutdown()
+    m = conc.Mutex(5)
+    m.with_lock((v) => (xs |> filter((q) => q > n) |> len()))
+    print(u, rs, r, m.get())
+    k: int[0..9] = 1
+    g = (v) => v > k
+    k = 5
+    zs: list[int[0..9]] = [1, 2, 6]
+    print(g(2), zs |> filter(g))
+    return 0
+`
+
+// A lambda held in a workflow variable is called in the step that makes it
+// and in a later one. The native build gave () for the call.
+func TestE2EWorkflowLambdaParity(t *testing.T) {
+	runOnBothBackends(t, "workflow_lambda", workflowLambdaSrc, "True True\n[3] [2, 1, 0] True [3]\n1\n")
+}
+
+const workflowLambdaSrc = `workflow W(n: int[0..9]) -> int:
+    verify: sound
+
+    start -> b:
+        k: int[0..9] = 2
+        xs: list[int[0..9]] = [1, 2, 3]
+        g = (v) => v > k
+        print(g(n), g(5))
+
+    step b -> done:
+        ys = xs |> filter((q) => q > k)
+        zs = xs |> map((q) => (xs |> filter((r) => r > q) |> len()))
+        print(ys, zs, g(n), xs |> filter(g))
+        return len(ys)
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0
+`
+
 // What `None`, `[]`, `{}` and `Ok(1)` leave open is said by the declared type
 // of the variable, and both backends run the program alike.
 func TestE2EDeclaredOpenTypesParity(t *testing.T) {
