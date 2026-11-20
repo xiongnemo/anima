@@ -1473,10 +1473,21 @@ def main() -> int:
 // Standard output is the exception, as it is in Go: a program whose output
 // nobody reads any more is ended by SIGPIPE on both backends.
 func TestE2EPrintToAClosedPipe(t *testing.T) {
+	printToAClosedPipe(t, false)
+	printToAClosedPipe(t, true)
+}
+
+func printToAClosedPipe(t *testing.T, long bool) {
+	t.Helper()
 	tmp := t.TempDir()
 	animaBin := buildCLI(t, tmp)
 	path := filepath.Join(tmp, "prints.anm")
+	// Many short lines, then one longer than the buffer of standard output.
 	src := "def main() -> int:\n    for i in 0..200000:\n        print(\"line\")\n    return 0\n"
+	if long {
+		src = "def grow(n: int[0..20]) -> str:\n    s = \"x\"\n    for i in 0..n:\n        s = s + s\n    return s\n\n" +
+			"def main() -> int:\n    print(grow(17))\n    return 0\n"
+	}
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1495,7 +1506,7 @@ func TestE2EPrintToAClosedPipe(t *testing.T) {
 		w.Close()
 		ee, ok := err.(*exec.ExitError)
 		if !ok || !strings.Contains(ee.String(), "broken pipe") {
-			t.Errorf("%s: want the program ended by SIGPIPE, got %v", name, err)
+			t.Errorf("%s (one long line: %t): want the program ended by SIGPIPE, got %v", name, long, err)
 		}
 	}
 }
