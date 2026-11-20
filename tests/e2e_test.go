@@ -871,6 +871,37 @@ def main() -> int:
     return 0
 `
 
+// A lambda in a fork branch is a function of its own. The native build wrote
+// it inside the function of the branch and did not compile.
+func TestE2EForkBranchLambdaParity(t *testing.T) {
+	runOnBothBackends(t, "fork_branch_lambda", forkBranchLambdaSrc, "1 3\n1\n")
+}
+
+const forkBranchLambdaSrc = `workflow W(n: int[0..9]) -> int:
+    verify: sound
+
+    start -> split:
+        k: int[0..9] = 2
+        xs: list[int[0..9]] = [1, 2, 3]
+        a = 0
+        b = 0
+
+    fork split:
+        branch left:
+            a = xs |> filter((q) => q > k) |> len()
+        branch right:
+            b = xs |> map((q) => (xs |> filter((r) => r > q) |> len())) |> len()
+    join both
+
+    step fin after both -> done:
+        print(a, b)
+        return a
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0
+`
+
 // What `None`, `[]`, `{}` and `Ok(1)` leave open is said by the declared type
 // of the variable, and both backends run the program alike.
 func TestE2EDeclaredOpenTypesParity(t *testing.T) {

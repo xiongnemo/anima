@@ -16,6 +16,7 @@ func EmitC(info *sema.ProgramInfo) (string, error) {
 	cg := &cgen{
 		info:        info,
 		liftedFns:   &strings.Builder{},
+		lambdaFns:   &strings.Builder{},
 		fwdDecls:    &strings.Builder{},
 		bodyOut:     &strings.Builder{},
 		localVars:   map[string]bool{},
@@ -28,7 +29,9 @@ func EmitC(info *sema.ProgramInfo) (string, error) {
 	final.WriteString(runtimeHeader)
 	final.WriteString("\n// === Forward Declarations ===\n")
 	final.WriteString(cg.fwdDecls.String())
-	final.WriteString("\n// === Lifted Closures & Entity Schema Validators ===\n")
+	final.WriteString("\n// === Lifted Closures ===\n")
+	final.WriteString(cg.lambdaFns.String())
+	final.WriteString("\n// === Entity Schema Validators & Fork Branches ===\n")
 	final.WriteString(cg.liftedFns.String())
 	final.WriteString("\n// === Functions & Workflows ===\n")
 	final.WriteString(cg.bodyOut.String())
@@ -74,9 +77,13 @@ func BuildNative(info *sema.ProgramInfo, outBinary string, emitCPath string) err
 }
 
 type cgen struct {
-	info        *sema.ProgramInfo
-	fwdDecls    *strings.Builder
-	liftedFns   *strings.Builder
+	info      *sema.ProgramInfo
+	fwdDecls  *strings.Builder
+	liftedFns *strings.Builder
+	// lambdaFns holds the functions of lambdas, apart from liftedFns: a
+	// fork branch or an entity validator that has a lambda in it is being
+	// written there when the lambda is.
+	lambdaFns   *strings.Builder
 	bodyOut     *strings.Builder
 	cur         *strings.Builder
 	indent      int
@@ -1220,7 +1227,7 @@ func (g *cgen) emitLambda(lam *ast.LambdaExpr) string {
 	g.line("return %s;", bodyC)
 	g.indent--
 	g.line("}")
-	g.liftedFns.WriteString(fn.String())
+	g.lambdaFns.WriteString(fn.String())
 
 	g.cur = prevCur
 	g.localVars = prevVars
