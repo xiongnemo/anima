@@ -1,0 +1,29 @@
+import std.concurrent as conc
+
+# The workflow runs close, then use, then fin: the pool is shut down when
+# use submits to it. The ownership checker read the steps down the page,
+# use before close, and passed it: the VM then panicked and the native
+# program never returned.
+def work(x: int[0..100]) -> int:
+    return x + 1
+
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> close:
+        pool = conc.ThreadPool(1, 2)
+        r = 0
+
+    step use -> fin:
+        f = pool.submit(() => work(1))
+        r = f.await()
+
+    step close -> use:
+        pool.shutdown()
+
+    step fin -> done:
+        return r
+
+def main() -> int:
+    print(run_workflow W(0))
+    return 0

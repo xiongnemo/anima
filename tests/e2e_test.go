@@ -152,6 +152,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/own_pool_submit_after_shutdown.anm", `invalid call pool.submit() while conc.ThreadPool is in state "Shutdown"`},
 		{"../tests/bugs/own_pool_shut_down_by_borrower.anm", "is borrowed"},
 		{"../tests/bugs/own_pool_shut_down_on_one_path.anm", "every path must leave it in the same state"},
+		{"../tests/bugs/own_workflow_step_uses_pool_after_shutdown.anm", "invalid call pool.submit() while conc.ThreadPool is in state \"Shutdown\""},
+		{"../tests/bugs/own_workflow_path_leaves_pool_running.anm", "resource handle leak: conc.ThreadPool \"pool\""},
 		{"../tests/bugs/own_pool_left_running_in_match.anm", "resource handle leak"},
 		{"../tests/bugs/sema_channel_send_out_of_range.anm", "is int[1..9], got int[0..0]"},
 		{"../tests/bugs/sema_mutex_holds_its_type.anm", "div_nonzero"},
@@ -1621,5 +1623,81 @@ def main() -> int:
     run_workflow V(0)
     run_workflow V(5)
     print("end")
+    return 0
+`
+
+// Two paths of a workflow that each use a pool and shut it down: the
+// ownership checker read the steps down the page and refused the second
+// as a use after the first's shutdown.
+func TestE2EWorkflowPathsEachShutDownParity(t *testing.T) {
+	runOnBothBackends(t, "workflow_pool_paths", workflowPoolPathsSrc, "2 1\n")
+}
+
+const workflowPoolPathsSrc = `import std.concurrent as conc
+
+def work(x: int[0..100]) -> int:
+    return x + 1
+
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+        pool = conc.ThreadPool(1, 2)
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> done:
+        pool.shutdown()
+        return 1
+    step no -> done:
+        f = pool.submit(() => work(1))
+        r = f.await()
+        pool.shutdown()
+        return r
+
+def main() -> int:
+    print(run_workflow W(0), run_workflow W(5))
+    return 0
+`
+
+// The step that shuts the pool down is written first and runs last, after
+// the paths that use the pool have come together.
+func TestE2EWorkflowShutsDownAfterMergeParity(t *testing.T) {
+	runOnBothBackends(t, "workflow_pool_merge", workflowPoolMergeSrc, "7 3\n")
+}
+
+const workflowPoolMergeSrc = `import std.concurrent as conc
+
+def work(x: int[0..100]) -> int:
+    return x + 1
+
+workflow V(n: int) -> int:
+    verify: sound
+
+    start -> a:
+        ok = n > 0
+        r = 0
+        pool = conc.ThreadPool(1, 2)
+
+    choice after a:
+        when ok -> yes
+        when not ok -> no
+
+    step close -> done:
+        pool.shutdown()
+        return r
+    step yes -> m:
+        f = pool.submit(() => work(6))
+        r = f.await()
+    step no -> m:
+        r = 3
+
+    merge m after yes, no -> close
+
+def main() -> int:
+    print(run_workflow V(5), run_workflow V(0))
     return 0
 `
