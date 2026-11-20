@@ -132,7 +132,11 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_requires_in_condition.anm", "call_half_requires_1"},
 		{"../tests/bugs/spark_mut_call_not_alone.anm", "mut_call_alone"},
 		{"../tests/bugs/spark_aliasing.anm", "anti-aliasing"},
-		{"../tests/bugs/sema_fork_element_write_race.anm", "concurrent write race"},
+		{"../tests/bugs/sema_fork_element_write_race.anm", "writes m in place"},
+		{"../tests/bugs/sema_fork_branch_reads_assigned.anm", "which branch \"left\" assigns"},
+		{"../tests/bugs/sema_fork_branch_returns.anm", "return in branch"},
+		{"../tests/bugs/sema_fork_branch_writes_field.anm", "writes acc in place"},
+		{"../tests/bugs/sema_fork_branches_write_one_entity.anm", "in place"},
 		{"../tests/bugs/spark_list_equal_to_itself.anm", "div_nonzero"},
 		{"../tests/bugs/spark_bool_equality_stale.anm", "div_nonzero"},
 		{"../tests/bugs/sema_compare_unlike.anm", "they are never equal"},
@@ -1514,3 +1518,46 @@ func printToAClosedPipe(t *testing.T, long bool) {
 		}
 	}
 }
+
+// Branches of a fork that only assign variables of their own give the same
+// on both backends: what each assigned is there after the join, a variable
+// first bound in a branch included, and what they only read is unchanged.
+func TestE2EForkBranchesAssignTheirOwnParity(t *testing.T) {
+	runOnBothBackends(t, "fork_own_writes", forkOwnWritesSrc, "5 [5, 6] 4 [7, 5] 14 8\n0\n")
+}
+
+const forkOwnWritesSrc = `entity Acc:
+    bal: int
+
+def more(a: Acc, by: int[0..100]) -> int:
+    if a.bal < 1000 and a.bal > 0 - 1000:
+        return a.bal + by
+    return 0
+
+workflow W(n: int[0..100]) -> int:
+    verify: sound
+
+    start -> split:
+        acc = Acc(bal=5)
+        xs = [5, 6]
+        a = 0
+        late = 1
+
+    fork split:
+        branch left:
+            a = n + 1
+            late = more(acc, n)
+        branch right:
+            fresh = [n + 4, xs[0]]
+        branch third:
+            seen = n * 2 + len("abcdefgh")
+    join both
+
+    step fin after both -> done:
+        print(acc.bal, xs, a, fresh, seen, late)
+        return 0
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0
+`

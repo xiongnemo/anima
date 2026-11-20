@@ -759,7 +759,6 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 				}
 			}
 		case *ast.ForkNode:
-			branchWrites := map[string]string{}
 			for _, br := range node.Branches {
 				brSc := newScope(sc)
 				for _, op := range br.Ops {
@@ -777,32 +776,18 @@ func (c *checker) checkWorkflow(wf *ast.WorkflowDecl) error {
 						if err := c.checkStmt(op.Stmt, brSc); err != nil {
 							return err
 						}
+						// What a branch binds is a variable of the workflow
+						// after the join.
 						if la, ok := op.Stmt.(*ast.LetAssignStmt); ok {
-							if prevBr, dup := branchWrites[la.Name]; dup && prevBr != br.Name {
-								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, la.Name, prevBr, br.Name)
-							}
-							branchWrites[la.Name] = br.Name
 							if b, exists := brSc.vars[la.Name]; exists {
 								sc.defineLocal(la.Name, b)
 							}
 						}
-						// An element write or an in-place update changes the
-						// variable it reaches, like an assignment to it.
-						var written ast.Expr
-						switch st := op.Stmt.(type) {
-						case *ast.IndexAssignStmt:
-							written = st.List
-						case *ast.CompoundAssignStmt:
-							written = st.Target
-						}
-						if path, ok := elementOwnerPath(written); written != nil && ok {
-							if prevBr, dup := branchWrites[path]; dup && prevBr != br.Name {
-								return fmt.Errorf("%s: concurrent write race on variable %q in fork branches %q and %q", op.Span, path, prevBr, br.Name)
-							}
-							branchWrites[path] = br.Name
-						}
 					}
 				}
+			}
+			if err := checkForkBranches(node); err != nil {
+				return err
 			}
 		case *ast.ChoiceNode:
 			for _, br := range node.Branches {

@@ -1,0 +1,21 @@
+# A return in a branch of a fork does not end the workflow: the VM went on
+# to the join and gave 10 / 2, the native backend did not build.
+workflow W(n: int[0..100]) -> int:
+    verify: sound
+
+    start -> split:
+        a = 0
+
+    fork split:
+        branch left:
+            return 7
+        branch right:
+            a = 2
+    join both
+
+    step fin after both -> done:
+        return 10 / a
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0

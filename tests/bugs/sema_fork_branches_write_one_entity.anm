@@ -1,0 +1,29 @@
+import std.time as time
+
+# x and acc are one entity, written by both branches: which write is the
+# last depends on the run. The kernel took the one written last. A branch
+# writes nothing in place now.
+entity Acc:
+    bal: int
+
+workflow W(n: int[0..100]) -> int:
+    verify: sound
+
+    start -> split:
+        acc = Acc(bal=5)
+        x = acc
+
+    fork split:
+        branch left:
+            time.sleep_ms(100)
+            x.bal = 1
+        branch right:
+            acc.bal = 2
+    join both
+
+    step fin after both -> done:
+        return 10 / (acc.bal - 1)
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0

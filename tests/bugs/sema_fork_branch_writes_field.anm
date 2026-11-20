@@ -1,0 +1,30 @@
+import std.time as time
+
+# x and acc are one entity. `right` sets its bal to 0 while `left` sleeps,
+# and `left` then divides by it. The kernel ran `left` first, then `right`.
+# A branch writes nothing in place now.
+entity Acc:
+    bal: int
+
+workflow W(n: int[0..100]) -> int:
+    verify: sound
+
+    start -> split:
+        acc = Acc(bal=5)
+        x = acc
+        b = 0
+
+    fork split:
+        branch left:
+            time.sleep_ms(100)
+            b = 10 / x.bal
+        branch right:
+            acc.bal = 0
+    join both
+
+    step fin after both -> done:
+        return b
+
+def main() -> int:
+    print(run_workflow W(3))
+    return 0

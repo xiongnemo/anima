@@ -149,8 +149,8 @@ def f() -> int:
 	}
 }
 
-// Two fork branches that write elements of the same map race, like two
-// branches assigning the same variable.
+// A fork branch writes nothing in place: two branches that write elements
+// of one map race, and so does one that writes what another reads.
 func TestSemaRejectsElementWriteRaceInFork(t *testing.T) {
 	src := `
 workflow Tally(mut m: map[str, int[0..9]]) -> bool:
@@ -169,8 +169,8 @@ workflow Tally(mut m: map[str, int[0..9]]) -> bool:
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "concurrent write race") {
-		t.Errorf("expected a concurrent write race error, got %v", err)
+	if _, err := Check(prog); err == nil || !strings.Contains(err.Error(), "writes m in place") {
+		t.Errorf("expected an error about a write in place, got %v", err)
 	}
 }
 
