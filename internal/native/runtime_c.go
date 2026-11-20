@@ -916,8 +916,9 @@ static bool http_head(const char *raw, HttpHead *h) {
 }
 
 // The chunks in p[0..n): 1 when they are all there, up to the last line of
-// the trailer; 0 when more is to come; -1 for a length that is not hex and
-// -2 for a chunk that does not end in CRLF. The bytes of the chunks, without
+// the trailer; 0 when more is to come; -1 for a length that is not hex, -2
+// for a chunk that does not end in CRLF and -3 for a length of more than 16
+// digits, the most Go takes. The bytes of the chunks, without
 // their framing, are added to out when one is given.
 static int http_chunks(const char *p, size_t n, AnimaBuf *out) {
     size_t i = 0;
@@ -926,7 +927,7 @@ static int http_chunks(const char *p, size_t n, AnimaBuf *out) {
         int digits = 0;
         while (j < n && isxdigit((unsigned char)p[j])) {
             int c = tolower((unsigned char)p[j]);
-            if (++digits > 15) return -1;
+            if (++digits > 16) return -3;
             size = size * 16 + (size_t)(c <= '9' ? c - '0' : c - 'a' + 10);
             j++;
         }
@@ -1136,6 +1137,7 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         if (r == 0) bad = "unexpected EOF";
         else if (r == -1) bad = "invalid byte in chunk length";
         else if (r == -2) bad = "malformed chunked encoding";
+        else if (r == -3) bad = "http chunk length too large";
         else { dechunked.p[dechunked.len] = '\0'; rbody = dechunked.p; }
         break;
     }
