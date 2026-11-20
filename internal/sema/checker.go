@@ -45,9 +45,9 @@ type checker struct {
 	curReturn   Type
 	curFuncInfo *FuncInfo
 	callee      ast.Expr // the callee of the call being checked
-	// `x |> o.f(a)`: the call o.f(a) and the x it is given first.
-	pipedInto *ast.CallExpr
-	piped     ast.Expr
+	// `x |> o.f(a)`: the x each such call o.f(a) is given first. By call,
+	// since an argument of a piped call may hold a piped call of its own.
+	piped map[*ast.CallExpr]ast.Expr
 }
 
 type scope struct {
@@ -2546,11 +2546,13 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 	// counted as its first argument.
 	if rhs, ok := e.Right.(*ast.CallExpr); ok {
 		if _, member := rhs.Callee.(*ast.FieldExpr); member {
-			c.pipedInto, c.piped = rhs, e.Left
+			if c.piped == nil {
+				c.piped = map[*ast.CallExpr]ast.Expr{}
+			}
+			c.piped[rhs] = e.Left
 		}
 	}
 	rt, err := c.checkExpr(e.Right, sc)
-	c.pipedInto, c.piped = nil, nil
 	if err != nil {
 		return nil, err
 	}

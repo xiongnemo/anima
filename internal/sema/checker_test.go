@@ -1182,6 +1182,12 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"((v) => \"s\") |> held.with_lock()": "the function of with_lock gives what the mutex holds, list[int], got str",
 		"rs = [1, 2] |> req.gather()":        "gather takes futures, got int",
 		"x = conc.Mutex() |> print()":        "std.concurrent.Mutex takes 1 argument, got 0",
+		// A piped call inside the arguments of a piped call.
+		"\"s\" |> m.set(0 |> bv.read_u8())":                     "argument 1 of set() of a conc.Mutex is int, got str",
+		"7 |> m.set(0 |> bv.read_u8())":                         "set() of a conc.Mutex takes 1 argument, got 2",
+		"(\"s\" |> bv.read_u8()) |> m.set()":                    "argument 1 of read_u8() of a bytes.ByteView is an int, got str",
+		"s = 5 |> crypto.hmac_sha256(\"a\" |> crypto.sha256())": "argument 1 of std.crypto.hmac_sha256 is a str, got int",
+		"s = \"k\" |> crypto.hmac_sha256(5 |> crypto.sha256())": "argument 1 of std.crypto.sha256 is a str, got int",
 		// What is not there.
 		"x = conc.nope()":                      "module std.concurrent has no member \"nope\"",
 		"rs = conc.gather([1])":                "module std.concurrent has no member \"gather\"",
@@ -1215,6 +1221,7 @@ def use(conn: sock.TcpStream, ln: sock.TcpListener, file: fs.File, pool: conc.Th
 		"ok = ch.send(5)\n    ok2 = ch.send(small)\n    v = ch.recv()\n    ok3 = lists.send([1, 2])",
 		"m.set(0)\n    m.set(n)\n    held.set(zs)\n    held.with_lock((v) => zs)\n    m.with_lock((v) => 7)\n    k = m.get()",
 		"sem.acquire()\n    sem.release()",
+		"(0 |> bv.read_u8()) |> m.set()\n    s = \"k\" |> crypto.hmac_sha256(\"a\" |> crypto.sha256())\n    h = (\"a\" |> crypto.sha256()) |> crypto.sha256()",
 		"m2 = 5 |> conc.Mutex()\n    m2.set(0)\n    ((v) => zs) |> held.with_lock()\n    r = \"u\" |> sess.get(timeout_ms=5)",
 		"s = \"abc\" |> crypto.sha256()\n    h = \"k\" |> crypto.hmac_sha256(\"abc\")\n    ok = 5 |> ch.send()\n    b = 1 |> bv.read_u8()\n    n |> time.sleep_ms()",
 		"k = bytes.from_str(\"ab\").len()\n    g = (ms) => time.sleep_ms(ms)\n    g(1)",

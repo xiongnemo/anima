@@ -149,6 +149,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_mutex_set_other_type.anm", "is int, got str"},
 		{"../tests/bugs/sema_std_call_missing_argument.anm", "std.crypto.sha256 takes 1 argument, got 0"},
 		{"../tests/bugs/spark_piped_request_timeout.anm", "timeout_bounds"},
+		{"../tests/bugs/sema_nested_piped_std_call.anm", "argument 1 of set() of a conc.Mutex is int, got str"},
 		{"../tests/bugs/sema_variable_changes_sort.anm", "a variable keeps its sort"},
 		{"../tests/bugs/sema_loop_variable_changes_elements.anm", "a variable keeps the type of its elements"},
 		{"../tests/bugs/sema_pattern_changes_elements.anm", "a variable keeps the type of its elements"},

@@ -156,10 +156,11 @@ func (c *checker) gatherType(e *ast.CallExpr) (Type, error) {
 // the piped value when the call is a pipeline stage (`x |> o.f(a)` is
 // o.f(x, a)).
 func (c *checker) stdArgs(e *ast.CallExpr) []ast.CallArg {
-	if c.pipedInto != e || c.piped == nil {
+	x := c.piped[e]
+	if x == nil {
 		return e.Args
 	}
-	return append([]ast.CallArg{{Value: c.piped, Span: c.piped.GetSpan()}}, e.Args...)
+	return append([]ast.CallArg{{Value: x, Span: x.GetSpan()}}, e.Args...)
 }
 
 // checkStdCall checks the arguments of a call to a standard function or to a
