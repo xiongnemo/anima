@@ -885,7 +885,10 @@ static int64_t mono_ms(void) {
 
 // How the head of an answer says its body ends.
 enum { HTTP_UNTIL_CLOSE, HTTP_LENGTH, HTTP_CHUNKED, HTTP_NO_BODY };
-typedef struct { size_t head_len; int status; int mode; size_t want; } HttpHead;
+typedef struct {
+    size_t head_len; int status; int mode; size_t want;
+    size_t chunk_at;  // in a chunked body: where the first chunk not all there yet starts
+} HttpHead;
 
 // Reads the head of the answer in raw, once all of it is there. Chunked
 // wins over a Content-Length, and 204 and 304 have no body, as in Go.
@@ -897,6 +900,7 @@ static bool http_head(const char *raw, HttpHead *h) {
     h->status = sp && sp < head_end ? atoi(sp + 1) : 200;
     h->mode = HTTP_UNTIL_CLOSE;
     h->want = 0;
+    h->chunk_at = 0;
     bool chunked = false;
     for (const char *line = strstr(raw, "\r\n"); line && line < head_end; line = strstr(line + 2, "\r\n")) {
         const char *f = line + 2;
@@ -919,10 +923,14 @@ static bool http_head(const char *raw, HttpHead *h) {
 // the trailer; 0 when more is to come; -1 for a length that is not hex, -2
 // for a chunk that does not end in CRLF and -3 for a length of more than 16
 // digits, the most Go takes. The bytes of the chunks, without
-// their framing, are added to out when one is given.
-static int http_chunks(const char *p, size_t n, AnimaBuf *out) {
-    size_t i = 0;
+// their framing, are added to out when one is given. With at, reading
+// starts at *at and *at is left at the first chunk that is not all there:
+// a body in many chunks is then read once, not once for each read of the
+// socket.
+static int http_chunks(const char *p, size_t n, AnimaBuf *out, size_t *at) {
+    size_t i = at ? *at : 0;
     for (;;) {
+        if (at) *at = i;
         size_t j = i, size = 0;
         int digits = 0;
         while (j < n && isxdigit((unsigned char)p[j])) {
@@ -954,11 +962,11 @@ static int http_chunks(const char *p, size_t n, AnimaBuf *out) {
 }
 
 // Whether the answer in raw[0..total) needs no more reading.
-static bool http_complete(const char *raw, size_t total, const HttpHead *h) {
+static bool http_complete(const char *raw, size_t total, HttpHead *h) {
     switch (h->mode) {
     case HTTP_NO_BODY: return true;
     case HTTP_LENGTH: return total - h->head_len >= h->want;
-    case HTTP_CHUNKED: return http_chunks(raw + h->head_len, total - h->head_len, NULL) != 0;
+    case HTTP_CHUNKED: return http_chunks(raw + h->head_len, total - h->head_len, NULL, &h->chunk_at) != 0;
     }
     return false;
 }
@@ -1133,7 +1141,7 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         break;
     case HTTP_CHUNKED: {
         buf_put(&dechunked, "");
-        int r = http_chunks(rbody, total - head.head_len, &dechunked);
+        int r = http_chunks(rbody, total - head.head_len, &dechunked, NULL);
         if (r == 0) bad = "unexpected EOF";
         else if (r == -1) bad = "invalid byte in chunk length";
         else if (r == -2) bad = "malformed chunked encoding";

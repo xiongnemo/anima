@@ -1349,11 +1349,16 @@ func TestE2ENativeHTTPClientFraming(t *testing.T) {
 		"/chunked":       head + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
 		"/chunked-ext":   head + "Content-Length: 3\r\ntransfer-encoding: Chunked\r\n\r\n5;x=1\r\nhello\r\nA\r\n0123456789\r\n0\r\nTrailer: 1\r\n\r\n",
 		"/chunked-short": head + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7\r\n, wo",
-		"/chunked-bad":   head + "Transfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
-		"/short":         head + "Content-Length: 100\r\n\r\nonly this",
-		"/long":          head + "Content-Length: 4\r\n\r\nfour and more",
-		"/until-close":   head + "\r\nuntil close",
-		"/204":           "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+		// A length may be padded to 16 digits; one more is too large.
+		"/chunked-padded": head + "Transfer-Encoding: chunked\r\n\r\n0000000000000005\r\nhello\r\n0\r\n\r\n",
+		"/chunked-17":     head + "Transfer-Encoding: chunked\r\n\r\n00000000000000005\r\nhello\r\n0\r\n\r\n",
+		// Many small chunks are read in the time a body of that length takes.
+		"/chunked-many": head + "Transfer-Encoding: chunked\r\n\r\n" + strings.Repeat("1\r\nx\r\n", 1000000) + "0\r\n\r\n",
+		"/chunked-bad":  head + "Transfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
+		"/short":        head + "Content-Length: 100\r\n\r\nonly this",
+		"/long":         head + "Content-Length: 4\r\n\r\nfour and more",
+		"/until-close":  head + "\r\nuntil close",
+		"/204":          "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
 	}, map[string]bool{"/chunked": true, "/204": true})
 	src := strings.ReplaceAll(`import std.requests as req
 import std.time as time
@@ -1369,6 +1374,11 @@ def main() -> int:
     b = show("chunked-ext", req.get("http://127.0.0.1:PORT/chunked-ext", 3000))
     c = show("chunked-short", req.get("http://127.0.0.1:PORT/chunked-short", 3000))
     d = show("chunked-bad", req.get("http://127.0.0.1:PORT/chunked-bad", 3000))
+    p = show("chunked-padded", req.get("http://127.0.0.1:PORT/chunked-padded", 3000))
+    q = show("chunked-17", req.get("http://127.0.0.1:PORT/chunked-17", 3000))
+    match req.get("http://127.0.0.1:PORT/chunked-many", 3000):
+        Ok(resp) -> print("chunked-many", resp.status, len(resp.body))
+        Err(e) -> print("chunked-many ERR", e)
     e = show("short", req.get("http://127.0.0.1:PORT/short", 3000))
     f = show("long", req.get("http://127.0.0.1:PORT/long", 3000))
     g = show("until-close", req.get("http://127.0.0.1:PORT/until-close", 3000))
@@ -1385,6 +1395,9 @@ def main() -> int:
 chunked-ext 200 True 15 hello0123456789
 chunked-short ERR unexpected EOF
 chunked-bad ERR invalid byte in chunk length
+chunked-padded 200 True 5 hello
+chunked-17 ERR http chunk length too large
+chunked-many 200 1000000
 short ERR unexpected EOF
 long 200 True 4 four
 until-close 200 True 11 until close
