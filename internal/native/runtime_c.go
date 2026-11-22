@@ -1901,6 +1901,28 @@ typedef struct {
     bool done, left;
 } HttpLookup;
 
+// A lookup goes on after the request that asked has run out of time, for
+// as long as the system waits for a name server that does not answer. No
+// more than HTTP_LOOKUPS are going on at once (Go keeps to 500 as well): a
+// request that finds as many waits for one to end, within its own time.
+#define HTTP_LOOKUPS 500
+static struct {
+    pthread_once_t once;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int n;
+} http_lookups = {.once = PTHREAD_ONCE_INIT, .mu = PTHREAD_MUTEX_INITIALIZER};
+
+static void http_cond_init(pthread_cond_t *cv) {
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(cv, &ca);
+    pthread_condattr_destroy(&ca);
+}
+
+static void http_lookups_init(void) { http_cond_init(&http_lookups.cv); }
+
 static void http_lookup_free(HttpLookup *l) {
     if (l->res) freeaddrinfo(l->res);
     pthread_mutex_destroy(&l->mu);
@@ -1923,29 +1945,43 @@ static void *http_lookup_run(void *arg) {
     pthread_mutex_unlock(&l->mu);
     // Nobody waits any more: what was found is this thread's to free.
     if (left) http_lookup_free(l);
+    pthread_mutex_lock(&http_lookups.mu);
+    http_lookups.n--;
+    pthread_cond_signal(&http_lookups.cv);
+    pthread_mutex_unlock(&http_lookups.mu);
     return NULL;
 }
 
 // The addresses of a name, or NULL: there are none, or (*late) the time of
-// the request ran out first.
+// the request ran out first, be it before a thread was had to look it up.
 static struct addrinfo *http_lookup(const char *name, int64_t deadline, bool *late) {
+    struct timespec until = {(time_t)(deadline / 1000), (long)(deadline % 1000) * 1000000L};
     HttpLookup *l = calloc(1, sizeof(*l));
-    pthread_condattr_t ca;
-    pthread_condattr_init(&ca);
-    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
     pthread_mutex_init(&l->mu, NULL);
-    pthread_cond_init(&l->cv, &ca);
-    pthread_condattr_destroy(&ca);
+    http_cond_init(&l->cv);
     l->name = strdup(name);
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    pthread_t th;
-    int rc = pthread_create(&th, &at, http_lookup_run, l);
+    pthread_once(&http_lookups.once, http_lookups_init);
+    bool begun = false;
+    pthread_mutex_lock(&http_lookups.mu);
+    for (;;) {
+        pthread_t th;
+        if (http_lookups.n < HTTP_LOOKUPS && pthread_create(&th, &at, http_lookup_run, l) == 0) {
+            http_lookups.n++;
+            begun = true;
+            break;
+        }
+        if (pthread_cond_timedwait(&http_lookups.cv, &http_lookups.mu, &until) != 0) break;
+    }
+    pthread_mutex_unlock(&http_lookups.mu);
     pthread_attr_destroy(&at);
-    // With no thread to be had it is looked up here, with no limit.
-    if (rc != 0) http_lookup_run(l);
-    struct timespec until = {(time_t)(deadline / 1000), (long)(deadline % 1000) * 1000000L};
+    if (!begun) {
+        http_lookup_free(l);
+        *late = true;
+        return NULL;
+    }
     pthread_mutex_lock(&l->mu);
     while (!l->done && pthread_cond_timedwait(&l->cv, &l->mu, &until) != ETIMEDOUT) {}
     if (!l->done) {

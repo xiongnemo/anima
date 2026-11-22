@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -754,6 +755,105 @@ def main() -> int:
 		}
 		if after != before {
 			t.Errorf("%v: %d sockets before the requests, %d after", argv[len(argv)-1], before, after)
+		}
+	}
+}
+
+// TestMain is, for the test below, a name server that answers nothing.
+func TestMain(m *testing.M) {
+	if ready := os.Getenv("ANIMA_TEST_SILENT_NAME_SERVER"); ready != "" {
+		c, err := net.ListenPacket("udp", "127.0.0.1:53")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defer c.Close()
+		if err := os.WriteFile(ready, nil, 0o644); err != nil {
+			os.Exit(1)
+		}
+		for {
+			if _, _, err := c.ReadFrom(make([]byte, 512)); err != nil {
+				os.Exit(1)
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// A name whose server does not answer costs a request its own time and no
+// more, however many asked before it. The native client looks a name up
+// on a thread that goes on, after the request has given up, until the
+// system gives the name server up; when there were too many of them for
+// another to be begun, it looked the name up itself, with no limit.
+//
+// The name server is this machine's, so the programs are run where it is
+// another one: in a network of their own, as unshare makes one.
+func TestE2EHTTPRequestNameServerSilent(t *testing.T) {
+	in := []string{"unshare", "-rmn"}
+	if out, err := exec.Command(in[0], append(in[1:], "ip", "link", "set", "lo", "up")...).CombinedOutput(); err != nil {
+		if os.Getenv("ANIMA_REQUIRE_NETNS") != "" {
+			t.Fatalf("unshare: %v\n%s", err, out)
+		}
+		t.Skipf("no network of its own to be had here: %v", err)
+	}
+	const asked = 60
+	src := `import std.requests as req
+
+def main() -> int:
+    for i in [` + strings.TrimSuffix(strings.Repeat("0, ", asked), ", ") + `]:
+        match req.get("http://silent.anima.test/a", timeout_ms=100):
+            Ok(x) -> print("ok", x.status)
+            Err(m) -> print(m)
+    return 0
+`
+	want := strings.Repeat(`Get "http://silent.anima.test/a": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`+"\n", asked)
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	path := filepath.Join(tmp, "silent.anm")
+	nativeBin := filepath.Join(tmp, "silent")
+	files := map[string]string{
+		path:                              src,
+		filepath.Join(tmp, "resolv.conf"): "nameserver 127.0.0.1\n",
+		filepath.Join(tmp, "nsswitch"):    "hosts: files dns\n",
+		// The memory a process may map is what bounds its threads: each
+		// has a stack. The VM is not bounded, Go maps a great deal.
+		filepath.Join(tmp, "in.sh"): `set -e
+ip link set lo up
+mount --bind "$1/resolv.conf" /etc/resolv.conf
+mount --bind "$1/nsswitch" /etc/nsswitch.conf
+rm -f "$1/ready"
+ANIMA_TEST_SILENT_NAME_SERVER="$1/ready" "$2" &
+trap "kill $!" EXIT
+while [ ! -e "$1/ready" ]; do sleep 0.05; done
+shift 2
+if [ "$1" = bounded ]; then shift; ulimit -v 1500000; fi
+"$@"
+`,
+	}
+	for name, text := range files {
+		if err := os.WriteFile(name, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{{animaBin, "run", path}, {nativeBin}, {"bounded", nativeBin}} {
+		// The system gives a silent name server up after 30 seconds: a
+		// request that waits for that is seen to.
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		cmd := exec.CommandContext(ctx, in[0], append(append(in[1:], "sh", filepath.Join(tmp, "in.sh"), tmp, self), argv...)...)
+		cmd.Env = append(os.Environ(), "RES_OPTIONS=timeout:30 attempts:1")
+		cmd.WaitDelay = time.Second
+		began := time.Now()
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil || string(out) != want {
+			t.Errorf("%v: err=%v after %v, output:\n%s\nwant:\n%s", argv, err, time.Since(began).Round(time.Millisecond), out, want)
 		}
 	}
 }
