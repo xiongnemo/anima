@@ -1461,6 +1461,14 @@ entity O:
 		{"x = 5\n    q = x with {d: 0}", "'with' copies an entity with some fields replaced, got int"},
 		{"xs = [P(5, 1, \"a\")]\n    q = xs with {d: 0}", "'with' copies an entity with some fields replaced, got list[P]"},
 		{"o = Some(P(5, 1, \"a\"))\n    q = o with {d: 0}", "'with' copies an entity with some fields replaced, got Option[P]"},
+		// A named lambda is checked with the types of its first use.
+		{"cp = (p) => p with {d: 3}\n    q = cp(P(5, 1, \"a\"))\n    n = q.d", ""},
+		{"cp = (p) => p with {d: 3}", ""},
+		{"qs = [P(5, 1, \"a\")] |> map((p) => p with {d: 3})", ""},
+		{"cp = (p) => p with {d: 3}\n    q = cp(5)", "'with' copies an entity with some fields replaced, got int"},
+		{"cp = (p) => p with {t: 3}\n    q = cp(P(5, 1, \"a\"))", "entity P has no field \"t\""},
+		{"cp = (p) => p with {d: 3, d: 4}\n    q = cp(P(5, 1, \"a\"))", "field P.d is given twice"},
+		{"cp = (p) => p with {d: nope}", "undefined identifier \"nope\""},
 	}
 	for _, tc := range cases {
 		src := decls + "def main() -> int:\n    " + tc.body + "\n    return 0\n"

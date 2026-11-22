@@ -1715,6 +1715,16 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		// The result is typed as the base, so the base is an entity: both
 		// backends give an object of the fields alone for anything else.
 		et, ok := baseTy.(*EntityType)
+		if !ok && generic(baseTy) {
+			// A parameter of a named lambda has no type where the lambda is
+			// written: the body is checked again with those of its first use.
+			for _, f := range e.Fields {
+				if _, err := c.checkExpr(f.Value, sc); err != nil {
+					return nil, err
+				}
+			}
+			return baseTy, nil
+		}
 		if !ok {
 			return nil, fmt.Errorf("%s: 'with' copies an entity with some fields replaced, got %s", e.Span, baseTy)
 		}
