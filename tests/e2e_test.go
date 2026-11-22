@@ -1008,6 +1008,36 @@ func TestE2EJsonDecodeTypedParity(t *testing.T) {
 	runOnBothBackends(t, "json_decode_typed", jsonDecodeTypedSrc, jsonDecodeTypedWant)
 }
 
+// Only a JSON object is an entity. A null was read by the VM as an object
+// with no members, which gave an entity whose fields are all Options.
+func TestE2EJsonDecodeTypedRootParity(t *testing.T) {
+	runOnBothBackends(t, "json_decode_typed_root", `import std.json as json
+
+entity E:
+    o: Option[int[1..9]]
+
+def show(raw: str) -> int:
+    match json.decode[E](raw):
+        Ok(e) ->
+            print(e)
+        Err(m) ->
+            print("err")
+    return 0
+
+def main() -> int:
+    show("{}")
+    show("{\"o\":null}")
+    show("{\"o\":4}")
+    show("null")
+    show(" null ")
+    show("[]")
+    show("5")
+    show("\"s\"")
+    show("true")
+    return 0
+`, "E(o=None)\nE(o=None)\nE(o=Some(4))\nerr\nerr\nerr\nerr\nerr\nerr\n")
+}
+
 const jsonDecodeTypedSrc = `import std.json as json
 
 entity In:

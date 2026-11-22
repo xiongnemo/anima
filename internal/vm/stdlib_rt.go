@@ -775,6 +775,13 @@ func (vm *VM) jsonDecodeSchema(typeName, raw string) Value {
 		}
 		return VOk(VMap(out))
 	}
+	// A JSON null unmarshals into a nil map without an error. It is not an
+	// object, so it is no entity, as for the native decoder: read as an
+	// object with no members it would give an entity whose every field is
+	// an Option.
+	if m == nil {
+		return VErr("invalid JSON: json: cannot unmarshal null into Go value of type map[string]interface {}")
+	}
 	v, msg := vm.jsonAs(&JSONType{Kind: "entity", Entity: typeName}, m, typeName)
 	if msg != "" {
 		return VErr(msg)
