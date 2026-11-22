@@ -71,7 +71,7 @@ func BuildNative(info *sema.ProgramInfo, outBinary string, emitCPath string) err
 	if err != nil {
 		absOut = outBinary
 	}
-	cmd := exec.Command("gcc", "-std=c11", "-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-but-set-variable", "-Wno-unused-label", cFile, "-lpthread", "-lssl", "-lcrypto", "-o", absOut)
+	cmd := exec.Command("gcc", "-std=c11", "-O2", "-Wall", "-Werror=implicit-function-declaration", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-but-set-variable", "-Wno-unused-label", cFile, "-lpthread", "-lssl", "-lcrypto", "-o", absOut)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gcc failed: %v\n%s", err, string(out))

@@ -29,8 +29,13 @@ jobs:
       - name: Build single static anima binary
         run: CGO_ENABLED=0 go build -o ./anima ./cmd/anima
 
+      # One test runs its programs in a network namespace of their own, to
+      # give them a name server that does not answer.
+      - name: Let a user make a network namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Run full test suite with race detector
-        run: go test -v -race -short ./...
+        run: ANIMA_REQUIRE_NETNS=1 go test -v -race -short ./...
 
       - name: AnimaSMT property tests and Z3 differential test
         run: ANIMA_REQUIRE_Z3=1 go test -v ./internal/verify/smt

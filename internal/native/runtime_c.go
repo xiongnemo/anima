@@ -23,6 +23,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
@@ -1444,11 +1445,690 @@ static int http_answer(HttpAnswer *a, const char *p, size_t n, bool eof) {
     return r;
 }
 
-// A request that fails reads as on the VM: Get "url": why.
-static AnimaVal http_err(const char *method, const char *url, const char *why, const char *more) {
+// ─── The URL of a request ───
+// It is read as Go's net/url and net/http read it, which is what the VM
+// runs: what Go takes for a URL, what it refuses and with which words, and
+// what it then sends and dials. A URL is not cut where it "looks" cut: the
+// host of http://a@b/ is b, and a line end in a path is no second header.
+typedef struct { const char *p; size_t n; } Span;
+
+static long span_find(Span s, char c) {
+    const char *q = s.n ? memchr(s.p, c, s.n) : NULL;
+    return q ? (long)(q - s.p) : -1;
+}
+
+static long span_rfind(Span s, char c) {
+    for (size_t i = s.n; i > 0; i--) if (s.p[i - 1] == c) return (long)(i - 1);
+    return -1;
+}
+
+static bool span_starts(Span s, const char *with) {
+    size_t n = strlen(with);
+    return s.n >= n && memcmp(s.p, with, n) == 0;
+}
+
+static void buf_span(AnimaBuf *b, Span s) {
+    if (s.n > 0) buf_putn(b, s.p, s.n);
+}
+
+static bool url_alnum(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+static int url_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool url_among(unsigned char c, const char *set) { return c != 0 && strchr(set, c) != NULL; }
+
+enum { URL_PATH, URL_USER, URL_HOST, URL_ZONE, URL_FRAG };
+
+// Whether Go writes the byte c as %XX in that part of a URL (shouldEscape).
+static bool url_escapes(unsigned char c, int part) {
+    if (url_alnum(c)) return false;
+    if ((part == URL_HOST || part == URL_ZONE) && url_among(c, "!$&'()*+,;=:[]<>\"")) return false;
+    if (url_among(c, "-_.~")) return false;
+    if (url_among(c, "$&+,/:;=?@")) {
+        if (part == URL_PATH) return c == '?';
+        if (part == URL_USER) return c == '@' || c == '/' || c == '?' || c == ':';
+        if (part == URL_FRAG) return false;
+    }
+    if (part == URL_FRAG && url_among(c, "!()*")) return false;
+    return true;
+}
+
+// before, then s as Go's %q writes it, then after.
+static char *url_why(const char *before, Span s, const char *after) {
     AnimaBuf b = {0};
-    buf_put(&b, method[0] == 'P' ? "Post \"" : "Get \"");
-    buf_put(&b, url); buf_put(&b, "\": "); buf_put(&b, why);
+    buf_put(&b, before);
+    go_quote(&b, s.p, s.n);
+    buf_put(&b, after);
+    return b.p;
+}
+
+// Go's unescape: NULL, or why s is not that part of a URL. What s stands
+// for is added to out, if there is one; it may hold any byte.
+static char *url_unescape(Span s, int part, AnimaBuf *out) {
+    bool host = part == URL_HOST || part == URL_ZONE;
+    for (size_t i = 0; i < s.n;) {
+        unsigned char c = (unsigned char)s.p[i];
+        if (c != '%') {
+            if (host && c < 0x80 && url_escapes(c, part)) return url_why("invalid character ", (Span){s.p + i, 1}, " in host name");
+            i++;
+            continue;
+        }
+        int hi = i + 2 < s.n ? url_hex((unsigned char)s.p[i + 1]) : -1;
+        int lo = i + 2 < s.n ? url_hex((unsigned char)s.p[i + 2]) : -1;
+        if (hi < 0 || lo < 0) return url_why("invalid URL escape ", (Span){s.p + i, s.n - i > 3 ? 3 : s.n - i}, "");
+        bool pct = memcmp(s.p + i, "%25", 3) == 0;
+        // In a host only a byte outside ASCII is written escaped, and a %.
+        if (part == URL_HOST && hi < 8 && !pct) return url_why("invalid URL escape ", (Span){s.p + i, 3}, "");
+        int v = hi << 4 | lo;
+        if (part == URL_ZONE && !pct && v != ' ' && url_escapes((unsigned char)v, URL_HOST)) return url_why("invalid URL escape ", (Span){s.p + i, 3}, "");
+        i += 3;
+    }
+    if (!out) return NULL;
+    for (size_t i = 0; i < s.n; i++) {
+        char c = s.p[i];
+        if (c == '%') {
+            c = (char)(url_hex((unsigned char)s.p[i + 1]) << 4 | url_hex((unsigned char)s.p[i + 2]));
+            i += 2;
+        }
+        buf_putn(out, &c, 1);
+    }
+    return NULL;
+}
+
+// Adds the bytes s[0..n) as Go's escape writes them in that part.
+static void url_escape(AnimaBuf *b, const char *s, size_t n, int part) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (url_escapes(c, part)) {
+            char esc[4] = {'%', "0123456789ABCDEF"[c >> 4], "0123456789ABCDEF"[c & 15], 0};
+            buf_putn(b, esc, 3);
+        } else {
+            buf_putn(b, s + i, 1);
+        }
+    }
+}
+
+// Adds a path or a fragment as Go sends and prints it (EscapedPath,
+// EscapedFragment): as it was written if every byte of it may stand in a
+// URL, and else what it stands for, escaped anew.
+static void url_put_part(AnimaBuf *b, Span raw, int part) {
+    bool as_written = true;
+    for (size_t i = 0; i < raw.n && as_written; i++) {
+        unsigned char c = (unsigned char)raw.p[i];
+        as_written = url_among(c, "!$&'()*+,;=:@[]%") || !url_escapes(c, part);
+    }
+    // Go keeps no written form of a path that is its own escaped form,
+    // and then knows the path * by itself.
+    if (part == URL_PATH && raw.n == 3 && memcmp(raw.p, "%2A", 3) == 0) { buf_put(b, "*"); return; }
+    if (as_written) { buf_span(b, raw); return; }
+    AnimaBuf plain = {0};
+    char *bad = url_unescape(raw, part, &plain);
+    free(bad);
+    url_escape(b, plain.p ? plain.p : "", plain.len, part);
+    free(plain.p);
+}
+
+// Adds a query as it is sent and shown. Go sends it as written; a space,
+// a quote, < or > or a byte outside ASCII in it is written %XX here, and
+// on the VM, so that the first line of a request is one.
+static void url_put_query(AnimaBuf *b, Span q) {
+    for (size_t i = 0; i < q.n; i++) {
+        unsigned char c = (unsigned char)q.p[i];
+        if (c == ' ' || c == '"' || c == '<' || c == '>' || c >= 0x80) {
+            char esc[4] = {'%', "0123456789ABCDEF"[c >> 4], "0123456789ABCDEF"[c & 15], 0};
+            buf_putn(b, esc, 3);
+        } else {
+            buf_putn(b, q.p + i, 1);
+        }
+    }
+}
+
+static bool url_port_ok(Span port) {
+    if (port.n == 0) return true;
+    if (port.p[0] != ':') return false;
+    for (size_t i = 1; i < port.n; i++) if (port.p[i] < '0' || port.p[i] > '9') return false;
+    return true;
+}
+
+// What Go's netip.ParseAddr makes of s: 4 for an IPv4 address, 6 for an
+// IPv6 one, 7 for an IPv6 one with a zone, 0 for no address.
+static int url_addr(const char *s) {
+    unsigned char raw[sizeof(struct in6_addr)];
+    size_t at = strcspn(s, ".:%");
+    if (s[at] == '.') return inet_pton(AF_INET, s, raw) == 1 ? 4 : 0;
+    if (s[at] != ':') return 0;
+    const char *pct = strchr(s, '%');
+    if (!pct) return inet_pton(AF_INET6, s, raw) == 1 ? 6 : 0;
+    if (pct[1] == '\0') return 0;
+    char *addr = strndup(s, (size_t)(pct - s));
+    bool ok = inet_pton(AF_INET6, addr, raw) == 1;
+    free(addr);
+    return ok ? 7 : 0;
+}
+
+typedef struct {
+    AnimaBuf scheme;          // in lower case
+    Span opaque;              // what follows the scheme, if no / does
+    bool has_user, has_pass;
+    AnimaBuf user, pass;      // what they stand for: any byte
+    AnimaBuf host;            // with its port, as Go keeps it
+    bool omit_host;
+    Span path, query, frag;   // as written
+    bool force_query;
+} Url;
+
+static void url_free(Url *u) {
+    free(u->scheme.p); free(u->user.p); free(u->pass.p); free(u->host.p);
+}
+
+static char *url_host(Span h, Url *u) {
+    long open = span_rfind(h, '[');
+    if (open >= 0) {
+        long close = span_rfind(h, ']');
+        if (close < 0) return strdup("missing ']' in host");
+        // What follows the ] is a port, so the [ is before it.
+        Span port = {h.p + close + 1, h.n - (size_t)close - 1};
+        if (!url_port_ok(port)) return url_why("invalid port ", port, " after host");
+        Span name = {h.p + open + 1, (size_t)(close - open - 1)};
+        size_t zone = name.n;
+        for (size_t i = 0; i + 3 <= name.n; i++) if (memcmp(name.p + i, "%25", 3) == 0) { zone = i; break; }
+        AnimaBuf plain = {0};
+        char *bad = url_unescape((Span){name.p, zone}, URL_HOST, &plain);
+        if (!bad && zone < name.n) bad = url_unescape((Span){name.p + zone, name.n - zone}, URL_ZONE, &plain);
+        int kind = bad ? 0 : url_addr(plain.p ? plain.p : "");
+        if (!bad && kind == 0) bad = strdup("invalid host");
+        if (!bad && kind == 4) bad = strdup("invalid IP-literal");
+        if (!bad) {
+            buf_put(&u->host, "[");
+            buf_put(&u->host, plain.p);
+            buf_put(&u->host, "]");
+            buf_putn(&u->host, port.p, port.n);
+        }
+        free(plain.p);
+        return bad;
+    }
+    long colon = span_rfind(h, ':');
+    if (colon >= 0) {
+        Span port = {h.p + colon, h.n - (size_t)colon};
+        if (!url_port_ok(port)) return url_why("invalid port ", port, " after host");
+    }
+    return url_unescape(h, URL_HOST, &u->host);
+}
+
+static char *url_authority(Span a, Url *u) {
+    long at = span_rfind(a, '@');
+    char *bad = url_host(at < 0 ? a : (Span){a.p + at + 1, a.n - (size_t)at - 1}, u);
+    if (bad || at < 0) return bad;
+    Span info = {a.p, (size_t)at};
+    for (size_t i = 0; i < info.n; i++) {
+        unsigned char c = (unsigned char)info.p[i];
+        if (!url_alnum(c) && !url_among(c, "-._:~!$&'()*+,;=%@")) return strdup("net/url: invalid userinfo");
+    }
+    u->has_user = true;
+    long colon = span_find(info, ':');
+    bad = url_unescape(colon < 0 ? info : (Span){info.p, (size_t)colon}, URL_USER, &u->user);
+    if (bad || colon < 0) return bad;
+    u->has_pass = true;
+    return url_unescape((Span){info.p + colon + 1, info.n - (size_t)colon - 1}, URL_USER, &u->pass);
+}
+
+// Go's url.Parse: NULL, or why raw is no URL. *named is how much of raw
+// the error is about: Go names it without its fragment unless the fragment
+// is what is wrong.
+static char *url_parse(const char *raw, Url *u, size_t *named) {
+    size_t all = strlen(raw);
+    const char *hash = memchr(raw, '#', all);
+    size_t n = hash ? (size_t)(hash - raw) : all;
+    *named = n;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (c < ' ' || c == 0x7f) return strdup("net/url: invalid control character in URL");
+    }
+    Span rest = {raw, n};
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
+        if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
+            if (i == 0) break;
+            continue;
+        }
+        if (c == ':') {
+            if (i == 0) return strdup("missing protocol scheme");
+            for (size_t k = 0; k < i; k++) {
+                char low = (char)tolower((unsigned char)raw[k]);
+                buf_putn(&u->scheme, &low, 1);
+            }
+            rest = (Span){raw + i + 1, n - i - 1};
+        }
+        break;
+    }
+    long q = span_find(rest, '?');
+    if (q >= 0 && (size_t)q == rest.n - 1) {
+        u->force_query = true;
+        rest.n--;
+    } else if (q >= 0) {
+        u->query = (Span){rest.p + q + 1, rest.n - (size_t)q - 1};
+        rest.n = (size_t)q;
+    }
+    bool opaque = false;
+    if (!span_starts(rest, "/")) {
+        if (u->scheme.len > 0) {
+            u->opaque = rest;
+            opaque = true;
+        } else {
+            long slash = span_find(rest, '/');
+            if (span_find((Span){rest.p, slash < 0 ? rest.n : (size_t)slash}, ':') >= 0)
+                return strdup("first path segment in URL cannot contain colon");
+        }
+    }
+    if (!opaque) {
+        if ((u->scheme.len > 0 || !span_starts(rest, "///")) && span_starts(rest, "//")) {
+            Span authority = {rest.p + 2, rest.n - 2};
+            long slash = span_find(authority, '/');
+            rest = slash < 0 ? (Span){authority.p + authority.n, 0} : (Span){authority.p + slash, authority.n - (size_t)slash};
+            if (slash >= 0) authority.n = (size_t)slash;
+            char *bad = url_authority(authority, u);
+            if (bad) return bad;
+        } else if (u->scheme.len > 0 && span_starts(rest, "/")) {
+            u->omit_host = true;
+        }
+        char *bad = url_unescape(rest, URL_PATH, NULL);
+        if (bad) return bad;
+        u->path = rest;
+    }
+    if (hash && all > n + 1) {
+        Span frag = {hash + 1, all - n - 1};
+        char *bad = url_unescape(frag, URL_FRAG, NULL);
+        if (bad) { *named = all; return bad; }
+        u->frag = frag;
+    }
+    return NULL;
+}
+
+// The URL as Go names it in the error of a request: written anew from its
+// parts, a password as ***.
+static void url_shown(const Url *u, AnimaBuf *b) {
+    if (u->scheme.len > 0) { buf_putn(b, u->scheme.p, u->scheme.len); buf_put(b, ":"); }
+    if (u->opaque.n > 0) {
+        buf_span(b, u->opaque);
+    } else {
+        bool authority = u->scheme.len > 0 || u->host.len > 0 || u->has_user;
+        if (authority && !(u->omit_host && u->host.len == 0 && !u->has_user)) {
+            if (u->host.len > 0 || u->path.n > 0 || u->has_user) buf_put(b, "//");
+            if (u->has_pass) {
+                buf_putn(b, u->user.p ? u->user.p : "", u->user.len);
+                buf_put(b, ":***@");
+            } else if (u->has_user) {
+                url_escape(b, u->user.p ? u->user.p : "", u->user.len, URL_USER);
+                buf_put(b, "@");
+            }
+            if (u->host.len > 0) url_escape(b, u->host.p, u->host.len, URL_HOST);
+        }
+        AnimaBuf path = {0};
+        url_put_part(&path, u->path, URL_PATH);
+        if (path.len > 0 && path.p[0] != '/' && u->host.len > 0) buf_put(b, "/");
+        if (b->len == 0 && path.len > 0) {
+            // A first part with a colon would read as a scheme.
+            const char *slash = memchr(path.p, '/', path.len);
+            if (memchr(path.p, ':', slash ? (size_t)(slash - path.p) : path.len)) buf_put(b, "./");
+        }
+        if (path.len > 0) buf_putn(b, path.p, path.len);
+        free(path.p);
+    }
+    if (u->force_query || u->query.n > 0) { buf_put(b, "?"); url_put_query(b, u->query); }
+    if (u->frag.n > 0) { buf_put(b, "#"); url_put_part(b, u->frag, URL_FRAG); }
+    if (!b->p) buf_put(b, "");
+}
+
+static void buf_base64(AnimaBuf *b, const unsigned char *s, size_t n) {
+    static const char set[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)s[i] << 16 | (i + 1 < n ? (uint32_t)s[i + 1] << 8 : 0) | (i + 2 < n ? s[i + 2] : 0);
+        char out[5] = {set[v >> 18], set[(v >> 12) & 63], i + 1 < n ? set[(v >> 6) & 63] : '=', i + 2 < n ? set[v & 63] : '=', 0};
+        buf_put(b, out);
+    }
+}
+
+// Go's isDomainName: whether a name is one the DNS is asked for at all.
+static bool http_is_name(const char *s) {
+    size_t l = strlen(s);
+    if (strcmp(s, ".") == 0) return true;
+    if (l == 0 || l > 254 || (l == 254 && s[l - 1] != '.')) return false;
+    char last = '.';
+    bool letters = false;
+    int part = 0;
+    for (size_t i = 0; i < l; i++) {
+        char c = s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') { letters = true; part++; }
+        else if (c >= '0' && c <= '9') part++;
+        else if (c == '-') { if (last == '.') return false; part++; letters = true; }
+        else if (c == '.') { if (last == '.' || last == '-' || part > 63 || part == 0) return false; part = 0; }
+        else return false;
+        last = c;
+    }
+    return last != '-' && part <= 63 && letters;
+}
+
+// Whether a name is an IPv4 address in one of the old ways of writing one
+// (127.1, 0x7f.0.0.1, 017700000001): one to four numbers, decimal, octal
+// or hexadecimal, the last of them filling the bytes the others leave.
+// getaddrinfo takes such a text for the address; Go takes it for a name.
+static bool http_is_old_addr(const char *s) {
+    unsigned long long max = 0xffffffffULL;
+    for (int part = 0; part < 4; part++) {
+        if (!isdigit((unsigned char)*s)) return false;
+        char *end = NULL;
+        errno = 0;
+        unsigned long long v = strtoull(s, &end, 0);
+        if (errno != 0) return false;
+        if (*end == '\0') return v <= max;
+        if (*end != '.' || v > 255 || part == 3) return false;
+        max >>= 8;
+        s = end + 1;
+    }
+    return false;
+}
+
+// An address to connect to, and its text as Go writes it in an error.
+typedef struct {
+    struct sockaddr_storage sa;
+    socklen_t len;
+    int family;
+    char text[96];
+} HttpPeer;
+
+static void http_peer4(HttpPeer *p, struct in_addr a, int port, bool any) {
+    struct sockaddr_in *sa = (struct sockaddr_in *)&p->sa;
+    memset(p, 0, sizeof(*p));
+    sa->sin_family = AF_INET; sa->sin_addr = a; sa->sin_port = htons((uint16_t)port);
+    p->len = sizeof(*sa); p->family = AF_INET;
+    char ip[INET_ADDRSTRLEN] = {0};
+    if (!any) inet_ntop(AF_INET, &a, ip, sizeof(ip));
+    snprintf(p->text, sizeof(p->text), "%s:%d", ip, port);
+}
+
+// Go's text of an IPv6 address: an IPv4 address written as one is written
+// as the IPv4 one, the longest run of two or more zero fields is ::, and no
+// field is written as an IPv4 address.
+static void ip6_text(const unsigned char *a, char *out, size_t cap) {
+    if (IN6_IS_ADDR_V4MAPPED((const struct in6_addr *)a)) {
+        inet_ntop(AF_INET, a + 12, out, (socklen_t)cap);
+        return;
+    }
+    int best = -1, best_len = 0;
+    uint16_t f[8];
+    for (int i = 0; i < 8; i++) f[i] = (uint16_t)(a[2 * i] << 8 | a[2 * i + 1]);
+    for (int i = 0; i < 8; i++) {
+        int j = i;
+        while (j < 8 && f[j] == 0) j++;
+        if (j - i >= 2 && j - i > best_len) { best = i; best_len = j - i; }
+        if (j > i) i = j - 1;
+    }
+    size_t at = 0;
+    out[0] = '\0';
+    for (int i = 0; i < 8; i++) {
+        if (i == best) {
+            at += (size_t)snprintf(out + at, cap - at, "::");
+            i += best_len - 1;
+            continue;
+        }
+        if (i > 0 && i != best + best_len) at += (size_t)snprintf(out + at, cap - at, ":");
+        at += (size_t)snprintf(out + at, cap - at, "%x", f[i]);
+    }
+}
+
+static void http_peer6(HttpPeer *p, const struct in6_addr *a, uint32_t scope, int port) {
+    // An IPv4 address written as an IPv6 one is dialed as the IPv4 one.
+    if (IN6_IS_ADDR_V4MAPPED(a)) {
+        struct in_addr a4;
+        memcpy(&a4, a->s6_addr + 12, 4);
+        http_peer4(p, a4, port, false);
+        return;
+    }
+    struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&p->sa;
+    memset(p, 0, sizeof(*p));
+    sa->sin6_family = AF_INET6; sa->sin6_addr = *a; sa->sin6_port = htons((uint16_t)port); sa->sin6_scope_id = scope;
+    p->len = sizeof(*sa); p->family = AF_INET6;
+    char ip[INET6_ADDRSTRLEN];
+    ip6_text(a->s6_addr, ip, sizeof(ip));
+    snprintf(p->text, sizeof(p->text), "[%s]:%d", ip, port);
+}
+
+// A name is looked up on a thread of its own: getaddrinfo has no time
+// limit, and the request has one.
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    char *name;
+    struct addrinfo *res;
+    bool done, left;
+} HttpLookup;
+
+// A lookup goes on after the request that asked has run out of time, for
+// as long as the system waits for a name server that does not answer. No
+// more than HTTP_LOOKUPS are going on at once (Go keeps to 500 as well): a
+// request that finds as many waits for one to end, within its own time.
+#define HTTP_LOOKUPS 500
+static struct {
+    pthread_once_t once;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int n;
+} http_lookups = {.once = PTHREAD_ONCE_INIT, .mu = PTHREAD_MUTEX_INITIALIZER};
+
+static void http_cond_init(pthread_cond_t *cv) {
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(cv, &ca);
+    pthread_condattr_destroy(&ca);
+}
+
+static void http_lookups_init(void) { http_cond_init(&http_lookups.cv); }
+
+static void http_lookup_free(HttpLookup *l) {
+    if (l->res) freeaddrinfo(l->res);
+    pthread_mutex_destroy(&l->mu);
+    pthread_cond_destroy(&l->cv);
+    free(l->name);
+    free(l);
+}
+
+static void *http_lookup_run(void *arg) {
+    HttpLookup *l = arg;
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(l->name, NULL, &hints, &res) != 0) res = NULL;
+    pthread_mutex_lock(&l->mu);
+    l->res = res;
+    l->done = true;
+    bool left = l->left;
+    pthread_cond_signal(&l->cv);
+    pthread_mutex_unlock(&l->mu);
+    // Nobody waits any more: what was found is this thread's to free.
+    if (left) http_lookup_free(l);
+    pthread_mutex_lock(&http_lookups.mu);
+    http_lookups.n--;
+    pthread_cond_signal(&http_lookups.cv);
+    pthread_mutex_unlock(&http_lookups.mu);
+    return NULL;
+}
+
+// The addresses of a name, or NULL: there are none, or (*late) the time of
+// the request ran out first, be it before a thread was had to look it up.
+static struct addrinfo *http_lookup(const char *name, int64_t deadline, bool *late) {
+    struct timespec until = {(time_t)(deadline / 1000), (long)(deadline % 1000) * 1000000L};
+    HttpLookup *l = calloc(1, sizeof(*l));
+    pthread_mutex_init(&l->mu, NULL);
+    http_cond_init(&l->cv);
+    l->name = strdup(name);
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_once(&http_lookups.once, http_lookups_init);
+    bool begun = false;
+    pthread_mutex_lock(&http_lookups.mu);
+    for (;;) {
+        pthread_t th;
+        if (http_lookups.n < HTTP_LOOKUPS && pthread_create(&th, &at, http_lookup_run, l) == 0) {
+            http_lookups.n++;
+            begun = true;
+            break;
+        }
+        if (pthread_cond_timedwait(&http_lookups.cv, &http_lookups.mu, &until) != 0) break;
+    }
+    pthread_mutex_unlock(&http_lookups.mu);
+    pthread_attr_destroy(&at);
+    if (!begun) {
+        http_lookup_free(l);
+        *late = true;
+        return NULL;
+    }
+    pthread_mutex_lock(&l->mu);
+    while (!l->done && pthread_cond_timedwait(&l->cv, &l->mu, &until) != ETIMEDOUT) {}
+    if (!l->done) {
+        l->left = true;
+        *late = true;
+        pthread_mutex_unlock(&l->mu);
+        return NULL;
+    }
+    struct addrinfo *res = l->res;
+    l->res = NULL;
+    pthread_mutex_unlock(&l->mu);
+    http_lookup_free(l);
+    return res;
+}
+
+// Why an address was not connected to, in Go's words. The first of them
+// is the one that is kept.
+static void http_undialed(AnimaBuf *why, const HttpPeer *p, const char *what, int err) {
+    if (why->p) return;
+    buf_put(why, "dial tcp ");
+    buf_put(why, p->text);
+    buf_put(why, what);
+    size_t at = why->len;
+    if (err > 0) buf_put(why, strerror(err));
+    if (why->len > at) why->p[at] = (char)tolower((unsigned char)why->p[at]);
+}
+
+// The addresses of one kind (IPv4 or IPv6), tried in turn.
+typedef struct {
+    bool on, done;
+    size_t left, next;     // how many are not yet tried, and where they are
+    int fd;                // the one being connected to, or -1
+    const HttpPeer *peer;
+    AnimaBuf why;          // why the first that failed did
+} HttpRacer;
+
+// Connects to one of the addresses as Go's dialer does: a connected
+// socket, or -1 and in *why the reason, if the time did not just run out.
+// The addresses of the first one's kind are tried in turn, each until the
+// system gives it up: the time of the request is not shared out among
+// them, so one that does not answer keeps the ones after it from being
+// tried. Those of the other kind are tried beside them once the first
+// kind has failed or 300 ms have gone by, so that a machine whose IPv6
+// goes nowhere is reached by IPv4. The first to connect is taken; if none
+// does, the error is that of the first kind's first address that failed.
+static int http_dial(const HttpPeer *peers, size_t npeers, int64_t deadline, AnimaBuf *why) {
+    HttpRacer r[2] = {{.fd = -1}, {.fd = -1}};
+    for (size_t i = 0; i < npeers; i++) r[peers[i].family == peers[0].family ? 0 : 1].left++;
+    r[0].on = true;
+    r[1].done = r[1].left == 0;
+    int64_t second = mono_ms() + 300;
+    int won = -1;
+    while (won < 0 && !(r[0].done && r[1].done)) {
+        if (mono_ms() >= deadline) break;
+        if (!r[1].done && (r[0].done || mono_ms() >= second)) r[1].on = true;
+        // Each kind that has no address in hand takes its next.
+        for (int k = 0; k < 2 && won < 0; k++) {
+            HttpRacer *x = &r[k];
+            while (x->on && !x->done && x->fd < 0) {
+                if (x->left == 0) { x->done = true; break; }
+                if (mono_ms() >= deadline) break;
+                while ((peers[x->next].family == peers[0].family) != (k == 0)) x->next++;
+                x->peer = &peers[x->next++];
+                x->left--;
+                int s = socket(x->peer->family, SOCK_STREAM, 0);
+                if (s < 0) { http_undialed(&x->why, x->peer, ": socket: ", errno); continue; }
+                fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+                if (connect(s, (const struct sockaddr *)&x->peer->sa, x->peer->len) == 0) { won = s; break; }
+                if (errno == EINPROGRESS || errno == EINTR) { x->fd = s; break; }
+                int err = errno;
+                close(s);
+                http_undialed(&x->why, x->peer, ": connect: ", err);
+            }
+        }
+        if (won >= 0) break;
+        // Then it waits: for a socket, or for the other kind's turn to come.
+        struct pollfd p[2];
+        int np = 0, at[2] = {-1, -1};
+        int64_t wake = deadline;
+        for (int k = 0; k < 2; k++) {
+            if (r[k].fd < 0) continue;
+            at[k] = np;
+            p[np++] = (struct pollfd){r[k].fd, POLLOUT, 0};
+        }
+        if (!r[1].on && !r[1].done && second < wake) wake = second;
+        if (np == 0) continue;
+        int64_t wait = wake - mono_ms();
+        if (poll(p, (nfds_t)np, wait <= 0 ? 0 : wait > 60000 ? 60000 : (int)wait) < 0) continue;
+        for (int k = 0; k < 2 && won < 0; k++) {
+            HttpRacer *x = &r[k];
+            if (x->fd < 0) continue;
+            if (p[at[k]].revents == 0) continue;
+            int err = 0;
+            socklen_t el = sizeof(err);
+            if (getsockopt(x->fd, SOL_SOCKET, SO_ERROR, &err, &el) < 0) err = errno;
+            if (err == 0) { won = x->fd; x->fd = -1; break; }
+            http_undialed(&x->why, x->peer, ": connect: ", err);
+            close(x->fd);
+            x->fd = -1;
+        }
+    }
+    for (int k = 0; k < 2; k++) if (r[k].fd >= 0) close(r[k].fd);
+    if (won >= 0) {
+        fcntl(won, F_SETFL, fcntl(won, F_GETFL, 0) & ~O_NONBLOCK);
+        free(r[0].why.p);
+    } else {
+        *why = r[0].why;
+    }
+    free(r[1].why.p);
+    return won;
+}
+
+// The TLS handshake, for no longer than the request has: whether it was
+// made, and (*late) whether it was the time that ended it.
+static bool http_shake(SSL *ssl, int fd, int64_t deadline, bool *late) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    bool made = false;
+    for (;;) {
+        int n = SSL_connect(ssl);
+        if (n > 0) { made = true; break; }
+        int e = SSL_get_error(ssl, n);
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) break;
+        int64_t left = deadline - mono_ms();
+        if (left <= 0) { *late = true; break; }
+        struct pollfd p = {fd, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, 0};
+        if (poll(&p, 1, left > 60000 ? 60000 : (int)left) < 0 && errno != EINTR) break;
+    }
+    fcntl(fd, F_SETFL, flags);
+    return made;
+}
+
+// A request that fails reads as on the VM: Get "url": why. who is the
+// Get "url" of it.
+static AnimaVal http_err(const char *who, const char *why, const char *more) {
+    AnimaBuf b = {0};
+    buf_put(&b, who); buf_put(&b, ": "); buf_put(&b, why);
     if (more) {
         size_t at = b.len;
         buf_put(&b, more);
@@ -1457,6 +2137,15 @@ static AnimaVal http_err(const char *method, const char *url, const char *why, c
     AnimaVal r = v_err(b.p);
     free(b.p);
     return r;
+}
+
+#define HTTP_LATE "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+
+// What fails before the head of the answer is read fails with these words
+// once the time of the request is over, whatever it was that failed.
+static AnimaVal http_late_or(const char *who, int64_t deadline, const char *why, const char *more) {
+    if (mono_ms() >= deadline) return http_err(who, HTTP_LATE, NULL);
+    return http_err(who, why, more);
 }
 
 // Whether a TLS read or write gave up because the socket's time ran out.
@@ -1514,7 +2203,7 @@ static void tls_not_for(X509 *cert, const char *host) {
             int n = ASN1_STRING_length(g->d.iPAddress);
             const unsigned char *d = ASN1_STRING_get0_data(g->d.iPAddress);
             if (n == 4) inet_ntop(AF_INET, d, one, sizeof(one));
-            else if (n == 16) inet_ntop(AF_INET6, d, one, sizeof(one));
+            else if (n == 16) ip6_text(d, one, sizeof(one));
             else continue;
             ips++;
             name = one; len = strlen(one);
@@ -1540,6 +2229,36 @@ static void tls_not_for(X509 *cert, const char *host) {
     free(valid.p);
 }
 
+// An address in 16 bytes, an IPv4 one as the IPv6 one that stands for it.
+static void ip_wide(const unsigned char *a, int n, unsigned char *out) {
+    if (n == 16) { memcpy(out, a, 16); return; }
+    memset(out, 0, 10);
+    out[10] = out[11] = 0xff;
+    memcpy(out + 12, a, 4);
+}
+
+// Whether a certificate names an address, as Go finds it: 127.0.0.1 and
+// ::ffff:127.0.0.1 are one address, in the URL and in the certificate.
+// OpenSSL compares the bytes, and to it they are two.
+static bool tls_names_ip(X509 *cert, const char *host) {
+    unsigned char raw[16], want[16], have[16];
+    if (inet_pton(AF_INET, host, raw) == 1) ip_wide(raw, 4, want);
+    else if (inet_pton(AF_INET6, host, raw) == 1) ip_wide(raw, 16, want);
+    else return false;
+    GENERAL_NAMES *sans = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    bool found = false;
+    for (int i = 0; i < sk_GENERAL_NAME_num(sans) && !found; i++) {
+        GENERAL_NAME *g = sk_GENERAL_NAME_value(sans, i);
+        if (g->type != GEN_IPADD) continue;
+        int n = ASN1_STRING_length(g->d.iPAddress);
+        if (n != 4 && n != 16) continue;
+        ip_wide(ASN1_STRING_get0_data(g->d.iPAddress), n, have);
+        found = memcmp(want, have, 16) == 0;
+    }
+    GENERAL_NAMES_free(sans);
+    return found;
+}
+
 // Called for each thing wrong with a certificate. Go looks at the server's
 // own dates first, then at its names, then for an authority, and names the
 // first that fails; OpenSSL looks in another order, so every one is heard
@@ -1551,6 +2270,11 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
     bool own = X509_STORE_CTX_get_error_depth(sc) == 0;
     bool dates = cert && (err == X509_V_ERR_CERT_HAS_EXPIRED || err == X509_V_ERR_CERT_NOT_YET_VALID);
     bool names = cert && (err == X509_V_ERR_HOSTNAME_MISMATCH || err == X509_V_ERR_IP_ADDRESS_MISMATCH);
+    if (cert && err == X509_V_ERR_IP_ADDRESS_MISMATCH && tls_names_ip(cert, tls_seen.host)) {
+        // Nothing is wrong with it then, if nothing else was.
+        if (!tls_seen.bad) X509_STORE_CTX_set_error(sc, X509_V_OK);
+        return 1;
+    }
     // An authority out of its dates is named before one that is not known.
     int rank = dates ? (own ? 4 : 2) : names ? 3 : 1;
     tls_seen.bad = true;
@@ -1596,54 +2320,102 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
     return 1;
 }
 
-static AnimaVal http_do(const char *method, const char *url, const char *body, int64_t timeout_ms) {
-    // One time limit for the whole request, as http.Client.Timeout is.
-    int64_t deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 5000);
-    bool is_https = strncmp(url, "https://", 8) == 0;
-    const char *rest = is_https ? url + 8 : (strncmp(url, "http://", 7) == 0 ? url + 7 : url);
-    const char *slash = strchr(rest, '/');
-    char hostport[256] = {0};
-    const char *path = slash ? slash : "/";
-    if (slash) {
-        size_t l = (size_t)(slash - rest);
-        if (l >= sizeof(hostport)) l = sizeof(hostport) - 1;
-        memcpy(hostport, rest, l);
-    } else {
-        strncpy(hostport, rest, sizeof(hostport) - 1);
+// The request is sent to the server the URL names, at the address and port
+// Go would dial, and fails with Go's words where Go's would.
+static AnimaVal http_ask(const char *method, const Url *u, const char *who, const char *body, int64_t deadline) {
+    bool is_https = strcmp(u->scheme.p ? u->scheme.p : "", "https") == 0;
+    if (!is_https && strcmp(u->scheme.p ? u->scheme.p : "", "http") != 0) {
+        char *why = url_why("unsupported protocol scheme ", (Span){u->scheme.p ? u->scheme.p : "", u->scheme.len}, "");
+        AnimaVal r = http_late_or(who, deadline, why, NULL);
+        free(why);
+        return r;
     }
-    char host[256] = {0};
-    char port[16];
-    strcpy(port, is_https ? "443" : "80");
-    const char *colon = strchr(hostport, ':');
-    if (colon) {
-        size_t hl = (size_t)(colon - hostport);
-        memcpy(host, hostport, hl);
-        strncpy(port, colon + 1, sizeof(port) - 1);
-    } else {
-        strcpy(host, hostport);
+    if (u->host.len == 0) return http_late_or(who, deadline, "http: no Host in request URL", NULL);
+
+    // The name or address to dial and its port, as Go splits the host.
+    char *hostport = strdup(u->host.p);
+    const char *port = is_https ? "443" : "80";
+    char *colon = strrchr(hostport, ':');
+    if (colon && url_port_ok((Span){colon, strlen(colon)})) {
+        *colon = '\0';
+        if (colon[1] != '\0') port = colon + 1;
+    }
+    char *host = hostport;
+    size_t host_len = strlen(host);
+    if (host_len >= 2 && host[0] == '[' && host[host_len - 1] == ']') { host[host_len - 1] = '\0'; host++; }
+
+    // Go joins the two to one address and splits that again to dial it:
+    // a ] in a name is where this goes wrong.
+    AnimaBuf unmet = {0};
+    const char *rb = strchr(host, ']');
+    const char *digits = port;
+    while (digits[0] == '0' && digits[1] != '\0') digits++;
+    long portno = strlen(digits) > 5 ? 65536 : atol(digits);
+    if (rb) {
+        bool colons = strchr(host, ':') != NULL;
+        buf_put(&unmet, "dial tcp: address ");
+        if (colons) buf_put(&unmet, "[");
+        buf_put(&unmet, host);
+        buf_put(&unmet, colons ? "]:" : ":");
+        buf_put(&unmet, port);
+        buf_put(&unmet, !colons ? ": unexpected ']' in address" : rb[1] == ':' ? ": too many colons in address" : ": missing port in address");
+    } else if (portno > 65535) {
+        buf_put(&unmet, "dial tcp: address ");
+        buf_put(&unmet, port);
+        buf_put(&unmet, ": invalid port");
     }
 
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
-        char why[320];
-        snprintf(why, sizeof(why), "dial tcp: lookup %s: no such host", host);
-        return http_err(method, url, why, NULL);
+    // Where to connect: the address written, this machine for no host at
+    // all, or what the name is looked up to be. Only what Go takes for an
+    // address is one: 127.1 and 0x7f.0.0.1 are names, and no host has them.
+    HttpPeer *peers = NULL;
+    size_t npeers = 0;
+    if (!unmet.p) {
+        int kind = url_addr(host);
+        struct in_addr a4 = {0};
+        struct in6_addr a6;
+        if (host[0] == '\0') {
+            peers = calloc(1, sizeof(HttpPeer));
+            http_peer4(&peers[npeers++], a4, (int)portno, true);
+        } else if (kind == 4 && inet_pton(AF_INET, host, &a4) == 1) {
+            peers = calloc(1, sizeof(HttpPeer));
+            http_peer4(&peers[npeers++], a4, (int)portno, false);
+        } else if (kind == 6 && inet_pton(AF_INET6, host, &a6) == 1) {
+            peers = calloc(1, sizeof(HttpPeer));
+            http_peer6(&peers[npeers++], &a6, 0, (int)portno);
+        } else {
+            bool late = false;
+            struct addrinfo *res = NULL;
+            if (kind == 0 && http_is_name(host) && !http_is_old_addr(host)) res = http_lookup(host, deadline, &late);
+            size_t found = 0;
+            for (struct addrinfo *ai = res; ai; ai = ai->ai_next) found++;
+            if (found > 0) peers = calloc(found, sizeof(HttpPeer));
+            for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+                if (ai->ai_family == AF_INET) {
+                    http_peer4(&peers[npeers++], ((struct sockaddr_in *)ai->ai_addr)->sin_addr, (int)portno, false);
+                } else if (ai->ai_family == AF_INET6) {
+                    struct sockaddr_in6 *sa = (struct sockaddr_in6 *)ai->ai_addr;
+                    http_peer6(&peers[npeers++], &sa->sin6_addr, sa->sin6_scope_id, (int)portno);
+                }
+            }
+            if (res) freeaddrinfo(res);
+            if (npeers == 0) {
+                buf_put(&unmet, "dial tcp: lookup ");
+                buf_put(&unmet, host);
+                buf_put(&unmet, ": no such host");
+            }
+        }
     }
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { int e = errno; freeaddrinfo(res); return http_err(method, url, "dial tcp: socket: ", strerror(e)); }
-    set_fd_timeout(fd, timeout_ms > 0 ? timeout_ms : 5000);
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        int e = errno;
-        char ip[INET6_ADDRSTRLEN] = {0}, why[400];
-        if (res->ai_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, ip, sizeof(ip));
-        else if (res->ai_family == AF_INET6) inet_ntop(AF_INET6, &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr, ip, sizeof(ip));
-        snprintf(why, sizeof(why), res->ai_family == AF_INET6 ? "dial tcp [%s]:%s: connect: " : "dial tcp %s:%s: connect: ", ip, port);
-        close(fd); freeaddrinfo(res);
-        return http_err(method, url, why, strerror(e));
+
+    int fd = -1;
+    if (npeers > 0) fd = http_dial(peers, npeers, deadline, &unmet);
+    free(peers);
+    if (fd < 0) {
+        AnimaVal r = http_late_or(who, deadline, unmet.p ? unmet.p : HTTP_LATE, NULL);
+        free(unmet.p); free(hostport);
+        return r;
     }
-    freeaddrinfo(res);
+    free(unmet.p);
 
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
@@ -1686,7 +2458,8 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         SSL_set_fd(ssl, fd);
         tls_seen.bad = false; tls_seen.rank = 0;
         tls_seen.host = host;
-        bool shook = told && SSL_connect(ssl) > 0;
+        bool late = false;
+        bool shook = told && http_shake(ssl, fd, deadline, &late);
         // tls_refused lets the handshake go on to hear every reason, so
         // what it heard decides, not the handshake.
         bool refuse = !shook || tls_seen.bad || SSL_get_verify_result(ssl) != X509_V_OK;
@@ -1695,13 +2468,13 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         char *heard = tls_seen.why;
         tls_seen.why = NULL; tls_seen.host = NULL;
         if (refuse) {
-            SSL_free(ssl); SSL_CTX_free(ctx); close(fd);
-            if (!heard) return http_err(method, url, "tls handshake failed", NULL);
+            SSL_free(ssl); SSL_CTX_free(ctx); close(fd); free(hostport);
+            if (!heard) return http_late_or(who, deadline, "tls handshake failed", NULL);
             AnimaBuf why = {0};
             buf_put(&why, "tls: failed to verify certificate: x509: ");
             buf_put(&why, heard);
             free(heard);
-            AnimaVal refused = http_err(method, url, why.p, NULL);
+            AnimaVal refused = http_late_or(who, deadline, why.p, NULL);
             free(why.p);
             return refused;
         }
@@ -1710,18 +2483,33 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
 
     // The request is as long as its path and body make it.
     AnimaBuf req = {0};
-    buf_put(&req, method); buf_put(&req, " "); buf_put(&req, path);
-    buf_put(&req, " HTTP/1.1\r\nHost: "); buf_put(&req, hostport);
-    buf_put(&req, "\r\nConnection: close\r\n");
-    if (body && body[0] != '\0') {
+    buf_put(&req, method); buf_put(&req, " ");
+    if (u->path.n == 0) buf_put(&req, "/");
+    else url_put_part(&req, u->path, URL_PATH);
+    if (u->force_query || u->query.n > 0) { buf_put(&req, "?"); url_put_query(&req, u->query); }
+    buf_put(&req, " HTTP/1.1\r\nHost: "); buf_put(&req, u->host.p);
+    buf_put(&req, "\r\nUser-Agent: anima\r\n");
+    size_t body_len = body ? strlen(body) : 0;
+    if (method[0] == 'P') {
         char len_line[64];
-        snprintf(len_line, sizeof(len_line), "Content-Length: %zu\r\n", strlen(body));
+        snprintf(len_line, sizeof(len_line), "Content-Length: %zu\r\n", body_len);
         buf_put(&req, len_line);
-        buf_put(&req, "Content-Type: application/json\r\n\r\n");
-        buf_put(&req, body);
-    } else {
-        buf_put(&req, "\r\n");
     }
+    // Who asks, if the URL says: user:password@host.
+    if (u->has_user) {
+        AnimaBuf pair = {0};
+        if (u->user.len > 0) buf_putn(&pair, u->user.p, u->user.len);
+        buf_put(&pair, ":");
+        if (u->pass.len > 0) buf_putn(&pair, u->pass.p, u->pass.len);
+        buf_put(&req, "Authorization: Basic ");
+        buf_base64(&req, (const unsigned char *)pair.p, pair.len);
+        buf_put(&req, "\r\n");
+        free(pair.p);
+    }
+    if (body_len > 0) buf_put(&req, "Content-Type: application/json\r\n");
+    buf_put(&req, "Connection: close\r\n\r\n");
+    if (body_len > 0) buf_put(&req, body);
+    free(hostport);
     bool timed_out = false;
     size_t sent = 0;
     while (sent < req.len) {
@@ -1774,14 +2562,14 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     AnimaVal answer;
     if (timed_out) {
         if (ans.in_body) answer = v_err("context deadline exceeded (Client.Timeout or context cancellation while reading body)");
-        else answer = http_err(method, url, "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
+        else answer = http_err(who, HTTP_LATE, NULL);
     } else if (total == 0) {
-        answer = http_err(method, url, "EOF", NULL);
+        answer = http_err(who, "EOF", NULL);
     } else if (got == HTTP_BAD && !ans.in_body) {
         AnimaBuf why = {0};
         buf_put(&why, "net/http: HTTP/1.x transport connection broken: ");
         buf_put(&why, ans.bad);
-        answer = http_err(method, url, why.p, NULL);
+        answer = http_err(who, why.p, NULL);
         free(why.p);
     } else if (got == HTTP_BAD) {
         answer = v_err(ans.bad);
@@ -1801,6 +2589,40 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     }
     http_answer_free(&ans);
     free(raw);
+    return answer;
+}
+
+static AnimaVal http_do(const char *method, const char *url, const char *body, int64_t timeout_ms) {
+    // One time limit for the whole request, as http.Client.Timeout is.
+    int64_t deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 5000);
+    Url u = {0};
+    size_t named = 0;
+    char *bad = url_parse(url, &u, &named);
+    // A port that is empty is none.
+    if (!bad && u.host.len > 0 && u.host.p[u.host.len - 1] == ':') u.host.p[--u.host.len] = '\0';
+    // Two hosts Go takes are no host here, nor on the VM: an IPv6 address
+    // with a zone, and a name outside ASCII, which Go rewrites before it
+    // asks for it.
+    if (!bad && u.host.len > 0 && strchr(u.host.p, '%')) bad = strdup("invalid host");
+    for (size_t i = 0; !bad && i < u.host.len; i++) {
+        if ((unsigned char)u.host.p[i] >= 0x80) bad = strdup("non-ASCII host name");
+    }
+    if (bad) {
+        AnimaBuf b = {0};
+        buf_put(&b, "parse ");
+        go_quote(&b, url, named);
+        buf_put(&b, ": ");
+        buf_put(&b, bad);
+        AnimaVal r = v_err(b.p);
+        free(b.p); free(bad); url_free(&u);
+        return r;
+    }
+    AnimaBuf shown = {0}, who = {0};
+    url_shown(&u, &shown);
+    buf_put(&who, method[0] == 'P' ? "Post " : "Get ");
+    go_quote(&who, shown.p, shown.len);
+    AnimaVal answer = http_ask(method, &u, who.p, body, deadline);
+    free(shown.p); free(who.p); url_free(&u);
     return answer;
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -264,7 +265,8 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		if len(args) >= 1 && args[0].Int > 0 {
 			poolSize = int(args[0].Int)
 		}
-		tr := &http.Transport{MaxIdleConnsPerHost: poolSize, MaxIdleConns: poolSize * 2, DisableCompression: true, DisableKeepAlives: true}
+		tr := newTransport()
+		tr.MaxIdleConnsPerHost, tr.MaxIdleConns = poolSize, poolSize*2
 		cl := &http.Client{Transport: tr}
 		return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleSession, HTTPClient: cl}}, nil
 
@@ -739,12 +741,43 @@ func extractTimeoutMsFromMethod(cm CallMeta, args []Value, posIdx int, def int) 
 // a redirect is an answer like another, not followed. Each request has a
 // connection of its own, as it has there: on one used again, what a server
 // sent after an answer was read as the start of the next.
-var plainTransport = func() *http.Transport {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DisableCompression = true
-	tr.DisableKeepAlives = true
-	return tr
-}()
+var plainTransport = newTransport()
+
+// newTransport gives a transport that does what the native client does and
+// no more: it speaks HTTP/1.1 only, straight to the server and through no
+// proxy the environment names, and the one time limit is the request's.
+func newTransport() *http.Transport {
+	return &http.Transport{
+		DialContext:        dialUntil,
+		DisableCompression: true,
+		DisableKeepAlives:  true,
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}
+}
+
+// until is the key of a request's context under which its time limit is
+// kept for the dialer.
+type until struct{}
+
+// dialUntil connects for a request, and what it connects ends with the
+// request. Go's transport goes on connecting, and shaking hands over TLS,
+// for a request that is over, so that the next may use the connection;
+// here none does, and a server that never answered kept a socket of every
+// request that gave it up. The connection is one request's, so the
+// request's time limit is the connection's.
+func dialUntil(ctx context.Context, network, addr string) (net.Conn, error) {
+	end, ok := ctx.Value(until{}).(time.Time)
+	if !ok {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	ctx, cancel := context.WithDeadline(ctx, end)
+	defer cancel()
+	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err == nil {
+		_ = c.SetDeadline(end)
+	}
+	return c, err
+}
 
 // asAnswered hides from Go's client where a redirect leads, so that the
 // client follows none and has no word to say on where one leads.
@@ -758,6 +791,30 @@ func (a asAnswered) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
+func escapeQuery(q string) string {
+	var b strings.Builder
+	for i := 0; i < len(q); i++ {
+		if c := q[i]; c == ' ' || c == '"' || c == '<' || c == '>' || c >= 0x80 {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func hostRefused(host string) string {
+	if strings.Contains(host, "%") {
+		return "invalid host"
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return "non-ASCII host name"
+		}
+	}
+	return ""
+}
+
 func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.Client) Value {
 	var bodyReader io.Reader
 	if body != "" {
@@ -766,11 +823,37 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	// One time limit for the whole request. It is kept here and not by
 	// http.Client.Timeout: that ends a request in two ways at once, and
 	// which of the two is first decides the words of the error.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	end := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), until{}, end), end)
 	defer cancel()
+	// The time is up by the clock: the request and its connection end at
+	// the same moment, and either may be the first to say so.
+	late := func() bool { return ctx.Err() != nil || !time.Now().Before(end) }
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
+		// Why an address in [ ] is none is said in more words than the
+		// native client has for it.
+		var ue *neturl.Error
+		if errors.As(err, &ue) && strings.HasPrefix(ue.Err.Error(), "invalid host: ") {
+			ue.Err = errors.New("invalid host")
+		}
 		return VErr(err.Error())
+	}
+	// Two hosts Go takes are no host here, nor to the native client: an
+	// IPv6 address with a zone, and a name outside ASCII, which Go would
+	// rewrite before it asks for it.
+	if why := hostRefused(req.URL.Host); why != "" {
+		named, _, _ := strings.Cut(url, "#")
+		return VErr(fmt.Sprintf("parse %q: %s", named, why))
+	}
+	// Go sends a query as written. One with a space in it makes a first
+	// line that is none, so what may not stand in one is written %XX, here
+	// and by the native client.
+	req.URL.RawQuery = escapeQuery(req.URL.RawQuery)
+	// What is sent is what the native client sends.
+	req.Header.Set("User-Agent", "anima")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	var tr http.RoundTripper = plainTransport
 	if baseClient != nil {
@@ -783,15 +866,27 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	resp, err := cl.Do(req)
 	if err != nil {
 		var ue *neturl.Error
-		if ctx.Err() != nil && errors.As(err, &ue) {
+		if late() && errors.As(err, &ue) {
 			ue.Err = errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
 		}
-		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
+		msg := err.Error()
+		// Which resolver was asked is this machine's own business. The
+		// error is not changed to leave it out: requests that look up one
+		// name at the same time are given the same one.
+		var de *net.DNSError
+		if errors.As(err, &de) && de.Server != "" {
+			unasked := *de
+			unasked.Server = ""
+			if at := strings.LastIndex(msg, de.Error()); at >= 0 {
+				msg = msg[:at] + unasked.Error() + msg[at+len(de.Error()):]
+			}
+		}
+		return VErr(strings.ReplaceAll(msg, "\x00", `\x00`))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		if ctx.Err() != nil {
+		if late() {
 			return VErr("context deadline exceeded (Client.Timeout or context cancellation while reading body)")
 		}
 		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
