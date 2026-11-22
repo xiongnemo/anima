@@ -25,7 +25,7 @@ func httpAnswers() []string {
 	te := func(v string) string { return h + c + "Transfer-Encoding: " + v + "\r\n\r\n2\r\nok\r\n0\r\n\r\n" }
 	ch := func(body string) string { return h + c + "Transfer-Encoding: chunked\r\n\r\n" + body }
 	hd := func(field string) string { return h + c + field + "\r\n" + ok }
-	return []string{
+	answers := []string{
 		h + c + ok,
 		h + ok,
 		h + c + "\r\nuntil close",
@@ -110,6 +110,11 @@ func httpAnswers() []string {
 		te("chunked\r\nTransfer-Encoding: chunked"), te(""), te("chunked;q=1"),
 		"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
 		"HTTP/1.0 200 OK\r\nTransfer-Encoding: gzip\r\n" + ok,
+		// Go takes HTTP/0.0 for HTTP/1.1.
+		"HTTP/0.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+		"HTTP/0.0 200 OK\r\nTransfer-Encoding: gzip\r\n" + ok,
+		"HTTP/0.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+		"HTTP/0.0 200 OK\r\n\r\nto the close",
 		h + c + "Trailer: X\r\n" + ok,
 		h + c + "Trailer: Content-Length\r\n" + ok,
 		h + c + "Trailer: X, trailer\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
@@ -149,6 +154,24 @@ func httpAnswers() []string {
 		"HTTP/1.1 500 Oops\r\n" + c + ok,
 		h + c + "Content-Encoding: gzip\r\nContent-Length: 4\r\n\r\n\x1f\x8b\x08\x01",
 	}
+	// What an answer says of its body counts by its version and its status:
+	// each way to say it, with each.
+	for _, version := range []string{"0.0", "0.1", "0.9", "1.0", "1.1", "1.2", "2.0", "9.9"} {
+		for _, status := range []string{"200 OK", "101 S", "199 X", "204 No", "304 No", "404 No"} {
+			for _, says := range []string{
+				"Transfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+				"Transfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+				"Transfer-Encoding: gzip\r\n" + ok,
+				"Trailer: Content-Length\r\n" + ok,
+				"Upgrade: x\r\nConnection: upgrade\r\n" + ok,
+				ok,
+				"\r\nto the close",
+			} {
+				answers = append(answers, "HTTP/"+version+" "+status+"\r\n"+says)
+			}
+		}
+	}
+	return answers
 }
 
 // mutate gives the answer with a few bytes of it changed, dropped, added
@@ -308,13 +331,15 @@ def main() -> int:
 	}
 	split := func(out []byte) map[int]string {
 		got := map[int]string{}
-		for _, part := range strings.Split("\n"+string(out), "\n#")[1:] {
+		// The newline print ends a line with is before the next #, or the
+		// last byte: a body may end with one of its own.
+		for _, part := range strings.Split("\n"+strings.TrimSuffix(string(out), "\n"), "\n#")[1:] {
 			num, rest, _ := strings.Cut(part, " ")
 			n, err := strconv.Atoi(num)
 			if err != nil {
 				t.Fatalf("output is not by answer: %q", part)
 			}
-			got[n] = strings.TrimSuffix(rest, "\n")
+			got[n] = rest
 		}
 		return got
 	}

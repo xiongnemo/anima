@@ -1234,7 +1234,9 @@ static const char *http_bad_trailer(const HttpVals *vs) {
 static int http_head_end(HttpAnswer *a) {
     bool chunked = false;
     // A Transfer-Encoding counts from HTTP/1.1 on, and only "chunked" does.
-    if (a->encodings.n > 0 && (a->major > 1 || (a->major == 1 && a->minor >= 1))) {
+    // Go takes HTTP/0.0 for HTTP/1.1.
+    bool is_1_1 = a->major > 1 || (a->major == 1 && a->minor >= 1) || (a->major == 0 && a->minor == 0);
+    if (a->encodings.n > 0 && is_1_1) {
         if (a->encodings.n != 1) return http_fail(a, http_msg_vals("too many transfer encodings: ", &a->encodings));
         const char *te = a->encodings.v[0];
         if (strcasecmp(te, "chunked") != 0) return http_fail(a, http_msg("unsupported transfer encoding: ", te, strlen(te), true));
