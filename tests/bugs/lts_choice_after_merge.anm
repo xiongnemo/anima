@@ -1,0 +1,44 @@
+# The model of a workflow stopped at a merge that goes on by the choice
+# written after it: `fin` was forbidden here and done all the same.
+property NeverEnds:
+    state Open:
+        on a -> Open
+        on b -> Open
+        on none -> Open
+        on fin -> ERROR
+
+workflow Find(k: int[0..9]) -> int:
+    verify: sound
+
+    start -> one:
+        heard = k > 3
+
+    choice after one:
+        when heard -> a
+        when not heard -> b
+
+    step a -> both:
+        n = 1
+    step b -> both:
+        n = 0
+
+    merge both after a, b
+    choice after both:
+        when n > 0 -> fin
+        when n <= 0 -> none
+
+    step fin -> done:
+        return n
+    step none -> done:
+        return 7
+
+system Probing:
+    compose:
+        find: Find
+    check:
+        satisfies NeverEnds
+
+def main() -> int:
+    print(run_workflow Find(1))
+    print(run_workflow Find(9))
+    return 0

@@ -1,0 +1,22 @@
+# A step goes on by the choice written after it: the fork after it never runs.
+workflow W(b: bool):
+    verify: sound
+    start -> a
+    step a:
+        print("a")
+    choice after a:
+        when b -> c
+        else -> d
+    fork f after a:
+        branch x:
+            call print("x")
+    join j -> done
+    step c -> done:
+        print("c")
+    step d -> done:
+        print("d")
+
+def main() -> int:
+    run_workflow W(True)
+    run_workflow W(False)
+    return 0

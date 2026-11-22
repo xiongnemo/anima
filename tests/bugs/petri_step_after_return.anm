@@ -1,0 +1,13 @@
+# A step that returns on every path ends the workflow: its target never runs.
+workflow W(b: bool):
+    verify: sound
+    start -> a
+    step a -> c:
+        print("a")
+        return
+    step c -> done:
+        print("c")
+
+def main() -> int:
+    run_workflow W(True)
+    return 0

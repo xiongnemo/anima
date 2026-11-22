@@ -1,0 +1,32 @@
+# A choice written after a fork was taken in place of the fork: the branches
+# never ran, on either backend, and the workflow was verified as sound.
+def note() -> int:
+    print("branch")
+    return 1
+
+workflow Find(k: int[0..9]) -> int:
+    verify: sound
+
+    start -> split
+
+    fork split:
+        branch left:
+            call note()
+        branch right:
+            call note()
+
+    choice after split:
+        when k > 3 -> a
+        when k <= 3 -> b
+
+    join both -> a
+
+    step a -> done:
+        return 1
+    step b -> done:
+        return 0
+
+def main() -> int:
+    print(run_workflow Find(1))
+    print(run_workflow Find(9))
+    return 0

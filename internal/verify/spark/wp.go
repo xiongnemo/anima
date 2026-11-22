@@ -797,12 +797,19 @@ func (v *verifier) walkWorkflow(flow *ast.Flow, cur string, env *symEnv, scope s
 			cur, at = flow.AfterFork(), fk.Span
 			continue
 		}
+		var choice *ast.ChoiceNode
 		if jn := flow.Join(cur); jn != nil {
-			cur, at = flow.AfterJoin(jn), jn.Span
-			continue
+			cur, choice = flow.AfterJoin(jn)
+			at = jn.Span
+		} else {
+			mn := flow.Merge(cur)
+			cur, choice = flow.AfterMerge(mn)
+			at = mn.Span
 		}
-		mn := flow.Merge(cur)
-		cur, at = flow.AfterMerge(mn), mn.Span
+		if choice != nil {
+			v.walkChoice(flow, choice, env, scope, onPath)
+			return
+		}
 	}
 }
 

@@ -460,121 +460,109 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 		g.line("ctx->pool_%s = conc_sem_new(%d);", pl.Name, pl.Capacity)
 	}
 
-	// Map workflow steps & choices & joins
-	var startNode *ast.StartNode
-	steps := map[string]*ast.StepNode{}
-	choices := map[string]*ast.ChoiceNode{}
-	forks := map[string]*ast.ForkNode{}
-	joins := map[string]*ast.JoinNode{}
-	for _, n := range wf.Nodes {
-		switch x := n.(type) {
-		case *ast.StartNode:
-			startNode = x
-		case *ast.StepNode:
-			steps[x.Name] = x
-		case *ast.ChoiceNode:
-			k := x.After
-			if k == "" {
-				k = x.Name
+	// The workflow goes where its flow says, which is what the kernels
+	// verified and what the VM runs: each node is a label, written once in
+	// the order of the source, and ends with a goto of its own.
+	flow := ast.NewFlow(wf)
+	goTo := func(name string) {
+		if flow.Ends(name) {
+			name = "done"
+		}
+		g.line("goto wf_lbl_%s;", name)
+	}
+	// The first branch whose guard holds is taken. With none the workflow
+	// is over, which the contract kernel proves is never so.
+	choose := func(ch *ast.ChoiceNode) {
+		for _, br := range ch.Branches {
+			if br.IsElse {
+				goTo(br.Target)
+				return
 			}
-			choices[k] = x
-		case *ast.ForkNode:
-			forks[x.Name] = x
-		case *ast.JoinNode:
-			joins[x.Name] = x
+			g.line("if (v_truthy(%s)) {", g.emitExpr(br.Guard))
+			g.indent++
+			goTo(br.Target)
+			g.indent--
+			g.line("}")
+		}
+		goTo("done")
+	}
+	leave := func(next string, ch *ast.ChoiceNode) {
+		if ch != nil {
+			choose(ch)
+		} else {
+			goTo(next)
 		}
 	}
-
-	// Emit label-based workflow state machine
-	if startNode != nil {
-		for _, st := range startNode.Body {
+	if flow.Start != nil {
+		for _, st := range flow.Start.Body {
 			if err := g.emitStmt(st); err != nil {
 				return err
 			}
 		}
-		g.line("goto wf_lbl_%s;", startNode.Target)
+		goTo(flow.Start.Target)
+	} else {
+		goTo("done")
 	}
-	for _, st := range steps {
-		g.line("wf_lbl_%s: ;", st.Name)
-		for _, s := range st.Body {
-			if err := g.emitStmt(s); err != nil {
-				return err
-			}
-		}
-		if st.Target != "" {
-			g.line("goto wf_lbl_%s;", st.Target)
-		} else if ch, ok := choices[st.Name]; ok {
-			g.emitChoiceGoto(ch)
-		} else {
-			// Check fork/step after st.Name
-			for _, fk := range forks {
-				if fk.After == st.Name {
-					g.line("goto wf_lbl_%s;", fk.Name)
-				}
-			}
-			for _, nxt := range steps {
-				if nxt.After == st.Name {
-					g.line("goto wf_lbl_%s;", nxt.Name)
-				}
-			}
-		}
-	}
-	for name, ch := range choices {
-		if _, isStep := steps[name]; !isStep {
-			g.line("wf_lbl_%s: ;", name)
-			g.emitChoiceGoto(ch)
-		}
-	}
-	for _, fk := range forks {
-		g.line("wf_lbl_%s: ;", fk.Name)
-		workers := forkWorkerMap[fk.Name]
-		if len(workers) > 0 {
-			g.line("{")
-			g.indent++
-			g.line("pthread_t __tids[%d];", len(workers))
-			for i, wfn := range workers {
-				g.line("pthread_create(&__tids[%d], NULL, %s, ctx);", i, wfn)
-			}
-			for i := range workers {
-				g.line("pthread_join(__tids[%d], NULL);", i)
-			}
-			g.indent--
-			g.line("}")
-		}
-		for jname := range joins {
-			g.line("goto wf_lbl_%s;", jname)
-			break
-		}
-	}
-	for _, jn := range joins {
-		g.line("wf_lbl_%s: ;", jn.Name)
-		if jn.Target != "" {
-			g.line("goto wf_lbl_%s;", jn.Target)
-		} else {
-			for _, st := range steps {
-				if st.After == jn.Name {
-					g.line("goto wf_lbl_%s;", st.Name)
-				}
-			}
-		}
-	}
-	// A merge is where the branches of a choice come together: it does
-	// nothing itself.
-	flow := ast.NewFlow(wf)
 	for _, n := range wf.Nodes {
-		mn, ok := n.(*ast.MergeNode)
-		if !ok || flow.Merge(mn.Name) != mn {
-			continue
+		switch x := n.(type) {
+		case *ast.StepNode:
+			if flow.Ends(x.Name) || flow.Step(x.Name) != x {
+				continue
+			}
+			g.line("wf_lbl_%s: ;", x.Name)
+			for _, s := range x.Body {
+				if err := g.emitStmt(s); err != nil {
+					return err
+				}
+			}
+			leave(flow.AfterStep(x))
+		case *ast.ChoiceNode:
+			key := x.After
+			if key == "" {
+				key = x.Name
+			}
+			// The choice after a node is written at the end of the node.
+			if flow.Ends(key) || flow.Choice(key) != x {
+				continue
+			}
+			g.line("wf_lbl_%s: ;", key)
+			choose(x)
+		case *ast.ForkNode:
+			if flow.Ends(x.Name) || flow.Fork(x.Name) != x {
+				continue
+			}
+			g.line("wf_lbl_%s: ;", x.Name)
+			if workers := forkWorkerMap[x.Name]; len(workers) > 0 {
+				g.line("{")
+				g.indent++
+				g.line("pthread_t __tids[%d];", len(workers))
+				for i, wfn := range workers {
+					g.line("pthread_create(&__tids[%d], NULL, %s, ctx);", i, wfn)
+				}
+				for i := range workers {
+					g.line("pthread_join(__tids[%d], NULL);", i)
+				}
+				g.indent--
+				g.line("}")
+			}
+			goTo(flow.AfterFork())
+		case *ast.JoinNode:
+			if flow.Ends(x.Name) || flow.Join(x.Name) != x {
+				continue
+			}
+			g.line("wf_lbl_%s: ;", x.Name)
+			leave(flow.AfterJoin(x))
+		case *ast.MergeNode:
+			// A merge is where the branches of a choice come together: it
+			// does nothing itself.
+			if flow.Ends(x.Name) || flow.Merge(x.Name) != x {
+				continue
+			}
+			g.line("wf_lbl_%s: ;", x.Name)
+			leave(flow.AfterMerge(x))
 		}
-		g.line("wf_lbl_%s: ;", mn.Name)
-		next := flow.AfterMerge(mn)
-		if flow.Ends(next) {
-			next = "done"
-		}
-		g.line("goto wf_lbl_%s;", next)
 	}
 	g.line("wf_lbl_done: ;")
-	g.line("wf_lbl_END: ;")
 	g.line("return v_void();")
 	g.indent--
 	g.line("}")
@@ -584,17 +572,6 @@ func (g *cgen) emitWorkflow(wf *ast.WorkflowDecl) error {
 	g.wfVars = prevWfVars
 	g.wfCtxPtr = prevCtx
 	return nil
-}
-
-func (g *cgen) emitChoiceGoto(ch *ast.ChoiceNode) {
-	for _, br := range ch.Branches {
-		if br.IsElse {
-			g.line("goto wf_lbl_%s;", br.Target)
-			return
-		}
-		condC := g.emitExpr(br.Guard)
-		g.line("if (v_truthy(%s)) goto wf_lbl_%s;", condC, br.Target)
-	}
 }
 
 func collectStmtLocals(stmts []ast.Stmt) []string {

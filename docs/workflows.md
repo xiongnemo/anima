@@ -55,7 +55,14 @@ The Petri kernel verifies:
 - **soundness** after van der Aalst: *option to complete*, *proper completion*, *no dead transitions*;
 - the same again through the short-circuit theorem (the short-circuited net is bounded and live), as a cross-check.
 
-A graph the backends could not run one way only is refused here: two joins for one fork, a step with no successor, a target that does not exist, two steps after one `merge` (`DEAD TRANSITION`).
+The net is of the workflow as it runs, and a node no run comes to is refused (`DEAD TRANSITION`):
+
+- a step goes to its target, or else by the `choice` after it, or else to the `fork` after it, or else to the first step written after it. A `join` and a `merge` go on the same way, but for the `fork`. What is written after a node and not taken is refused: a `choice` after a node with a target, a `fork` after a step with a `choice`, the first of two `choice`s after one node.
+- a `fork` goes to its branches, so a `choice` after a `fork` is refused.
+- a step whose body returns on every path ends the workflow, so what only it goes to is refused.
+- the branches of a `fork` meet at the first `join` of the workflow, and a `merge` is come to only by its name.
+
+A graph the backends could not run one way only is refused the same way: two joins for one fork, a step or a `merge` that goes nowhere, a target that does not exist, two steps after one `merge`.
 
 `anima export --pnml out.pnml` writes the net as ISO PNML.
 

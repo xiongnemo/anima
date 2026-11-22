@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/xiongnemo/anima/internal/ast"
+	"github.com/xiongnemo/anima/internal/sema"
 )
 
 type PlaceKind int
@@ -76,8 +77,20 @@ func (n *PetriNet) addTrans(name string, kind TransKind, pre, post map[int]int) 
 	return id
 }
 
-// CompileWorkflow builds a Place/Transition Workflow Net (WF-Net)
-// with explicit pool resource places, AND-split/join (fork/join), and XOR-split/join (choice/merge).
+// CompileWorkflow is the workflow as a place / transition net: the control
+// the backends run (ast.Flow), with a place for each name the control stands
+// at, the pools as places, a fork as an AND-split and its join an AND-join.
+//
+//   - A step moves the control where the flow goes after it; one whose body
+//     always returns moves it to done. With nowhere to go it leaves the
+//     control at a place of its own, and the net does not complete.
+//   - A choice has a transition for each branch, from the place of its own
+//     name or from the place its step leaves the control at.
+//   - The branches of a fork end in the first join of the workflow, the only
+//     one the backends go to. With no join each branch ends the workflow.
+//   - A join waits for the branches and for each node written to go to it.
+//
+// A node the flow does not come to has a transition that never fires.
 func CompileWorkflow(wf *ast.WorkflowDecl) (*PetriNet, error) {
 	net := &PetriNet{
 		Name:        wf.Name,
@@ -94,204 +107,116 @@ func CompileWorkflow(wf *ast.WorkflowDecl) (*PetriNet, error) {
 		poolIDs[pl.Name] = pid
 	}
 
-	// Index named nodes for cross-referencing
-	var startNode *ast.StartNode
-	stepNodes := map[string]*ast.StepNode{}
-	choiceNodes := map[string]*ast.ChoiceNode{}
-	choiceAfter := map[string]*ast.ChoiceNode{}
-	forkNodes := map[string]*ast.ForkNode{}
-	forkAfter := map[string]*ast.ForkNode{}
-	joinNodes := map[string]*ast.JoinNode{}
-	mergeNodes := map[string]*ast.MergeNode{}
-	stepAfter := map[string][]*ast.StepNode{}
-
-	var joinOrder []*ast.JoinNode
-	var mergeOrder []*ast.MergeNode
+	flow := ast.NewFlow(wf)
+	joinInputs := map[string][]int{}
+	// at is the place of the control standing at a name. A name with no node
+	// has a place nothing takes the control from.
+	at := func(name string) int {
+		if name == "done" || name == "END" {
+			return net.DonePlace
+		}
+		return net.ensurePlace("p:"+name, PlaceControl, 0)
+	}
+	// into is where who (a kind and a name, so no two are one) sends the
+	// control when it goes to name: a join waits for it as it waits for a
+	// branch.
+	into := func(name, who string) int {
+		if flow.Join(name) == nil {
+			return at(name)
+		}
+		pid := net.ensurePlace("join_in:"+name+":"+who, PlaceControl, 0)
+		joinInputs[name] = append(joinInputs[name], pid)
+		return pid
+	}
+	// leave is the place a step, a join or a merge leaves the control at:
+	// the one the choice written after it takes it from, or the place of
+	// the node it goes to. A join that goes nowhere ends the workflow; a
+	// step or a merge that does ends it on the backends, and the net asks
+	// for the `-> done` to be written.
+	chosenAt := map[*ast.ChoiceNode]int{}
+	leave := func(name, who, next string, choice *ast.ChoiceNode) int {
+		switch {
+		case choice != nil:
+			chosenAt[choice] = net.ensurePlace("after:"+name, PlaceControl, 0)
+			return chosenAt[choice]
+		case next != "":
+			return into(next, who)
+		case flow.Join(name) != nil:
+			return net.DonePlace
+		}
+		return net.ensurePlace("no_successor:"+name, PlaceControl, 0)
+	}
+	leaves := map[ast.WorkflowNode]int{}
+	for _, n := range wf.Nodes {
+		switch x := n.(type) {
+		case *ast.StepNode:
+			if sema.AlwaysReturns(x.Body) {
+				leaves[x] = net.DonePlace
+				continue
+			}
+			next, choice := flow.AfterStep(x)
+			leaves[x] = leave(x.Name, "step:"+x.Name, next, choice)
+		case *ast.MergeNode:
+			next, choice := flow.AfterMerge(x)
+			leaves[x] = leave(x.Name, "merge:"+x.Name, next, choice)
+		case *ast.JoinNode:
+			next, choice := flow.AfterJoin(x)
+			leaves[x] = leave(x.Name, "join:"+x.Name, next, choice)
+		}
+	}
 
 	for _, n := range wf.Nodes {
 		switch x := n.(type) {
 		case *ast.StartNode:
-			startNode = x
+			to := net.DonePlace
+			if !sema.AlwaysReturns(x.Body) {
+				to = into(x.Target, "start")
+			}
+			net.addTrans("t_start", TransStep, map[int]int{net.StartPlace: 1}, map[int]int{to: 1})
+
 		case *ast.StepNode:
-			stepNodes[x.Name] = x
-			if x.After != "" {
-				stepAfter[x.After] = append(stepAfter[x.After], x)
-			}
-		case *ast.ChoiceNode:
-			if x.Name != "" {
-				choiceNodes[x.Name] = x
-			}
-			if x.After != "" {
-				choiceAfter[x.After] = x
-			}
-		case *ast.ForkNode:
-			forkNodes[x.Name] = x
-			if x.After != "" {
-				forkAfter[x.After] = x
-			}
-		case *ast.JoinNode:
-			joinNodes[x.Name] = x
-			joinOrder = append(joinOrder, x)
+			net.addTrans("t_"+x.Name, TransStep, map[int]int{at(x.Name): 1}, map[int]int{leaves[x]: 1})
+
 		case *ast.MergeNode:
-			mergeNodes[x.Name] = x
-			mergeOrder = append(mergeOrder, x)
-		}
-	}
+			net.addTrans("t_after_merge_"+x.Name, TransStep, map[int]int{at(x.Name): 1}, map[int]int{leaves[x]: 1})
 
-	// Helper: entry place for a named target node
-	targetEntryPlace := func(name string) int {
-		if name == "done" || name == "END" {
-			return net.DonePlace
-		}
-		if _, isJoin := joinNodes[name]; isJoin {
-			// Join collects branch end places separately; direct reference creates a join input place
-			return net.ensurePlace("in:"+name, PlaceControl, 0)
-		}
-		if _, isMerge := mergeNodes[name]; isMerge {
-			return net.ensurePlace("p:"+name, PlaceControl, 0)
-		}
-		return net.ensurePlace("p:"+name, PlaceControl, 0)
-	}
-
-	// 1. Start node transition
-	if startNode != nil {
-		net.addTrans("t_start", TransStep,
-			map[int]int{net.StartPlace: 1},
-			map[int]int{targetEntryPlace(startNode.Target): 1},
-		)
-	}
-
-	// 2. Step nodes
-	for _, st := range stepNodes {
-		inPlace := net.ensurePlace("p:"+st.Name, PlaceControl, 0)
-		var outPlace int
-		switch {
-		case st.Target != "":
-			if _, isJoin := joinNodes[st.Target]; isJoin {
-				// Step feeds an explicit join branch input place
-				outPlace = net.ensurePlace("join_in:"+st.Target+":"+st.Name, PlaceControl, 0)
-			} else {
-				outPlace = targetEntryPlace(st.Target)
+		case *ast.ChoiceNode:
+			// A choice is taken where the flow comes to it: after the
+			// node that goes on to it, or at the name it stands for.
+			key := x.After
+			if key == "" {
+				key = x.Name
 			}
-			net.addTrans("t_"+st.Name, TransStep, map[int]int{inPlace: 1}, map[int]int{outPlace: 1})
-		case choiceAfter[st.Name] != nil || forkAfter[st.Name] != nil:
-			// Step executes then feeds choice/fork place
-			outPlace = net.ensurePlace("after:"+st.Name, PlaceControl, 0)
-			net.addTrans("t_"+st.Name, TransStep, map[int]int{inPlace: 1}, map[int]int{outPlace: 1})
-		default:
-			// Step itself might directly be `p:st.Name` consumed by `choice after st.Name` if no explicit action
-		}
-	}
+			from, reached := chosenAt[x]
+			switch {
+			case reached:
+			case flow.Choice(key) == x:
+				from = at(key)
+			default:
+				from = net.ensurePlace("unreached:after:"+key, PlaceControl, 0)
+			}
+			for idx, br := range x.Branches {
+				to := into(br.Target, fmt.Sprintf("choice:%s:%d", key, idx))
+				net.addTrans(fmt.Sprintf("t_choice_%s_%d_%s", key, idx+1, br.Target), TransChoice,
+					map[int]int{from: 1}, map[int]int{to: 1})
+			}
 
-	// 3. Choice nodes (XOR-split: one shared input place, one transition per branch)
-	for _, n := range wf.Nodes {
-		cn, ok := n.(*ast.ChoiceNode)
-		if !ok {
-			continue
-		}
-		var splitPlace int
-		if cn.After != "" {
-			if st, exists := stepNodes[cn.After]; exists && st.Target == "" && len(st.Body) >= 0 {
-				// Check if t_step produced after:cn.After
-				if ap, has := net.PlaceByName["after:"+cn.After]; has {
-					splitPlace = ap
-				} else {
-					splitPlace = net.ensurePlace("p:"+cn.After, PlaceControl, 0)
+		case *ast.ForkNode:
+			postFork := map[int]int{}
+			join := flow.AfterFork()
+			for _, br := range x.Branches {
+				cur := net.ensurePlace(fmt.Sprintf("p:%s:%s:0", x.Name, br.Name), PlaceControl, 0)
+				postFork[cur] = 1
+				if len(br.Ops) == 0 {
+					end := net.ensurePlace(fmt.Sprintf("p:%s:%s:end", x.Name, br.Name), PlaceControl, 0)
+					net.addTrans(fmt.Sprintf("t_%s_%s_noop", x.Name, br.Name), TransOp, map[int]int{cur: 1}, map[int]int{end: 1})
+					cur = end
 				}
-			} else {
-				splitPlace = net.ensurePlace("p:"+cn.After, PlaceControl, 0)
-			}
-		} else if cn.Name != "" {
-			splitPlace = net.ensurePlace("p:"+cn.Name, PlaceControl, 0)
-		} else {
-			splitPlace = net.ensurePlace("p:choice", PlaceControl, 0)
-		}
-
-		for idx, br := range cn.Branches {
-			var dst int
-			if _, isJoin := joinNodes[br.Target]; isJoin {
-				dst = net.ensurePlace(fmt.Sprintf("join_in:%s:choice_%d", br.Target, idx), PlaceControl, 0)
-			} else {
-				dst = targetEntryPlace(br.Target)
-			}
-			tname := fmt.Sprintf("t_choice_%d_%s", idx+1, br.Target)
-			net.addTrans(tname, TransChoice, map[int]int{splitPlace: 1}, map[int]int{dst: 1})
-		}
-	}
-
-	// Track branch end places feeding joins or merges
-	joinInputs := map[string][]int{}
-	mergeInputs := map[string][]int{}
-
-	// Collect step->join explicit inputs
-	for _, st := range stepNodes {
-		if st.Target != "" {
-			if _, isJoin := joinNodes[st.Target]; isJoin {
-				pName := "join_in:" + st.Target + ":" + st.Name
-				if pid, ok := net.PlaceByName[pName]; ok {
-					joinInputs[st.Target] = append(joinInputs[st.Target], pid)
-				}
-			}
-		}
-	}
-	for _, n := range wf.Nodes {
-		if cn, ok := n.(*ast.ChoiceNode); ok {
-			for idx, br := range cn.Branches {
-				if _, isJoin := joinNodes[br.Target]; isJoin {
-					pName := fmt.Sprintf("join_in:%s:choice_%d", br.Target, idx)
-					if pid, ok := net.PlaceByName[pName]; ok {
-						joinInputs[br.Target] = append(joinInputs[br.Target], pid)
-					}
-				}
-			}
-		}
-	}
-
-	// 4. Fork nodes (AND-split) -> Branches -> Join or Merge
-	// Match each ForkNode to its succeeding JoinNode or MergeNode if not explicitly referenced
-	for _, fk := range forkNodes {
-		inPlace := net.ensurePlace("p:"+fk.Name, PlaceControl, 0)
-		if fk.After != "" {
-			if ap, has := net.PlaceByName["after:"+fk.After]; has {
-				inPlace = ap
-			}
-		}
-
-		postFork := map[int]int{}
-		// Determine whether this fork is closed by a Join or a Merge (buggy XOR-join!)
-		targetJoin := ""
-		targetMerge := ""
-		if len(joinOrder) > 0 {
-			targetJoin = joinOrder[0].Name
-		}
-		for _, m := range mergeOrder {
-			if len(m.Afters) == 0 && targetJoin == "" {
-				targetMerge = m.Name
-				break
-			}
-			for _, af := range m.Afters {
-				if af == fk.Name {
-					targetMerge = m.Name
-					break
-				}
-			}
-		}
-
-		for _, br := range fk.Branches {
-			brStart := net.ensurePlace(fmt.Sprintf("p:%s:%s:0", fk.Name, br.Name), PlaceControl, 0)
-			postFork[brStart] = 1
-			curPlace := brStart
-
-			if len(br.Ops) == 0 {
-				nextP := net.ensurePlace(fmt.Sprintf("p:%s:%s:end", fk.Name, br.Name), PlaceControl, 0)
-				net.addTrans(fmt.Sprintf("t_%s_%s_noop", fk.Name, br.Name), TransOp, map[int]int{curPlace: 1}, map[int]int{nextP: 1})
-				curPlace = nextP
-			} else {
 				for opIdx, op := range br.Ops {
-					nextP := net.ensurePlace(fmt.Sprintf("p:%s:%s:%d", fk.Name, br.Name, opIdx+1), PlaceControl, 0)
-					pre := map[int]int{curPlace: 1}
+					nextP := net.ensurePlace(fmt.Sprintf("p:%s:%s:%d", x.Name, br.Name, opIdx+1), PlaceControl, 0)
+					pre := map[int]int{cur: 1}
 					post := map[int]int{nextP: 1}
-					opLabel := fmt.Sprintf("t_%s_%s_%d", fk.Name, br.Name, opIdx+1)
+					opLabel := fmt.Sprintf("t_%s_%s_%d", x.Name, br.Name, opIdx+1)
 					switch op.Kind {
 					case ast.BranchAcquire:
 						pid, ok := poolIDs[op.Target]
@@ -313,26 +238,28 @@ func CompileWorkflow(wf *ast.WorkflowDecl) (*PetriNet, error) {
 						opLabel = fmt.Sprintf("t_step_%s_%s", br.Name, op.Target)
 					}
 					net.addTrans(opLabel, TransOp, pre, post)
-					curPlace = nextP
+					cur = nextP
+				}
+				if join != "" {
+					joinInputs[join] = append(joinInputs[join], cur)
+				} else {
+					// With no join the workflow is over after the fork:
+					// once for each branch.
+					net.addTrans(fmt.Sprintf("t_%s_%s_to_done", x.Name, br.Name), TransStep,
+						map[int]int{cur: 1}, map[int]int{net.DonePlace: 1})
 				}
 			}
-
-			if targetMerge != "" {
-				mergeInputs[targetMerge] = append(mergeInputs[targetMerge], curPlace)
-			} else if targetJoin != "" {
-				joinInputs[targetJoin] = append(joinInputs[targetJoin], curPlace)
-			} else {
-				// No join or merge specified -> sends straight to done (improper completion if >1 branches!)
-				net.addTrans(fmt.Sprintf("t_%s_%s_to_done", fk.Name, br.Name), TransStep,
-					map[int]int{curPlace: 1}, map[int]int{net.DonePlace: 1})
-			}
+			net.addTrans("t_fork_"+x.Name, TransFork, map[int]int{at(x.Name): 1}, postFork)
 		}
-
-		net.addTrans("t_fork_"+fk.Name, TransFork, map[int]int{inPlace: 1}, postFork)
 	}
 
-	// 5. Join nodes (AND-join: SINGLE transition consuming ALL branch end places!)
-	for _, jn := range joinNodes {
+	// A join comes last: it waits for every place written above, and
+	// for the joins that go to it.
+	for _, n := range wf.Nodes {
+		jn, ok := n.(*ast.JoinNode)
+		if !ok {
+			continue
+		}
 		pre := map[int]int{}
 		for _, pid := range joinInputs[jn.Name] {
 			pre[pid] += 1
@@ -340,36 +267,7 @@ func CompileWorkflow(wf *ast.WorkflowDecl) (*PetriNet, error) {
 		if len(pre) == 0 {
 			pre[net.ensurePlace("in:"+jn.Name, PlaceControl, 0)] = 1
 		}
-		var outPlace int
-		if jn.Target != "" {
-			outPlace = targetEntryPlace(jn.Target)
-		} else if afters := stepAfter[jn.Name]; len(afters) > 0 {
-			outPlace = targetEntryPlace(afters[0].Name)
-		} else {
-			outPlace = net.DonePlace
-		}
-		net.addTrans("t_join_"+jn.Name, TransJoin, pre, map[int]int{outPlace: 1})
-	}
-
-	// 6. Merge nodes (XOR-join: SEPARATE transitions from each incoming branch to shared merge place -> out)
-	for _, mn := range mergeNodes {
-		mergePlace := net.ensurePlace("p:"+mn.Name, PlaceControl, 0)
-		for idx, pid := range mergeInputs[mn.Name] {
-			net.addTrans(fmt.Sprintf("t_merge_%s_%d", mn.Name, idx+1), TransMerge,
-				map[int]int{pid: 1}, map[int]int{mergePlace: 1})
-		}
-		var outPlace int
-		if mn.Target != "" {
-			outPlace = targetEntryPlace(mn.Target)
-		} else if afters := stepAfter[mn.Name]; len(afters) > 0 {
-			outPlace = targetEntryPlace(afters[0].Name)
-		} else {
-			outPlace = net.DonePlace
-		}
-		if len(mergeInputs[mn.Name]) > 0 || mn.Target != "" || len(stepAfter[mn.Name]) > 0 {
-			net.addTrans("t_after_merge_"+mn.Name, TransStep,
-				map[int]int{mergePlace: 1}, map[int]int{outPlace: 1})
-		}
+		net.addTrans("t_join_"+jn.Name, TransJoin, pre, map[int]int{leaves[jn]: 1})
 	}
 
 	// Build initial and clean final markings

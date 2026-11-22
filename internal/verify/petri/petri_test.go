@@ -268,3 +268,123 @@ def main() -> Result[int, str]:
 		}
 	}
 }
+
+// The net is of the workflow as the backends run it: where two nodes could
+// both come next, the one ast.Flow takes does, and the other never fires.
+func TestNetFollowsTheFlow(t *testing.T) {
+	const head = `
+def note() -> int:
+    return 1
+
+workflow W(k: int[0..9]):
+    verify: sound
+`
+	for _, c := range []struct {
+		name, nodes, want, runs string
+	}{
+		{"a fork after a step", `
+    start -> a
+    step a
+    fork f after a:
+        branch x:
+            call note()
+    join j -> done
+`, "", ""},
+		{"a fork after a join is not gone to", `
+    start -> f
+    fork f:
+        branch x:
+            call note()
+    join j
+    fork g after j:
+        branch y:
+            call note()
+`, `DEAD TRANSITION "t_fork_g"`, ""},
+		{"the first of two steps after one", `
+    start -> a
+    step a
+    step b after a -> done
+    step c after a -> done
+`, `DEAD TRANSITION "t_c"`, `"t_b"`},
+		{"the first of two joins", `
+    start -> f
+    fork f:
+        branch x:
+            call note()
+    join j -> b
+    join j2 -> c
+    step b -> done
+    step c -> done
+`, `DEAD TRANSITION "t_join_j2"`, `"t_join_j"`},
+		{"a choice after a node is not come to by its name", `
+    start -> a
+    step a
+    choice c after a:
+        when k < 3 -> b
+        else -> done
+    step b -> c
+`, "OPTION TO COMPLETE VIOLATED", ""},
+		{"a join that goes nowhere ends the workflow", `
+    start -> f
+    fork f:
+        branch x:
+            call note()
+    join j
+`, "", ""},
+		{"a step that goes nowhere", `
+    start -> a
+    step a
+`, "OPTION TO COMPLETE VIOLATED", ""},
+		{"a merge that goes nowhere", `
+    start -> a
+    step a -> m
+    merge m
+`, "OPTION TO COMPLETE VIOLATED", ""},
+		{"a join one step goes to", `
+    start -> a
+    step a -> j
+    join j -> done
+`, "", ""},
+		{"a join the start goes to", `
+    start -> j
+    join j -> a
+    step a -> done
+`, "", ""},
+		{"a join one branch of a choice goes to", `
+    start -> c
+    choice c:
+        when k < 3 -> j
+        else -> done
+    join j -> done
+`, "", ""},
+		{"a join both branches of a choice go to", `
+    start -> c
+    choice c:
+        when k < 3 -> j
+        else -> j
+    join j -> done
+`, "OPTION TO COMPLETE VIOLATED", ""},
+		{"a join nothing goes to", `
+    start -> a
+    step a -> done
+    join j -> done
+`, `DEAD TRANSITION "t_join_j"`, ""},
+		{"a start that returns", `
+    start -> a:
+        return
+    step a -> done
+`, `DEAD TRANSITION "t_a"`, ""},
+	} {
+		rep := verifyPetri(t, head+c.nodes)
+		got := strings.Join(rep.Errors(), "\n")
+		if c.want == "" && !rep.OK() {
+			t.Errorf("%s: %s", c.name, got)
+		}
+		if c.want != "" && !strings.Contains(got, c.want) {
+			t.Errorf("%s: want %q, got %q", c.name, c.want, got)
+		}
+		if c.runs != "" && strings.Contains(got, c.runs) {
+			t.Errorf("%s: %s is the one that runs, got %q", c.name, c.runs, got)
+		}
+	}
+}

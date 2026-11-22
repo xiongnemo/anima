@@ -154,6 +154,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_fork_branch_reads_assigned.anm", "which branch \"left\" assigns"},
 		{"../tests/bugs/sema_fork_branch_returns.anm", "return in branch"},
 		{"../tests/bugs/sema_workflow_variable_on_one_path.anm", "is not assigned on every path"},
+		{"../tests/bugs/sema_workflow_choice_after_merge.anm", "\"n\" is not assigned on every path to step fin of workflow Find"},
+		{"../tests/bugs/sema_workflow_choice_after_join.anm", "\"n\" is not assigned on every path to step last of workflow Find"},
 		{"../tests/bugs/sema_unknown_value_index.anm", "index_bounds"},
 		{"../tests/bugs/sema_unknown_value_method.anm", "has no member"},
 		{"../tests/bugs/sema_untyped_channel_value.anm", "!= on a value of unknown type"},
@@ -191,6 +193,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/own_pool_shut_down_on_one_path.anm", "every path must leave it in the same state"},
 		{"../tests/bugs/own_workflow_step_uses_pool_after_shutdown.anm", "invalid call pool.submit() while conc.ThreadPool is in state \"Shutdown\""},
 		{"../tests/bugs/own_workflow_path_leaves_pool_running.anm", "resource handle leak: conc.ThreadPool \"pool\""},
+		{"../tests/bugs/own_workflow_choice_after_merge.anm", "own_workflow_choice_after_merge.anm:23:9 in workflow W): resource handle leak: conc.ThreadPool \"pool\""},
+		{"../tests/bugs/own_workflow_choice_after_join.anm", "own_workflow_choice_after_join.anm:29:9 in workflow W): resource handle leak: conc.ThreadPool \"pool\""},
 		{"../tests/bugs/own_pool_left_running_in_match.anm", "resource handle leak"},
 		{"../tests/bugs/sema_channel_send_out_of_range.anm", "is int[1..9], got int[0..0]"},
 		{"../tests/bugs/sema_mutex_holds_its_type.anm", "div_nonzero"},
@@ -231,6 +235,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_choice_nonexclusive.anm", "choice_exclusive"},
 		{"../tests/bugs/spark_workflow_ends_without_return.anm", "workflow:W.returns"},
 		{"../tests/bugs/spark_workflow_step_sees_other_branch.anm", "workflow:W.div_nonzero"},
+		{"../tests/bugs/spark_workflow_choice_after_merge.anm", "spark_workflow_choice_after_merge.anm:24:19: SPARK FAILED [workflow:Find.div_nonzero]"},
+		{"../tests/bugs/spark_workflow_choice_after_join.anm", "spark_workflow_choice_after_join.anm:25:19: SPARK FAILED [workflow:Find.div_nonzero]"},
 		{"../tests/bugs/sema_function_ends_without_return.anm", "can end without a return"},
 		{"../tests/bugs/sema_return_without_value.anm", "return needs a value"},
 		{"../tests/bugs/sema_json_decode_field.anm", "Reply.outcome is a Result[int, str], which is not read from JSON"},
@@ -255,6 +261,13 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/petri_fork_merge_improper.anm", "IMPROPER COMPLETION"},
 		{"../tests/bugs/petri_choice_join_deadlock.anm", "OPTION TO COMPLETE"},
 		{"../tests/bugs/petri_pool_leak.anm", "IMPROPER COMPLETION"},
+		{"../tests/bugs/petri_choice_after_step_with_target.anm", `DEAD TRANSITION "t_choice_a_1_c"`},
+		{"../tests/bugs/petri_fork_after_step_with_choice.anm", `DEAD TRANSITION "t_fork_f"`},
+		{"../tests/bugs/petri_step_after_return.anm", `DEAD TRANSITION "t_c"`},
+		{"../tests/bugs/petri_merge_nothing_goes_to.anm", `DEAD TRANSITION "t_after_merge_m"`},
+		{"../tests/bugs/petri_two_choices_after_one_step.anm", `DEAD TRANSITION "t_choice_a_1_c"`},
+		{"../tests/bugs/petri_choice_after_fork.anm", `DEAD TRANSITION "t_choice_split_1_a"`},
+		{"../tests/bugs/petri_choice_after_merge_with_target.anm", `DEAD TRANSITION "t_choice_both_1_fin"`},
 		{"../tests/bugs/requests_missing_timeout.anm", "timeout_ms"},
 		{"../tests/bugs/sema_function_named_like_len.anm", "len is declared as a function, and is already a built-in"},
 		{"../tests/bugs/sema_function_named_like_str.anm", "str is declared as a function, and is already a built-in"},
@@ -269,6 +282,9 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/lts_bound_to_absent_part.anm", "p0 of system Sys is bound to f9, which is no other part of the system"},
 		{"../tests/bugs/lts_called_part_calls_a_part.anm", "f0 of system Sys does b.put, and other parts do their actions with it"},
 		{"../tests/bugs/lts_workflow_sync_relabelled_away.anm", "w of system Sys relabels Gate.go to go: a workflow does with a part what it is written to do with one"},
+		{"../tests/bugs/lts_step_before_its_choice.anm", `PROPERTY NeverProbes VIOLATED (ERROR=-1): action "probe"`},
+		{"../tests/bugs/lts_choice_after_merge.anm", `PROPERTY NeverEnds VIOLATED (ERROR=-1): action "fin"`},
+		{"../tests/bugs/lts_join_before_its_choice.anm", `PROPERTY NeverJoins VIOLATED (ERROR=-1): action "join_both"`},
 		{"../tests/bugs/lts_part_named_in_action_runs_alone.anm", "DEADLOCK at state 4 [f0=Taken, f1=Taken, a=H, b=H]"},
 		{"../tests/bugs/sema_monitor_guard_calls_function.anm", "is not worked out in a model"},
 		{"../tests/bugs/sema_monitor_bool_control_variable.anm", "control variable open has type bool"},
@@ -2600,6 +2616,125 @@ def main() -> int:
     run_workflow V(0)
     run_workflow V(5)
     print("end")
+    return 0
+`
+
+// A workflow goes the same way on both backends. On the VM the guards of
+// every choice with a name were compiled under one name, so the last such
+// choice decided for all of them, and a `return` with no value in a step
+// ended the step and not the workflow. A choice after a join was refused as
+// never taken.
+func TestE2EWorkflowChoicesAndReturnsParity(t *testing.T) {
+	runOnBothBackends(t, "workflow_choices_returns", workflowChoicesReturnsSrc,
+		"low\nmid\nhigh\nstart\nstart\na\na\na\nd\nx\ny\nz\n"+
+			"left\nmany\nleft\nfew\np\nmany\nq\nfew\n")
+}
+
+const workflowChoicesReturnsSrc = `workflow W(k: int[0..9]):
+    verify: sound
+    start -> c1
+    choice c1:
+        when k < 5 -> low
+        else -> c2
+    choice c2:
+        when k < 8 -> mid
+        else -> high
+    step low -> done:
+        print("low")
+    step mid -> done:
+        print("mid")
+    step high -> done:
+        print("high")
+
+workflow V(b: bool):
+    verify: sound
+    start -> a:
+        print("start")
+        if b:
+            return
+    step a -> c:
+        print("a")
+        if not b:
+            return
+    step c -> done:
+        print("c")
+
+workflow U(b: bool):
+    verify: sound
+    start -> a
+    step a:
+        print("a")
+        if b:
+            return
+    choice after a:
+        when b -> c
+        else -> d
+    step c -> done:
+        print("c")
+    step d -> done:
+        print("d")
+
+workflow T():
+    verify: sound
+    start -> x
+    step x:
+        print("x")
+    step y after x:
+        print("y")
+    step z after y -> done:
+        print("z")
+
+def left() -> int:
+    print("left")
+    return 1
+
+workflow S(k: int[0..9]):
+    verify: sound
+    start -> split
+    fork split:
+        branch only:
+            call left()
+    join both
+    choice after both:
+        when k > 4 -> many
+        else -> few
+    step many -> done:
+        print("many")
+    step few -> done:
+        print("few")
+
+workflow R(k: int[0..9]):
+    verify: sound
+    start -> one
+    choice one:
+        when k > 4 -> p
+        else -> q
+    step p -> both:
+        print("p")
+    step q -> both:
+        print("q")
+    merge both after p, q
+    choice after both:
+        when k > 4 -> many
+        else -> few
+    step many -> done:
+        print("many")
+    step few -> done:
+        print("few")
+
+def main() -> int:
+    run_workflow W(1)
+    run_workflow W(6)
+    run_workflow W(9)
+    run_workflow V(True)
+    run_workflow V(False)
+    run_workflow U(True)
+    run_workflow U(False)
+    run_workflow T()
+    run_workflow S(7)
+    run_workflow S(2)
+    run_workflow R(7)
+    run_workflow R(2)
     return 0
 `
 

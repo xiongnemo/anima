@@ -27,6 +27,7 @@ type WorkflowResult struct {
 	OptionToComplete  bool
 	ProperCompletion  bool
 	NoDeadTransitions bool
+	Dead              []string // the transitions that never fire
 	ShortCircuitL4    bool
 	Sound             bool
 	Net               *PetriNet
@@ -189,6 +190,7 @@ func verifyWorkflow(wf *ast.WorkflowDecl) WorkflowResult {
 	for tid, tr := range net.Transitions {
 		if !fired[tid] {
 			noDead = false
+			wr.Dead = append(wr.Dead, tr.Name)
 			wr.Errors = append(wr.Errors, fmt.Sprintf("DEAD TRANSITION %q never fires in any reachable execution", tr.Name))
 		}
 	}

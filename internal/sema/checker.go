@@ -471,6 +471,14 @@ func (c *checker) checkNames() error {
 				case *ast.JoinNode:
 					name = n.Name
 				}
+				// These names are the model's own: where a workflow starts
+				// and ends, and the action no part sees.
+				switch name {
+				case "start", "done", "END", "tau":
+					if err == nil {
+						err = fmt.Errorf("%s: a node of workflow %s cannot be named %s", n.GetSpan(), node.Name, name)
+					}
+				}
 				if err == nil && name != "" {
 					err = seen.add(name, n.GetSpan())
 				}
@@ -954,6 +962,8 @@ func (c *checker) checkFunc(fn *ast.FuncDecl) error {
 // one. A match counts when each arm returns, the kernel proving that some arm
 // is taken; a loop counts only as `while True`, which nothing leaves but a
 // return.
+func AlwaysReturns(body []ast.Stmt) bool { return alwaysReturns(body) }
+
 func alwaysReturns(body []ast.Stmt) bool {
 	for _, st := range body {
 		switch s := st.(type) {

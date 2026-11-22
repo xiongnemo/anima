@@ -4,26 +4,28 @@ package ast
 // name stands for and where the workflow goes after it. Where two nodes
 // could both come next, the first in the source does.
 type Flow struct {
-	Start     *StartNode
-	steps     map[string]*StepNode
-	choices   map[string]*ChoiceNode // by the node it comes after, or else by its name
-	forks     map[string]*ForkNode
-	joins     map[string]*JoinNode
-	merges    map[string]*MergeNode
-	forkAfter map[string]string
-	stepAfter map[string]string
-	firstJoin string
+	Start       *StartNode
+	steps       map[string]*StepNode
+	choices     map[string]*ChoiceNode // a `choice c:` by its name
+	forks       map[string]*ForkNode
+	joins       map[string]*JoinNode
+	merges      map[string]*MergeNode
+	choiceAfter map[string]*ChoiceNode // a `choice after n:` by n
+	forkAfter   map[string]string
+	stepAfter   map[string]string
+	firstJoin   string
 }
 
 func NewFlow(wf *WorkflowDecl) *Flow {
 	f := &Flow{
-		steps:     map[string]*StepNode{},
-		choices:   map[string]*ChoiceNode{},
-		forks:     map[string]*ForkNode{},
-		joins:     map[string]*JoinNode{},
-		merges:    map[string]*MergeNode{},
-		forkAfter: map[string]string{},
-		stepAfter: map[string]string{},
+		steps:       map[string]*StepNode{},
+		choices:     map[string]*ChoiceNode{},
+		forks:       map[string]*ForkNode{},
+		joins:       map[string]*JoinNode{},
+		merges:      map[string]*MergeNode{},
+		choiceAfter: map[string]*ChoiceNode{},
+		forkAfter:   map[string]string{},
+		stepAfter:   map[string]string{},
 	}
 	first := func(m map[string]string, after, name string) {
 		if _, taken := m[after]; after != "" && !taken {
@@ -39,11 +41,11 @@ func NewFlow(wf *WorkflowDecl) *Flow {
 			f.steps[x.Name] = x
 			first(f.stepAfter, x.After, x.Name)
 		case *ChoiceNode:
-			key := x.After
-			if key == "" {
-				key = x.Name
+			if x.After != "" {
+				f.choiceAfter[x.After] = x
+			} else {
+				f.choices[x.Name] = x
 			}
-			f.choices[key] = x
 		case *ForkNode:
 			f.forks[x.Name] = x
 			first(f.forkAfter, x.After, x.Name)
@@ -65,18 +67,27 @@ func (f *Flow) Ends(name string) bool {
 	if name == "" || name == "done" || name == "END" {
 		return true
 	}
-	return f.steps[name] == nil && f.choices[name] == nil && f.forks[name] == nil && f.joins[name] == nil && f.merges[name] == nil
+	return f.steps[name] == nil && f.forks[name] == nil && f.joins[name] == nil && f.merges[name] == nil && f.Choice(name) == nil
 }
 
 // Step, Choice, Fork, Join and Merge give the node a name stands for. A name is
 // looked up in that order, so each is nil when an earlier one is not.
 func (f *Flow) Step(name string) *StepNode { return f.steps[name] }
 
+// Choice is the choice of that name, or the one written after a name that no
+// node has: the choice after a node is where the node goes, not what its
+// name stands for.
 func (f *Flow) Choice(name string) *ChoiceNode {
 	if f.steps[name] != nil {
 		return nil
 	}
-	return f.choices[name]
+	if ch := f.choices[name]; ch != nil {
+		return ch
+	}
+	if f.forks[name] != nil || f.joins[name] != nil || f.merges[name] != nil {
+		return nil
+	}
+	return f.choiceAfter[name]
 }
 
 func (f *Flow) Fork(name string) *ForkNode {
@@ -100,38 +111,38 @@ func (f *Flow) Merge(name string) *MergeNode {
 	return f.merges[name]
 }
 
-// AfterStep is where the workflow goes once the body of a step has run
-// without a return: to its target, or to the choice, the fork or the step
-// declared after it. With none of them it is over (next is "").
-func (f *Flow) AfterStep(st *StepNode) (next string, choice *ChoiceNode) {
-	if st.Target != "" {
-		return st.Target, nil
+// after is where the workflow goes from a step, a join or a merge: to its
+// target, or to the choice, the fork or the step declared after it. With
+// none of them it is over (next is "").
+func (f *Flow) after(name, target string, fork bool) (next string, choice *ChoiceNode) {
+	if target != "" {
+		return target, nil
 	}
-	if ch := f.choices[st.Name]; ch != nil {
+	if ch := f.choiceAfter[name]; ch != nil {
 		return "", ch
 	}
-	if fk, ok := f.forkAfter[st.Name]; ok {
+	if fk, ok := f.forkAfter[name]; ok && fork {
 		return fk, nil
 	}
-	return f.stepAfter[st.Name], nil
+	return f.stepAfter[name], nil
+}
+
+// AfterStep is where the workflow goes once the body of a step has run
+// without a return.
+func (f *Flow) AfterStep(st *StepNode) (next string, choice *ChoiceNode) {
+	return f.after(st.Name, st.Target, true)
 }
 
 // AfterFork is the join the branches of a fork meet at.
 func (f *Flow) AfterFork() string { return f.firstJoin }
 
 // AfterJoin is where the workflow goes from a join.
-func (f *Flow) AfterJoin(jn *JoinNode) string {
-	if jn.Target != "" {
-		return jn.Target
-	}
-	return f.stepAfter[jn.Name]
+func (f *Flow) AfterJoin(jn *JoinNode) (next string, choice *ChoiceNode) {
+	return f.after(jn.Name, jn.Target, false)
 }
 
 // AfterMerge is where the workflow goes from a merge, the node the branches
 // of a choice come together at: it does nothing itself.
-func (f *Flow) AfterMerge(mn *MergeNode) string {
-	if mn.Target != "" {
-		return mn.Target
-	}
-	return f.stepAfter[mn.Name]
+func (f *Flow) AfterMerge(mn *MergeNode) (next string, choice *ChoiceNode) {
+	return f.after(mn.Name, mn.Target, false)
 }

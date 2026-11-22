@@ -775,6 +775,13 @@ func TestSemaANameIsDeclaredOnce(t *testing.T) {
 		{"port Log:\n    extern def put(n: int)\n    extern def put(s: str)\n", "Log has two extern functions named put"},
 		{"port Log:\n    extern def put(n: int, n: int)\n", "Log.put has two parameters named n"},
 		{"workflow W() -> int:\n    start -> a\n    step a -> b:\n        print(1)\n    step b -> done:\n        return 0\n    step a -> b:\n        print(2)\n", "W has two nodes named a"},
+		// A node is not named as the model names its own ends and its
+		// silent action: `-> done` would be the end and not the step.
+		{"workflow W() -> int:\n    start -> done\n    step done -> fin:\n        print(1)\n    step fin -> done:\n        return 0\n", "a node of workflow W cannot be named done"},
+		{"workflow W() -> int:\n    start -> END\n    step END -> done:\n        return 0\n", "a node of workflow W cannot be named END"},
+		{"workflow W() -> int:\n    start -> start\n    step start -> done:\n        return 0\n", "a node of workflow W cannot be named start"},
+		{"workflow W() -> int:\n    start -> tau\n    step tau -> done:\n        return 0\n", "a node of workflow W cannot be named tau"},
+		{"workflow W() -> int:\n    start -> a\n    step a -> tau:\n        print(1)\n    merge tau after a -> fin\n    step fin -> done:\n        return 0\n", "a node of workflow W cannot be named tau"},
 		{"def g() -> int:\n    h = (x, x) => x\n    return 0\n", "a lambda has two parameters named x"},
 		{"property P:\n    state A:\n        on go -> B\n    state B:\n        on stop -> A\n    state B:\n        on go -> B\n", "P has two states named B"},
 		{"machine M:\n    state A:\n        on go -> A\n    state A:\n        on stop -> A\n", "M has two states named A"},

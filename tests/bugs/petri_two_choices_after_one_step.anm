@@ -1,0 +1,21 @@
+# Of two choices after one step the workflow takes the last.
+workflow W(b: bool):
+    verify: sound
+    start -> a
+    step a:
+        print("a")
+    choice after a:
+        when b -> c
+        else -> d
+    choice after a:
+        when b -> d
+        else -> c
+    step c -> done:
+        print("c")
+    step d -> done:
+        print("d")
+
+def main() -> int:
+    run_workflow W(True)
+    run_workflow W(False)
+    return 0

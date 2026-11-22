@@ -1,8 +1,12 @@
 package lts
 
 import (
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/xiongnemo/anima/internal/parser"
+	"github.com/xiongnemo/anima/internal/sema"
 )
 
 // A workflow's handles are followed along the paths it runs, not down the
@@ -142,6 +146,159 @@ workflow W(n: int) -> int:
 			t.Errorf("%s: expected it accepted, got:\n%s", c.name, got)
 		case c.want != "" && !strings.Contains(got, c.want):
 			t.Errorf("%s: expected an error containing %q, got:\n%s", c.name, c.want, got)
+		}
+	}
+}
+
+// edgesOf writes the LTS of workflow W of src as its edges, each once and in
+// order.
+func edgesOf(t *testing.T, src string) string {
+	t.Helper()
+	prog, err := parser.Parse("lts_test.anm", src)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	info, err := sema.Check(prog)
+	if err != nil {
+		t.Fatalf("sema error: %v", err)
+	}
+	model := CompileWorkflowLTS(info.Workflows["W"].Decl)
+	var out []string
+	seen := map[string]bool{}
+	for from, edges := range model.Edges {
+		for _, e := range edges {
+			edge := model.States[from] + " -" + e.Action + "-> " + model.States[e.Target]
+			if !seen[edge] {
+				seen[edge] = true
+				out = append(out, edge)
+			}
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, "\n")
+}
+
+// The LTS of a workflow is the workflow as it runs: a body does the action
+// of its step wherever it goes next, and ends the workflow where it may
+// return.
+func TestWorkflowLTSFollowsTheFlow(t *testing.T) {
+	const head = `
+def f(x: int) -> Result[int, str]:
+    if x > 3:
+        return Err("big")
+    return Ok(x)
+
+def note() -> int:
+    return 1
+
+workflow W(k: int[0..9]) -> Result[int, str]:
+`
+	for _, c := range []struct {
+		name, nodes string
+		want        []string
+	}{
+		{"a start that may return", `
+    start -> a:
+        if k > 3:
+            return Ok(0)
+    step a -> done:
+        return Ok(1)
+`, []string{"a -a-> done", "start -tau-> a", "start -tau-> done"}},
+		{"a start that returns", `
+    start -> a:
+        return Ok(0)
+    step a -> done:
+        return Ok(1)
+`, []string{"start -tau-> done"}},
+		{"a ? in a step", `
+    start -> a
+    step a -> b:
+        v = f(k)?
+    step b -> done:
+        return Ok(1)
+`, []string{"a -a-> b", "a -a-> done", "b -b-> done", "start -tau-> a"}},
+		{"a ? in a lambda leaves the lambda", `
+    start -> a
+    step a -> b:
+        g = (x) => f(x)?
+    step b -> done:
+        return Ok(1)
+`, []string{"a -a-> b", "b -b-> done", "start -tau-> a"}},
+		{"a step before its choice", `
+    start -> a
+    step a:
+        if k > 8:
+            return Ok(0)
+    choice after a:
+        when k > 3 -> b
+        else -> done
+    step b -> done:
+        return Ok(1)
+`, []string{"a -a-> b", "a -a-> done", "b -b-> done", "start -tau-> a"}},
+		{"a choice of its own name", `
+    start -> c
+    choice c:
+        when k > 3 -> b
+        else -> done
+    step b -> done:
+        return Ok(1)
+`, []string{"b -b-> done", "c -tau-> b", "c -tau-> done", "start -tau-> c"}},
+		{"a merge and the choice after it", `
+    start -> m
+    merge m
+    choice after m:
+        when k > 3 -> b
+        else -> m2
+    merge m2 -> b
+    step b -> done:
+        return Ok(1)
+`, []string{"b -b-> done", "m -tau-> b", "m -tau-> m2", "m2 -tau-> b", "start -tau-> m"}},
+		{"a join and the choice after it", `
+    start -> fk
+    fork fk:
+        branch x:
+            call note()
+    join j
+    choice after j:
+        when k > 3 -> b
+        else -> done
+    step b -> done:
+        return Ok(1)
+`, []string{"b -b-> done", "fk -tau-> j", "j -join_j-> b", "j -join_j-> done", "start -tau-> fk"}},
+		{"a fork after a join is not gone to", `
+    start -> fk
+    fork fk:
+        branch x:
+            call note()
+    join j
+    fork g after j:
+        branch y:
+            call note()
+`, []string{"fk -tau-> j", "j -join_j-> done", "start -tau-> fk"}},
+		{"a choice after a node is not come to by its name", `
+    start -> a
+    step a
+    choice c after a:
+        when k > 3 -> b
+        else -> done
+    step b -> c
+`, []string{"a -a-> b", "a -a-> done", "b -b-> done", "start -tau-> a"}},
+		{"the first step after a step, and the fork after it before that", `
+    start -> a
+    step a
+    step b after a -> a2
+    step c after a -> a2
+    step a2
+    step d after a2 -> done:
+        return Ok(1)
+    fork fk after a2:
+        branch x:
+            call note()
+    join j -> done
+`, []string{"a -a-> b", "a2 -a2-> fk", "b -b-> a2", "fk -tau-> j", "j -join_j-> done", "start -tau-> a"}},
+	} {
+		if got, want := edgesOf(t, head+c.nodes), strings.Join(c.want, "\n"); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", c.name, strings.ReplaceAll(got, "\n", "; "), strings.ReplaceAll(want, "\n", "; "))
 		}
 	}
 }
