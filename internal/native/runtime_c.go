@@ -138,7 +138,7 @@ struct AnimaHandle {
     pthread_cond_t cond_not_empty;
     pthread_cond_t cond_not_full;
     AnimaVal cell_val;
-    int sem_count;
+    int64_t sem_count;
     // Channel ring buffer
     AnimaVal *chan_buf;
     size_t chan_cap;
@@ -2937,8 +2937,10 @@ static AnimaVal req_session_get_async(AnimaVal sess, const char *url, int64_t ms
     arg->url = strdup(url);
     arg->timeout_ms = ms;
     arg->fut = fut;
-    fut->fut_has_thread = true;
-    pthread_create(&fut->fut_thread, NULL, async_http_worker, arg);
+    // With no thread to spare the request is made here: its answer is the
+    // same one, there before the future is asked for it.
+    fut->fut_has_thread = pthread_create(&fut->fut_thread, NULL, async_http_worker, arg) == 0;
+    if (!fut->fut_has_thread) async_http_worker(arg);
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = fut; return v;
 }
 
@@ -2993,9 +2995,21 @@ static void *pool_worker(void *arg) {
     return NULL;
 }
 
+// What a program may ask of the machine in one call: sema.MaxWorkers and
+// the rest. The kernel proves a value in its range; it is held to it again
+// here, as on the VM, for what the kernel did not read.
+#define RT_MAX_WORKERS 256
+#define RT_MAX_QUEUE_CAP (1 << 16)
+#define RT_MAX_PERMITS (1 << 16)
+#define RT_MAX_SLEEP_MS 86400000
+
+static int64_t rt_within(int64_t v, int64_t lo, int64_t hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
 static AnimaVal conc_threadpool_new(int64_t workers, int64_t qcap) {
-    if (workers <= 0) workers = 4;
-    if (qcap <= 0) qcap = 16;
+    workers = rt_within(workers, 1, RT_MAX_WORKERS);
+    qcap = rt_within(qcap, 1, RT_MAX_QUEUE_CAP);
     AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
     h->kind = HDL_THREADPOOL;
     pthread_mutex_init(&h->mu, NULL);
@@ -3005,7 +3019,16 @@ static AnimaVal conc_threadpool_new(int64_t workers, int64_t qcap) {
     h->pool_q = calloc(h->pool_cap, sizeof(PoolTask));
     h->pool_nworkers = (int)workers;
     h->pool_threads = calloc((size_t)workers, sizeof(pthread_t));
-    for (int i = 0; i < workers; i++) pthread_create(&h->pool_threads[i], NULL, pool_worker, h);
+    for (int i = 0; i < workers; i++) {
+        int rc = pthread_create(&h->pool_threads[i], NULL, pool_worker, h);
+        if (rc != 0) {
+            // A pool of fewer threads is another pool: tasks that wait for
+            // each other may never end in it.
+            fflush(stdout);
+            fprintf(stderr, "runtime error: ThreadPool: cannot start a thread: %s\n", strerror(rc));
+            exit(1);
+        }
+    }
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h; return v;
 }
 
@@ -3026,7 +3049,7 @@ static AnimaVal conc_pool_submit(AnimaVal pv, AnimaVal clos) {
 }
 
 static AnimaVal conc_channel_new(int64_t cap) {
-    if (cap <= 0) cap = 8;
+    cap = rt_within(cap, 1, RT_MAX_QUEUE_CAP);
     AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
     h->kind = HDL_CHANNEL;
     pthread_mutex_init(&h->mu, NULL);
@@ -3081,14 +3104,25 @@ static void conc_mutex_with_lock(AnimaVal hv, AnimaVal fn) {
     pthread_mutex_unlock(&h->mu);
 }
 
-// parallel_map(xs, f): f of every element, each on a thread of its own,
-// in the order of xs.
-typedef struct { AnimaVal fn; AnimaVal arg; AnimaVal out; } ParMapJob;
+// parallel_map(xs, f): f of every element, in the order of xs, at most
+// RT_MAX_WORKERS of them at a time. The threads take the elements in turn.
+typedef struct {
+    AnimaVal fn;
+    AnimaVal *args, *outs;
+    size_t n, next;
+    pthread_mutex_t mu;
+} ParMap;
 
 static void *conc_parmap_run(void *p) {
-    ParMapJob *j = p;
-    j->out = v_call_clos(j->fn, 1, &j->arg);
-    return NULL;
+    ParMap *m = p;
+    for (;;) {
+        pthread_mutex_lock(&m->mu);
+        size_t i = m->next;
+        if (i < m->n) m->next++;
+        pthread_mutex_unlock(&m->mu);
+        if (i >= m->n) return NULL;
+        m->outs[i] = v_call_clos(m->fn, 1, &m->args[i]);
+    }
 }
 
 static AnimaVal conc_parallel_map(AnimaVal listv, AnimaVal fn) {
@@ -3096,24 +3130,29 @@ static AnimaVal conc_parallel_map(AnimaVal listv, AnimaVal fn) {
     if (listv.kind != VAL_LIST || !listv.u.list) return out;
     size_t n = listv.u.list->len;
     if (n == 0) return out;
-    ParMapJob *jobs = calloc(n, sizeof(ParMapJob));
-    pthread_t *ths = calloc(n, sizeof(pthread_t));
-    for (size_t i = 0; i < n; i++) {
-        jobs[i].fn = fn;
-        jobs[i].arg = listv.u.list->items[i];
-        int rc = pthread_create(&ths[i], NULL, conc_parmap_run, &jobs[i]);
+    ParMap m = {0};
+    m.fn = fn;
+    m.n = n;
+    m.args = malloc(n * sizeof(AnimaVal));
+    memcpy(m.args, listv.u.list->items, n * sizeof(AnimaVal));
+    m.outs = calloc(n, sizeof(AnimaVal));
+    pthread_mutex_init(&m.mu, NULL);
+    size_t nth = n < RT_MAX_WORKERS ? n : RT_MAX_WORKERS;
+    pthread_t *ths = calloc(nth, sizeof(pthread_t));
+    for (size_t i = 0; i < nth; i++) {
+        int rc = pthread_create(&ths[i], NULL, conc_parmap_run, &m);
         if (rc != 0) {
-            // The calls run beside each other or not at all: one of them may
-            // wait for what another gives, so none can be run here in turn.
+            // With fewer threads fewer calls run beside each other, and one
+            // of them may wait for what another gives.
+            fflush(stdout);
             fprintf(stderr, "runtime error: parallel_map: cannot start a thread: %s\n", strerror(rc));
             exit(1);
         }
     }
-    for (size_t i = 0; i < n; i++) {
-        pthread_join(ths[i], NULL);
-        v_list_push(out, jobs[i].out);
-    }
-    free(jobs); free(ths);
+    for (size_t i = 0; i < nth; i++) pthread_join(ths[i], NULL);
+    for (size_t i = 0; i < n; i++) v_list_push(out, m.outs[i]);
+    pthread_mutex_destroy(&m.mu);
+    free(m.args); free(m.outs); free(ths);
     return out;
 }
 
@@ -3122,7 +3161,7 @@ static AnimaVal conc_sem_new(int64_t n) {
     h->kind = HDL_SEMAPHORE;
     pthread_mutex_init(&h->mu, NULL);
     pthread_cond_init(&h->cond_not_empty, NULL);
-    h->sem_count = (int)n;
+    h->sem_count = rt_within(n, 1, RT_MAX_PERMITS);
     AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h; return v;
 }
 
@@ -3287,6 +3326,13 @@ static AnimaVal time_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return v_int((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+static void time_sleep_ms(int64_t ms) {
+    ms = rt_within(ms, 0, RT_MAX_SLEEP_MS);
+    if (ms == 0) return;
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
 }
 
 // ─── std.json ───

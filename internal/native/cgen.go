@@ -1667,7 +1667,7 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 	case "std.time.now_ms":
 		return "time_now_ms()"
 	case "std.time.sleep_ms":
-		g.line("if ((%s).u.i > 0) { struct timespec __ts = { (%s).u.i / 1000, ((%s).u.i %% 1000) * 1000000L }; nanosleep(&__ts, NULL); }", args[0], args[0], args[0])
+		g.line("time_sleep_ms((%s).u.i);", args[0])
 		return "v_void()"
 	}
 	return "v_void()"

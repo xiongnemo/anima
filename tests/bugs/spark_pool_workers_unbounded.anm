@@ -1,0 +1,14 @@
+# A pool has as many threads as the machine can start: `workers` is proved in
+# 1..256 and `queue_cap` in 1..65536. On `main` this passed all three kernels;
+# the VM did not end and the native program died of a signal.
+import std.concurrent as conc
+
+def work(n: int) -> int:
+    pool = conc.ThreadPool(n, 4)
+    f = pool.submit(() => 1)
+    r = f.await()
+    pool.shutdown()
+    return r
+
+def main() -> int:
+    return work(1 << 40)

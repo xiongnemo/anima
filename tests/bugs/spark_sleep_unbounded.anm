@@ -1,0 +1,11 @@
+# A sleep is at most a day: `ms` is proved in 0..86_400_000. On `main` this
+# passed all three kernels; the VM returned at once (the count of nanoseconds
+# overflowed) and the native program slept.
+import std.time as time
+
+def nap(ms: int) -> int:
+    time.sleep_ms(ms)
+    return 0
+
+def main() -> int:
+    return nap(1 << 62)

@@ -63,7 +63,7 @@ That is enough for `hi << 8 | lo` to be in `0..65535` when `hi` and `lo` are byt
 - A callee's `requires` is proved wherever the call is written.
 - A call may change what it receives as `mut`. Afterwards the caller knows the argument's type, an entity's `invariant`, and the callee's `ensures` clauses over its parameters. Clauses about `result` are not used.
 - A `?` has to leave the function's `ensures` and `mut` invariants true like any other return.
-- An argument of a standard call that has a range is proved inside it wherever the call is written, in a function, a lambda or a workflow step: `timeout_ms` (`timeout_bounds`), the `port` of a socket (`port_bounds`), the `max_bytes` of `recv_text` (`max_bytes_bounds`). The ranges are in [stdlib.md](stdlib.md).
+- An argument of a standard call that has a range is proved inside it wherever the call is written, in a function, a lambda or a workflow step: `timeout_ms` (`timeout_bounds`), the `port` of a socket (`port_bounds`), the `max_bytes` of `recv_text` (`max_bytes_bounds`), the `workers` and `queue_cap` of a thread pool, the `cap` of a channel, the `permits` of a semaphore, the `pool_size` of a session and the `ms` of `sleep_ms` (each `<name>_bounds`). The ranges are in [stdlib.md](stdlib.md).
 
 The rules on where a `mut` argument may be written are in [language.md](language.md#mut-arguments).
 

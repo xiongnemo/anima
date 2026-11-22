@@ -1,0 +1,11 @@
+# A semaphore starts with a permit: `permits` is proved in 1..65536. On `main`
+# this passed all three kernels; the VM gave the semaphore one permit and
+# printed, the native program gave it none and never did.
+import std.concurrent as conc
+
+def main() -> int:
+    s = conc.Semaphore(0)
+    s.acquire()
+    print("in")
+    s.release()
+    return 0
