@@ -48,6 +48,8 @@ A channel, a mutex and a future hold one type: [language.md](language.md#handles
 
 Every socket has one owner that closes it on every path; none is used after it is closed or moved, and a stream is not shared between threads: [ownership.md](ownership.md).
 
+`recv_text` gives text: what was received and holds a NUL byte is an `Err`, and is gone ([a `str` holds no NUL](#a-str-holds-no-nul)).
+
 ## `std.requests`
 
 | Call | Parameters |
@@ -61,7 +63,12 @@ Every socket has one owner that closes it on every path; none is used after it i
 | `req.gather` | `futures` (a list) |
 
 - `timeout_ms` is an `int[1..300_000]` and has to be given; the kernel proves the value in range (`timeout_bounds`). The same holds for `accept` on a listener.
-- It is the time for the whole request.
+- It is the time for the whole request. A request that runs out of it is an `Err` that says where: `... (Client.Timeout exceeded while awaiting headers)` before the head of the answer is read, `... (Client.Timeout or context cancellation while reading body)` after.
+- The answer is the one the server gave. A redirect (301, 302, ...) is not followed: it is an answer with that status. A body is not asked for compressed, and one sent compressed is not decompressed.
+- Each request has a connection of its own, closed after the answer, with a `Session` as without.
+- A 1xx answer other than 101 is passed over: the answer is the one after it.
+- An answer is read as Go's `net/http` reads one, on both backends, and one it refuses is an `Err` with Go's words: `malformed HTTP response "..."`, `malformed HTTP status code "..."`, `malformed MIME header line: ...`, `bad Content-Length "..."`, `unsupported transfer encoding: "..."`, `invalid byte in chunk length`, `unexpected EOF` and the like.
+- The body is text: one that holds a NUL byte is the `Err` `text holds a NUL` ([a `str` holds no NUL](#a-str-holds-no-nul)).
 - The future of `get_async` is awaited or gathered on every path: [ownership.md](ownership.md#futures).
 
 ## `std.json`
@@ -83,7 +90,7 @@ Every socket has one owner that closes it on every path; none is used after it i
 - The text is one value with only spaces, tabs and line ends around it. `{"a":1} x`, `[1,]`, `{"a":1,}`, a comment, `NaN` and a text that is empty are each an `Err`.
 - A number is an `int`: `-0`, `10`, anything from `-9223372036854775808` to `9223372036854775807`, read exactly. `01`, `+1` and `.5` are not JSON. `1.0`, `1e2` and a number outside 64 bits are JSON but no `int`, and are an `Err` wherever a value is made of them; in a member that the entity of `json.decode[E]` does not declare they are skipped with it.
 - A string holds the escapes `\" \\ \/ \b \f \n \r \t \uXXXX` and no other, and no control character unescaped. A `\uXXXX` pair of surrogates is one character and half a pair is U+FFFD. A byte that is not UTF-8 is U+FFFD.
-- A text with `\u0000` in a string or a key is an `Err`: a string of the native backend ends at a NUL.
+- A text with `\u0000` in a string or a key is an `Err`: [a `str` holds no NUL](#a-str-holds-no-nul).
 - Of two members of an object with one key, the last is kept.
 - Arrays and objects are nested at most 1000 deep.
 - The `Err` says where: `invalid JSON at offset 7: unexpected character`, with the offset in bytes. What is wrong is one of `unexpected character`, `unexpected end of text`, `invalid escape`, `control character in string`, `NUL in string`, `number is not an int`, `nested too deep`.
@@ -137,3 +144,13 @@ Every read of a `ByteView` and every slice is proved inside the view: [contracts
 | `time.sleep_ms` | `ms` |
 
 A `File` is an owned handle and is closed on every path: [ownership.md](ownership.md).
+
+## A `str` holds no NUL
+
+A `str` is text, and no text holds a NUL byte. The native backend's strings end at one, so a text with a NUL in it was cut there: a shorter text than on the VM, with another length, other bytes and another hash. Where a text comes in from outside the program, one that holds a NUL is refused instead, the same way on both backends:
+
+- `fs.read_text`, `file.read_text` and `stream.recv_text` give `Err("text holds a NUL")`, and so does a request whose answer has such a body.
+- `json.decode` gives an `Err` for `\u0000` in a string or a key.
+- A source file with a NUL byte in it is not read: `file.anm:2:14: NUL byte in source`.
+
+Nothing else makes a `str` out of bytes, so no `str` of a running program holds one. There is no call yet that reads a file or a socket as bytes.
