@@ -579,6 +579,9 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 					v.prove(fmt.Sprintf("%s.init.%s_range", m.Name, cv.Name), scope, cv.Span, initEnv,
 						smt.And(smt.Ge(term, smt.Const(ty.Lo)), smt.Le(term, smt.Const(ty.Hi))))
 				}
+			} else if ty, err := v.resolveSimpleRange(cv.Type); err == nil && ty != nil && ty.IsBounded {
+				// With no first value written, it is the least of its range.
+				initEnv.intTerms[cv.Name] = smt.Const(ty.Lo)
 			}
 		}
 		for _, inv := range m.States[0].Invariants {

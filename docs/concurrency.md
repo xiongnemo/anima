@@ -78,7 +78,7 @@ The guards, invariants and assignments of a `machine` or `monitor` are not run b
 
 So a call of a `def`, `len`, a list, `in`, a `str`, an `Option` and a `bool` control variable are refused in a model. They used to be read as `0` or `False`.
 
-The contract kernel proves of every guard, invariant, first value and assignment what it proves of a function's: no overflow, no division by zero, no shift by a count outside `0..63`, and each control variable in its range. An invariant is proved to hold, and to have a value, where the machine starts and where each transition arrives.
+The contract kernel proves of every guard, invariant, first value and assignment what it proves of a function's: no overflow, no division by zero, no shift by a count outside `0..63`, and each control variable in its range. An invariant is proved to hold, and to have a value, where the machine starts (with the first values, written or `lo`) and where each transition arrives.
 
 A failed check gives a trace to the violation. `anima check --save-cex trace.json` saves it, and `anima run --replay trace.json` replays it on the VM.
 

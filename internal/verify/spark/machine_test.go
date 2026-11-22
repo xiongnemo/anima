@@ -45,3 +45,33 @@ func TestSPARKMachineInvariantHasAValue(t *testing.T) {
 		}
 	}
 }
+
+// A control variable with no first value written starts at the least of its
+// range, which is where the LTS kernel starts it, and the invariants of the
+// first state are proved of that value and of no other.
+func TestSPARKMachineFirstValueNotWritten(t *testing.T) {
+	const src = `monitor Gate:
+    n: control int[LO..3]
+
+    state S:
+        INV
+        on go -> S
+`
+	for _, c := range []struct{ lo, inv, fails string }{
+		{"0", "invariant: n + 1 > n", ""},
+		{"1", "invariant: 6 / n <= 6", ""},
+		{"2", "invariant: n == 2\n        invariant: 1 << (2 - n) == 1", ""},
+		{"0", "invariant: 6 / n <= 6", "monitor:Gate.div_nonzero"},
+		{"1", "invariant: n == 2", "Gate.init.S_invariant"},
+		{"3", "invariant: n == 2\n        invariant: 1 << (2 - n) == 1", "Gate.init.S_invariant"},
+	} {
+		rep := verifySrc(t, strings.NewReplacer("LO", c.lo, "INV", c.inv).Replace(src))
+		failed := strings.Join(failedVCs(rep), " ")
+		if c.fails == "" && failed != "" {
+			t.Errorf("from %s, %q: %v", c.lo, c.inv, rep.Errors())
+		}
+		if c.fails != "" && !strings.Contains(failed, c.fails) {
+			t.Errorf("from %s, %q: want %s to fail, got %q", c.lo, c.inv, c.fails, failed)
+		}
+	}
+}
