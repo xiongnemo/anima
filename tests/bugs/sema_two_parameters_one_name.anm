@@ -1,0 +1,9 @@
+# BUG (sema soundness): of two parameters of one name sema and the kernel
+# took the last (an int[1..9]) and the VM bound the first: this divided by
+# zero on the VM. The native build failed (two C parameters of one name).
+def f(a: int, a: int[1..9]) -> int:
+    return 10 / a
+
+def main() -> int:
+    print(f(0, 5))
+    return 0

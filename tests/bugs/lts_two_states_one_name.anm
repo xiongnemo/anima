@@ -1,0 +1,25 @@
+# BUG (LTS): of two states of one name the model kept the last, unreported.
+# The second `Opened` allows what the first forbids, and the system passed.
+machine Door:
+    state Any:
+        on open -> Any
+        on close -> Any
+
+property OpenOnce:
+    state Shut:
+        on open -> Opened
+        on close -> Shut
+    state Opened:
+        on close -> Shut
+    state Opened:
+        on close -> Shut
+        on open -> Opened
+
+system Sys:
+    compose:
+        door: Door
+    check:
+        satisfies OpenOnce
+
+def main() -> int:
+    return 0

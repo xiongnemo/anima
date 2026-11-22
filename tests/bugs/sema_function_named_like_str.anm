@@ -1,0 +1,9 @@
+# BUG (sema soundness): sema took `str(5)` for the built-in, a str, while
+# both backends called this `def str` and got the int 0: this printed `0a`.
+def str(x: int) -> int:
+    return 0
+
+def main() -> int:
+    s = str(5)
+    print(s + "a")
+    return 0

@@ -2,7 +2,19 @@
 
 Before any kernel runs, the semantic checker gives every value a type and refuses what the two backends could not run as written. The reason behind most rules here is the same: an operation on a value of the wrong sort does not fail when the program runs, it gives `()` or `None` or runs on whatever the value is, and the kernels would go on reasoning about the type the source declared.
 
-Contents: [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [A value may hold itself](#a-value-may-hold-itself) · [Returns](#returns) · [Matches](#matches)
+Contents: [Names](#names) · [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [A value may hold itself](#a-value-may-hold-itself) · [Returns](#returns) · [Matches](#matches)
+
+## Names
+
+A name is declared once. Sema, the kernels and the two backends each look a name up in their own way, so a name that is declared twice could mean one thing to the proof and another to the program that runs.
+
+- **What is called.** A function, an entity, a variant and a built-in function (`len`, `print`, `assert`, `str`, `to_str`, `abs`, `min`, `max`, `Some`, `Ok`, `Err`) share one set of names: `def len(...)`, two `def f`, an entity and a function of one name, or one variant name in two types is an error.
+- A function may be named like a pipeline stage (`def take(xs: list[int], n: int)`): `xs |> take(2)` and `take(xs, 2)` then call that function, on both backends. An entity or a variant may not.
+- **Types.** A `type`, an entity and a port share one set of names, with the built-in types (`int`, `str`, `list`, `Option`, ...).
+- **Models.** Two machines, two properties, two progress properties, two workflows or two systems of one name are an error. A workflow and a function may share a name (`run_workflow W()` names the workflow).
+- **Within a model.** No two states of a machine, a monitor, a property or a port protocol, no two control variables of a monitor, no two pools of a workflow and no two parts of a system have one name. Of two states of one name the model kept the last, so a second state could allow what the first forbids.
+- **Within a declaration.** No two parameters of a function, a workflow, a lambda or an extern function, no two fields of an entity or of a variant, no two extern functions of a port, no two nodes of a workflow and no two branches of a `fork` have one name. One pattern binds a name once (`C(r, r)` is an error).
+- A local variable may still have the name of a function; it then cannot be called (see [What can be called](#what-can-be-called)).
 
 ## Variables
 

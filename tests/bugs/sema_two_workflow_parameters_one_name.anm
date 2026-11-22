@@ -1,0 +1,9 @@
+# BUG (sema soundness): the same for a workflow: it divided by zero on the
+# VM, and the native build failed.
+workflow W(n: int, n: int[1..9]) -> int:
+    start -> a
+    step a -> done:
+        return 10 / n
+
+def main() -> int:
+    return run_workflow W(0, 5)

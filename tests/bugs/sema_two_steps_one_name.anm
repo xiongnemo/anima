@@ -1,0 +1,14 @@
+# BUG (sema): of two steps of one name both backends ran the last, and the
+# first was never run nor reported.
+workflow W() -> int:
+    start -> a:
+        d = 5
+    step a -> b:
+        print("first a")
+    step b -> done:
+        return d
+    step a -> b:
+        print("second a")
+
+def main() -> int:
+    return run_workflow W()
