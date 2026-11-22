@@ -1,0 +1,739 @@
+# STUN NAT detection: what the NAT in front of a host does to its UDP, found by asking a STUN server.
+#
+#   stun client HOST [PORT]          the RFC 5780 mapping and filtering behaviour, and the RFC 3489 class
+#   stun server IP IP2 [PORT PORT2]  a server at two addresses of this host, for the tests that need two
+#   stun                             the client against a server of its own behind 15 simulated NATs
+#
+# What the checker holds of it:
+#   - every byte read of a datagram, an answer's or a request's, is proved inside it;
+#   - a number written into a message is proved to fit its field;
+#   - a socket is closed on every path: `?` is not written while one is held;
+#   - workflow Discover is a sound, 1-safe net, and no test of filtering comes after a test of mapping
+#     (property FilterFirst): a request to the server's other address would open the filter being tested.
+
+import std.socket as sock
+import std.bytes as bytes
+import std.concurrent as conc
+import std.cli as cli
+import std.time as time
+
+type U16 = int[0..65535]
+type U32 = int[0..4294967295]
+type Port = int[1..65535]
+type Wait = int[1..10000]
+type Change = int[0..6]
+type End = int[0..3]
+
+type Addr = At(ip: U32, port: Port) | Nowhere
+type Answer = Heard(mapped: Addr, other: Addr, source: Addr) | Refused(code: int[0..799]) | Silence | Broken(why: str)
+type Mapping = Direct | OneMapping | MappingPerAddress | MappingPerPort | MappingUntold
+type Filtering = PassAll | PassAddress | PassPort | FilteringUntold
+type Finding = Blocked | Failed(why: str) | Found(mapped: Addr, mapping: Mapping, filtering: Filtering)
+
+def ip_text(ip: U32) -> str:
+    return f"{ip >> 24}.{ip >> 16 & 255}.{ip >> 8 & 255}.{ip & 255}"
+
+def shown(a: Addr) -> str:
+    match a:
+        At(ip, port) -> return f"{ip_text(ip)}:{port}"
+        Nowhere -> return "none"
+
+# ---- the client ----
+
+def request(id: bytes.ByteView, change: Change) -> bytes.ByteView:
+    kind = bytes.u16_be(0x0001)
+    if change == 0:
+        return kind.concat(bytes.u16_be(0)).concat(id)
+    ask = bytes.u16_be(0x0003).concat(bytes.u16_be(4)).concat(bytes.u32_be(change))
+    return kind.concat(bytes.u16_be(8)).concat(id).concat(ask)
+
+def address(v: bytes.ByteView, xored: bool) -> Addr:
+    if v.len() != 8 or v.read_u8(1) != 1:
+        return Nowhere
+    port = v.read_u16_be(2)
+    ip = v.read_u32_be(4)
+    if xored:
+        port = port ^ 0x2112
+        ip = ip ^ 0x2112A442
+    if port == 0:
+        return Nowhere
+    return At(ip, port)
+
+def answer(msg: bytes.ByteView, id: bytes.ByteView, source: Addr) -> Option[Answer]:
+    if msg.len() < 20 or msg.len() > 65535:
+        return None
+    kind = msg.read_u16_be(0)
+    if kind != 0x0101 and kind != 0x0111:
+        return None
+    if msg.read_u16_be(2) != msg.len() - 20 or msg.slice(4, 20) != id:
+        return None
+    plain: Addr = Nowhere
+    xored: Addr = Nowhere
+    other: Addr = Nowhere
+    code: int[0..799] = 0
+    rest = msg.slice(20, msg.len())
+    while rest.len() >= 4:
+        decreases: rest.len()
+        attr = rest.read_u16_be(0)
+        size = rest.read_u16_be(2)
+        padded = (size + 3) / 4 * 4
+        if size > rest.len() - 4 or padded > rest.len() - 4:
+            return None
+        value = rest.slice(4, 4 + size)
+        if attr == 0x0001:
+            plain = address(value, False)
+        elif attr == 0x0020 or attr == 0x8020:
+            xored = address(value, True)
+        elif attr == 0x802c or (attr == 0x0005 and other == Nowhere):
+            other = address(value, False)
+        elif attr == 0x0009:
+            if size < 4:
+                return None
+            number = value.read_u8(3)
+            if number > 99:
+                return None
+            code = (value.read_u8(2) & 7) * 100 + number
+        rest = rest.slice(4 + padded, rest.len())
+    if rest.len() != 0:
+        return None
+    if kind == 0x0111:
+        return Some(Refused(code))
+    if xored != Nowhere:
+        return Some(Heard(xored, other, source))
+    if plain != Nowhere:
+        return Some(Heard(plain, other, source))
+    return None
+
+def ask(s: sock.UdpSocket, host: str, port: Port, change: Change, wait: Wait) -> Answer:
+    id = bytes.u32_be(0x2112A442).concat(bytes.random(12))
+    msg = request(id, change)
+    patience: int[1..40000] = wait
+    sent: int[0..3] = 0
+    while sent < 3:
+        decreases: 3 - sent
+        match s.send_to(msg, host, port):
+            Err(e) -> return Broken(e)
+            Ok(n) -> sent += 1
+        begun = time.now_ms()
+        heard: int[0..64] = 0
+        waiting = True
+        while waiting and heard < 64:
+            decreases: 64 - heard
+            heard += 1
+            left = patience - max(0, time.now_ms() - begun)
+            if left < 1:
+                waiting = False
+            else:
+                match s.recv_from(1500, timeout_ms=left):
+                    Err(e) -> waiting = False
+                    Ok(d) ->
+                        if d.ip.len() == 4 and d.port > 0:
+                            match answer(d.data, id, At(d.ip.read_u32_be(0), d.port)):
+                                Some(a) -> return a
+                                None -> waiting = True
+        if patience <= 20000:
+            patience = patience * 2
+    return Silence
+
+def probe(s: sock.UdpSocket, to: Addr, change: Change, wait: Wait) -> Answer:
+    match to:
+        At(ip, port) -> return ask(s, ip_text(ip), port, change, wait)
+        Nowhere -> return Broken("nowhere to ask")
+
+def mapped_of(a: Answer) -> Addr:
+    match a:
+        Heard(mapped, other, source) -> return mapped
+        _ -> return Nowhere
+
+def other_of(a: Answer) -> Addr:
+    match a:
+        Heard(mapped, other, source) -> return other
+        _ -> return Nowhere
+
+def source_of(a: Answer) -> Addr:
+    match a:
+        Heard(mapped, other, source) -> return source
+        _ -> return Nowhere
+
+# The address of a and the port of b.
+def beside(a: Addr, b: Addr) -> Addr:
+    match a:
+        At(ip, port) ->
+            match b:
+                At(ip2, port2) -> return At(ip, port2)
+                Nowhere -> return Nowhere
+        Nowhere -> return Nowhere
+
+# 0: no answer. 1: an answer. 2: an answer that names another address and another port of the server.
+def scope(a: Answer) -> int[0..2]:
+    match a:
+        Heard(mapped, other, source) ->
+            match source:
+                At(ip, port) ->
+                    match other:
+                        At(ip2, port2) ->
+                            if ip2 != ip and port2 != port:
+                                return 2
+                            return 1
+                        Nowhere -> return 1
+                Nowhere -> return 1
+        _ -> return 0
+
+# 0: the answer came from there. 1: no answer came. 2: nothing is told.
+def came_from(a: Answer, there: Addr) -> int[0..2]:
+    match a:
+        Heard(mapped, other, source) ->
+            if source == there and there != Nowhere:
+                return 0
+            return 2
+        Silence -> return 1
+        _ -> return 2
+
+# 0: both were given one mapping. 1: two. 2: nothing is told.
+def moved(a: Answer, b: Answer) -> int[0..2]:
+    m = mapped_of(a)
+    n = mapped_of(b)
+    if m == Nowhere or n == Nowhere:
+        return 2
+    if m == n:
+        return 0
+    return 1
+
+# The mapped address is this host's own when a socket can be bound at it.
+def ours(s: sock.UdpSocket, a: Answer) -> bool:
+    match mapped_of(a):
+        At(ip, port) ->
+            if ip == 0 or port != s.port():
+                return False
+            match sock.bind_udp(ip_text(ip), 0):
+                Ok(t) ->
+                    t.close()
+                    return True
+                Err(e) -> return False
+        Nowhere -> return False
+
+def failure(a: Answer) -> Finding:
+    match a:
+        Broken(why) -> return Failed(why)
+        Refused(code) -> return Failed(f"the server answered with error {code}")
+        _ -> return Blocked
+
+property FilterFirst:
+    state Filtering:
+        on change_both -> Filtering
+        on change_port -> Filtering
+        on other_address -> Mapping
+        on other_port -> Mapping
+    state Mapping:
+        on other_address -> Mapping
+        on other_port -> Mapping
+
+workflow Discover(s: sock.UdpSocket, host: str, port: Port, wait: Wait) -> Finding:
+    verify: sound, 1_safe
+
+    start -> binding:
+        first = ask(s, host, port, 0, wait)
+        can = scope(first)
+        direct = ours(s, first)
+        mapping = MappingUntold
+        filtering = FilteringUntold
+
+    choice after binding:
+        when can == 0 -> unheard
+        when can == 1 -> alone
+        when can == 2 -> change_both
+
+    step unheard -> done:
+        return failure(first)
+
+    step alone -> told:
+        if direct:
+            mapping = Direct
+
+    step change_both:
+        sieve = came_from(probe(s, source_of(first), 6, wait), other_of(first))
+
+    choice after change_both:
+        when sieve == 0 -> any_passes
+        when sieve == 1 -> change_port
+        when sieve == 2 -> filtered
+
+    step any_passes -> filtered:
+        filtering = PassAll
+
+    step change_port -> filtered:
+        narrow = came_from(probe(s, source_of(first), 2, wait), beside(source_of(first), other_of(first)))
+        if narrow == 0:
+            filtering = PassAddress
+        elif narrow == 1:
+            filtering = PassPort
+
+    merge filtered after any_passes, change_port
+
+    choice after filtered:
+        when direct -> open
+        when not direct -> other_address
+
+    step open -> told:
+        mapping = Direct
+
+    step other_address:
+        second = probe(s, beside(other_of(first), source_of(first)), 0, wait)
+        shift = moved(first, second)
+
+    choice after other_address:
+        when shift == 0 -> same_mapping
+        when shift == 1 -> other_port
+        when shift == 2 -> told
+
+    step same_mapping -> told:
+        mapping = OneMapping
+
+    step other_port -> told:
+        third = probe(s, other_of(first), 0, wait)
+        again = moved(second, third)
+        if again == 0:
+            mapping = MappingPerAddress
+        elif again == 1:
+            mapping = MappingPerPort
+
+    merge told after alone, open, same_mapping, other_port -> report
+
+    step report -> done:
+        return Found(mapped_of(first), mapping, filtering)
+
+system Discovery:
+    compose:
+        client: Discover
+    check:
+        satisfies FilterFirst
+
+def discover(home: str, host: str, port: Port, wait: Wait) -> Finding:
+    match sock.bind_udp(home, 0):
+        Err(e) -> return Failed(e)
+        Ok(s) ->
+            found = run_workflow Discover(s, host, port, wait)
+            s.close()
+            return found
+
+# ---- the server ----
+
+# manner 0: RFC 5780. 1: RFC 3489, whatever is asked. 2: one address only. 3: takes no CHANGE-REQUEST.
+entity Scene:
+    shut: bool
+    hides: bool
+    mapping: int[0..2]
+    filtering: int[0..2]
+    manner: int[0..3]
+
+entity Stand:
+    ip: U32
+    ip2: U32
+    port: Port
+    port2: Port
+    pause: int[1..1000]
+
+entity Request:
+    id: bytes.ByteView
+    modern: bool
+    change: Change
+    unknown: bytes.ByteView
+
+type Turn = Quiet | Dropped | Say(out: End, data: bytes.ByteView, host: str, port: Port)
+
+def request_of(msg: bytes.ByteView) -> Option[Request]:
+    if msg.len() < 20 or msg.len() > 1500:
+        return None
+    if msg.read_u16_be(0) != 0x0001 or msg.read_u16_be(2) != msg.len() - 20:
+        return None
+    change: Change = 0
+    unknown = bytes.from_hex("")
+    rest = msg.slice(20, msg.len())
+    while rest.len() >= 4:
+        decreases: rest.len()
+        attr = rest.read_u16_be(0)
+        size = rest.read_u16_be(2)
+        padded = (size + 3) / 4 * 4
+        if padded > rest.len() - 4:
+            return None
+        if attr == 0x0003:
+            if size != 4 or rest.len() < 8:
+                return None
+            change = rest.read_u32_be(4) & 6
+        elif attr < 0x8000:
+            unknown = unknown.concat(bytes.u16_be(attr))
+        rest = rest.slice(4 + padded, rest.len())
+    if rest.len() != 0:
+        return None
+    return Some(Request(msg.slice(4, 20), msg.read_u32_be(4) == 0x2112A442, change, unknown))
+
+def endpoint(st: Stand, e: End) -> Addr:
+    ip: U32 = st.ip
+    port: Port = st.port
+    if e >= 2:
+        ip = st.ip2
+    if e == 1 or e == 3:
+        port = st.port2
+    return At(ip, port)
+
+def attribute(kind: U16, a: Addr, xored: bool) -> bytes.ByteView:
+    match a:
+        At(ip, port) ->
+            head = bytes.u16_be(kind).concat(bytes.u16_be(8)).concat(bytes.u16_be(1))
+            if xored:
+                return head.concat(bytes.u16_be(port ^ 0x2112)).concat(bytes.u32_be(ip ^ 0x2112A442))
+            return head.concat(bytes.u16_be(port)).concat(bytes.u32_be(ip))
+        Nowhere -> return bytes.from_hex("")
+
+def message(kind: U16, id: bytes.ByteView, body: bytes.ByteView) -> bytes.ByteView:
+    requires: body.len() <= 65535
+    return bytes.u16_be(kind).concat(bytes.u16_be(body.len())).concat(id).concat(body)
+
+def reply(q: Request, at: End, seen: Addr, st: Stand, manner: int[0..3], host: str, port: Port) -> Turn:
+    unknown = q.unknown
+    if q.change != 0 and manner >= 2:
+        unknown = unknown.concat(bytes.u16_be(0x0003))
+    if unknown.len() > 0:
+        if unknown.len() > 1000:
+            return Dropped
+        pad = bytes.from_hex("")
+        if unknown.len() >> 2 << 2 != unknown.len():
+            pad = bytes.u16_be(0)
+        why = bytes.from_str("Unknown Attribute")
+        body = bytes.u16_be(0x0009).concat(bytes.u16_be(4 + why.len())).concat(bytes.u32_be(0x0414)).concat(why).concat(bytes.u32_be(0).slice(0, 3)).concat(bytes.u16_be(0x000a)).concat(bytes.u16_be(unknown.len())).concat(unknown).concat(pad)
+        if body.len() > 65535:
+            return Dropped
+        return Say(at, message(0x0111, q.id, body), host, port)
+    side: int[0..1] = 0
+    which: int[0..1] = 0
+    if at >= 2:
+        side = 1
+    if at == 1 or at == 3:
+        which = 1
+    if q.change >= 4:
+        side = 1 - side
+    if q.change == 2 or q.change == 6:
+        which = 1 - which
+    out: End = side * 2 + which
+    body = attribute(0x0001, seen, False)
+    if q.modern and manner != 1:
+        body = attribute(0x0020, seen, True).concat(body).concat(attribute(0x802b, endpoint(st, out), False))
+        if manner != 2:
+            body = body.concat(attribute(0x802c, endpoint(st, 3 - at), False))
+    else:
+        body = body.concat(attribute(0x0004, endpoint(st, out), False)).concat(attribute(0x0005, endpoint(st, 3 - at), False))
+    if body.len() > 65535:
+        return Dropped
+    return Say(out, message(0x0101, q.id, body), host, port)
+
+# The address the NAT of the scene gives the host for what it sends to that end of the server.
+def seen_as(sc: Scene, at: End, whence: Addr) -> Addr:
+    if not sc.hides:
+        return whence
+    if sc.mapping == 0:
+        return At(0xCB007107, 40000)
+    if sc.mapping == 1:
+        return At(0xCB007107, 40000 + at / 2)
+    return At(0xCB007107, 40000 + at)
+
+# Whether that NAT lets in what that end of the server sends, the host having sent to the ends in told.
+def passes(sc: Scene, told: int[0..15], out: End) -> bool:
+    if sc.filtering == 0:
+        return True
+    if sc.filtering == 1:
+        return told >> out / 2 * 2 & 3 != 0
+    return told >> out & 1 != 0
+
+def hear(s: sock.UdpSocket, at: End, st: Stand, sc: Scene) -> Turn:
+    match s.recv_from(1500, timeout_ms=st.pause):
+        Err(e) -> return Quiet
+        Ok(d) ->
+            if sc.shut or d.port == 0 or d.ip.len() != 4:
+                return Dropped
+            match request_of(d.data):
+                None -> return Dropped
+                Some(q) -> return reply(q, at, seen_as(sc, at, At(d.ip.read_u32_be(0), d.port)), st, sc.manner, d.host, d.port)
+
+def say(s: sock.UdpSocket, data: bytes.ByteView, host: str, port: Port) -> bool:
+    match s.send_to(data, host, port):
+        Ok(n) -> return True
+        Err(e) -> return False
+
+# The four sockets are heard in turn. told holds a bit for each end the host has sent to.
+def serve(a: sock.UdpSocket, a2: sock.UdpSocket, b: sock.UdpSocket, b2: sock.UdpSocket, st: Stand, sc: Scene, stop: conc.Mutex[bool]) -> int:
+    told: int[0..15] = 0
+    answered = 0
+    while not stop.get():
+        for at in 0..4:
+            t = Quiet
+            if at == 0:
+                t = hear(a, at, st, sc)
+            elif at == 1:
+                t = hear(a2, at, st, sc)
+            elif at == 2:
+                t = hear(b, at, st, sc)
+            else:
+                t = hear(b2, at, st, sc)
+            if t != Quiet:
+                told = told | 1 << at
+            match t:
+                Say(out, data, host, port) ->
+                    sent = False
+                    if not passes(sc, told, out):
+                        sent = False
+                    elif out == 0:
+                        sent = say(a, data, host, port)
+                    elif out == 1:
+                        sent = say(a2, data, host, port)
+                    elif out == 2:
+                        sent = say(b, data, host, port)
+                    else:
+                        sent = say(b2, data, host, port)
+                    if sent and answered < 1000000000:
+                        answered += 1
+                _ -> told = told
+    return answered
+
+# The four sockets of a server, bound and served until stop holds True, and closed. "" when it served.
+def stand_once(sc: Scene, ip: U32, ip2: U32, port: U16, port2: U16, pause: int[1..1000], where: conc.Channel[U16], stop: conc.Mutex[bool]) -> str:
+    match sock.bind_udp(ip_text(ip), port):
+        Err(e) -> return e
+        Ok(a) ->
+            match sock.bind_udp(ip_text(ip2), a.port()):
+                Err(e) ->
+                    a.close()
+                    return e
+                Ok(b) ->
+                    match sock.bind_udp(ip_text(ip), port2):
+                        Err(e) ->
+                            a.close()
+                            b.close()
+                            return e
+                        Ok(a2) ->
+                            match sock.bind_udp(ip_text(ip2), a2.port()):
+                                Err(e) ->
+                                    a.close()
+                                    b.close()
+                                    a2.close()
+                                    return e
+                                Ok(b2) ->
+                                    _ = where.send(a.port())
+                                    answered = serve(a, a2, b, b2, Stand(ip, ip2, a.port(), a2.port(), pause), sc, stop)
+                                    a.close()
+                                    b.close()
+                                    a2.close()
+                                    b2.close()
+                                    return ""
+
+# A server at two addresses and two ports of each. It says its first port on where once it listens, or 0 when
+# it cannot. A port given as 0 is one the system picks, and when the other address does not have that port
+# free, another is picked.
+def stand(sc: Scene, ip: U32, ip2: U32, port: U16, port2: U16, pause: int[1..1000], where: conc.Channel[U16], stop: conc.Mutex[bool]) -> str:
+    why = ""
+    tries: int[0..8] = 0
+    while tries < 8:
+        decreases: 8 - tries
+        tries += 1
+        why = stand_once(sc, ip, ip2, port, port2, pause, where, stop)
+        if why == "":
+            return why
+        if port != 0 and port2 != 0:
+            tries = 8
+    _ = where.send(0)
+    return why
+
+# ---- the two tried against each other, and each alone ----
+
+def classic(f: Finding) -> str:
+    match f:
+        Blocked -> return "UDP blocked"
+        Failed(why) -> return "not told"
+        Found(mapped, mapping, filtering) ->
+            if mapping == MappingPerAddress or mapping == MappingPerPort:
+                return "symmetric NAT"
+            if mapping == MappingUntold or filtering == FilteringUntold:
+                return "not told"
+            if mapping == Direct:
+                if filtering == PassAll:
+                    return "open internet"
+                return "symmetric UDP firewall"
+            if filtering == PassAll:
+                return "full cone NAT"
+            if filtering == PassAddress:
+                return "restricted cone NAT"
+            return "port restricted cone NAT"
+
+def mapping_text(m: Mapping) -> str:
+    match m:
+        Direct -> return "none"
+        OneMapping -> return "endpoint-independent"
+        MappingPerAddress -> return "address-dependent"
+        MappingPerPort -> return "address and port-dependent"
+        MappingUntold -> return "not told"
+
+def filtering_text(f: Filtering) -> str:
+    match f:
+        PassAll -> return "endpoint-independent"
+        PassAddress -> return "address-dependent"
+        PassPort -> return "address and port-dependent"
+        FilteringUntold -> return "not told"
+
+def summary(f: Finding) -> str:
+    match f:
+        Blocked -> return "UDP blocked"
+        Failed(why) -> return f"failed: {why}"
+        Found(mapped, mapping, filtering) -> return f"{classic(f)} (mapping {mapping_text(mapping)}, filtering {filtering_text(filtering)})"
+
+# A server of the scene on 127.0.0.1 and 127.0.0.2, the client run against it, and whether it found what was built.
+def scene(pool: conc.ThreadPool, name: str, sc: Scene, want: str) -> int[0..1]:
+    where = conc.Channel[U16](cap=1)
+    stop = conc.Mutex(False)
+    server = pool.submit(() => stand(sc, 0x7F000001, 0x7F000002, 0, 0, 1, where, stop))
+    found = Failed("the server said no port")
+    match where.recv():
+        Some(port) ->
+            if port > 0:
+                found = discover("127.0.0.1", "127.0.0.1", port, 50)
+        None -> found = Failed("the server said no port")
+    stop.set(True)
+    why = server.await()
+    if why != "":
+        found = Failed(why)
+    got = summary(found)
+    if got == want:
+        print(f"ok   {name}: {got}")
+        return 0
+    print(f"FAIL {name}: {got}, not {want}")
+    return 1
+
+def self_test() -> int:
+    pool = conc.ThreadPool(1, 1)
+    full = "mapping endpoint-independent"
+    wrong = 0
+    wrong += scene(pool, "no answer", Scene(True, True, 0, 0, 0), "UDP blocked")
+    wrong += scene(pool, "no NAT, all let in", Scene(False, False, 0, 0, 0), "open internet (mapping none, filtering endpoint-independent)")
+    wrong += scene(pool, "no NAT, an address let in", Scene(False, False, 0, 1, 0), "symmetric UDP firewall (mapping none, filtering address-dependent)")
+    wrong += scene(pool, "no NAT, an endpoint let in", Scene(False, False, 0, 2, 0), "symmetric UDP firewall (mapping none, filtering address and port-dependent)")
+    wrong += scene(pool, "one mapping, all let in", Scene(False, True, 0, 0, 0), f"full cone NAT ({full}, filtering endpoint-independent)")
+    wrong += scene(pool, "one mapping, an address let in", Scene(False, True, 0, 1, 0), f"restricted cone NAT ({full}, filtering address-dependent)")
+    wrong += scene(pool, "one mapping, an endpoint let in", Scene(False, True, 0, 2, 0), f"port restricted cone NAT ({full}, filtering address and port-dependent)")
+    wrong += scene(pool, "a mapping for each address", Scene(False, True, 1, 1, 0), "symmetric NAT (mapping address-dependent, filtering address-dependent)")
+    wrong += scene(pool, "a mapping for each endpoint", Scene(False, True, 2, 2, 0), "symmetric NAT (mapping address and port-dependent, filtering address and port-dependent)")
+    wrong += scene(pool, "a mapping for each endpoint, all let in", Scene(False, True, 2, 0, 0), "symmetric NAT (mapping address and port-dependent, filtering endpoint-independent)")
+    wrong += scene(pool, "an RFC 3489 server", Scene(False, True, 0, 1, 1), f"restricted cone NAT ({full}, filtering address-dependent)")
+    wrong += scene(pool, "an RFC 3489 server, no NAT", Scene(False, False, 0, 0, 1), "open internet (mapping none, filtering endpoint-independent)")
+    wrong += scene(pool, "a server at one address", Scene(False, True, 0, 2, 2), "not told (mapping not told, filtering not told)")
+    wrong += scene(pool, "a server at one address, no NAT", Scene(False, False, 0, 2, 2), "not told (mapping none, filtering not told)")
+    wrong += scene(pool, "a server that changes nothing", Scene(False, True, 1, 0, 3), "symmetric NAT (mapping address-dependent, filtering not told)")
+    pool.shutdown()
+    if wrong == 0:
+        print("every scene was found as it was built")
+        return 0
+    print(f"{wrong} scene(s) were not found as they were built")
+    return 1
+
+# The number a text of digits writes, 65535 at most.
+def number(text: str) -> Option[U16]:
+    rest = bytes.from_str(text)
+    if rest.len() == 0:
+        return None
+    n: U16 = 0
+    while rest.len() > 0:
+        decreases: rest.len()
+        digit = rest.read_u8(0) - 48
+        if digit < 0 or digit > 9 or n > 6553 or n * 10 + digit > 65535:
+            return None
+        n = n * 10 + digit
+        rest = rest.slice(1, rest.len())
+    return Some(n)
+
+# The address a.b.c.d writes.
+def ip_of(text: str) -> Option[U32]:
+    rest = bytes.from_str(text)
+    ip: U32 = 0
+    part: int[0..255] = 0
+    parts: int[0..4] = 0
+    digits: int[0..3] = 0
+    while rest.len() > 0:
+        decreases: rest.len()
+        c = rest.read_u8(0)
+        if c == 46:
+            if digits == 0 or parts >= 3:
+                return None
+            ip = (ip & 0xFFFFFF) << 8 | part
+            parts += 1
+            part = 0
+            digits = 0
+        else:
+            if c < 48 or c > 57 or digits == 3 or part * 10 + c - 48 > 255:
+                return None
+            part = part * 10 + c - 48
+            digits += 1
+        rest = rest.slice(1, rest.len())
+    if digits == 0 or parts != 3:
+        return None
+    return Some((ip & 0xFFFFFF) << 8 | part)
+
+def usage() -> int:
+    print("usage: stun                              the client against a server of its own, in 15 scenes")
+    print("       stun client HOST [PORT]           what the NAT in front of this host does")
+    print("       stun server IP IP2 [PORT PORT2]   a server at two addresses of this host")
+    return 2
+
+def client(host: str, port: Port) -> int:
+    found = discover("0.0.0.0", host, port, 500)
+    match found:
+        Blocked ->
+            print("no answer: UDP is blocked, or no server is there")
+            return 1
+        Failed(why) ->
+            print(why)
+            return 1
+        Found(mapped, mapping, filtering) ->
+            print(f"mapped address: {shown(mapped)}")
+            print(f"mapping:        {mapping_text(mapping)}")
+            print(f"filtering:      {filtering_text(filtering)}")
+            print(f"RFC 3489:       {classic(found)}")
+            return 0
+
+def server(ip: U32, ip2: U32, port: Port, port2: Port) -> int:
+    where = conc.Channel[U16](cap=1)
+    why = stand(Scene(False, False, 0, 0, 0), ip, ip2, port, port2, 5, where, conc.Mutex(False))
+    print(why)
+    return 1
+
+def port_of(args: list[str], at: int[1..5], or_else: Port) -> Option[Port]:
+    if at >= len(args):
+        return Some(or_else)
+    match number(args[at]):
+        Some(n) ->
+            if n > 0:
+                return Some(n)
+            return None
+        None -> return None
+
+def main() -> int:
+    args = cli.args()
+    if len(args) < 2:
+        return self_test()
+    if args[1] == "client" and (len(args) == 3 or len(args) == 4):
+        match port_of(args, 3, 3478):
+            Some(port) -> return client(args[2], port)
+            None -> return usage()
+    if args[1] == "server" and (len(args) == 4 or len(args) == 6):
+        match ip_of(args[2]):
+            Some(ip) ->
+                match ip_of(args[3]):
+                    Some(ip2) ->
+                        match port_of(args, 4, 3478):
+                            Some(port) ->
+                                match port_of(args, 5, 3479):
+                                    Some(port2) ->
+                                        if ip != ip2 and port != port2:
+                                            return server(ip, ip2, port, port2)
+                                        return usage()
+                                    None -> return usage()
+                            None -> return usage()
+                    None -> return usage()
+            None -> return usage()
+    return usage()

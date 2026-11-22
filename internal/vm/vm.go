@@ -631,9 +631,12 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 	// Handles stored in this frame, closed when it ends in a runtime error
 	// (the program stops). A `?` that returns early closes none of them: a
 	// local may be another name for a handle of the caller (`c = ch`), or
-	// hold one that was handed on. Sockets and files are never here: their
-	// owner is proved to close them.
+	// hold one that was handed on. TCP sockets and files are never here:
+	// their owner is proved to close them. Each is here once, and one with
+	// nothing to close is not here at all: a frame that never ends would
+	// otherwise keep every view it has named.
 	var ownedHandles []*HandleValue
+	var owned map[*HandleValue]struct{}
 	cleanupHandles := func(except Value) {
 		for _, h := range ownedHandles {
 			if except.Kind == ValHandle && except.Handle == h {
@@ -688,8 +691,15 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 			if val.Kind == ValHandle && val.Handle != nil {
 				switch val.Handle.Kind {
 				case HandleListener, HandleStream, HandleFile:
+				case HandleByteView, HandleMutex, HandleSemaphore, HandleSession, HandleFuture:
 				default:
-					ownedHandles = append(ownedHandles, val.Handle)
+					if _, held := owned[val.Handle]; !held {
+						if owned == nil {
+							owned = map[*HandleValue]struct{}{}
+						}
+						owned[val.Handle] = struct{}{}
+						ownedHandles = append(ownedHandles, val.Handle)
+					}
 				}
 			}
 		case OpLoadUpval:

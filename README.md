@@ -76,6 +76,7 @@ CGO_ENABLED=0 go build -o anima ./cmd/anima
 | [docs/workflows.md](docs/workflows.md) | workflows: paths, `choice` / `merge`, `fork` / `join`, soundness |
 | [docs/stdlib.md](docs/stdlib.md) | the standard modules and how they are called |
 | [docs/backends.md](docs/backends.md) | the VM, the native backend, what "the same on both" covers, the studio, the CLI |
+| [docs/stun.md](docs/stun.md) | the STUN example: what it asks, what is proved of it and what is not |
 | [docs/design.md](docs/design.md) | why the language exists and the decisions behind it |
 
 ## Examples
@@ -88,6 +89,7 @@ CGO_ENABLED=0 go build -o anima ./cmd/anima
 | `examples/agent_sandbox.anm` | a reference monitor for an LLM agent: budgets, an unreachable unapproved shell call, a sound tool workflow |
 | `examples/dining_philosophers_safe.anm` | the asymmetric, deadlock-free dining philosophers |
 | `examples/single_lane_bridge.anm` | the single-lane bridge: safety and progress |
+| `examples/stun.anm` | a STUN client and server over UDP: every read of a datagram proved inside it, sockets closed by hand, the order of the tests as a property of a workflow ([docs/stun.md](docs/stun.md)) |
 
 ## Status
 
@@ -96,7 +98,7 @@ The six programs the language is being built towards:
 | Program | Status |
 |---|---|
 | Concurrent HTTP server | done (`examples/concurrent_http.anm`) |
-| STUN NAT detection | in progress: bit operators, byte building and UDP sockets are in, the program is next |
+| STUN NAT detection | done (`examples/stun.anm`, [docs/stun.md](docs/stun.md)) |
 | Mini Redis, then Raft replication | not started |
 | DNS server | not started |
 | TFTP server | not started |
@@ -114,7 +116,7 @@ internal/vm        bytecode compiler and virtual machine
 internal/native    C11 generator and its runtime
 internal/stdlib    catalog of the standard modules
 internal/studio    web studio
-examples           six verified programs
+examples           seven verified programs
 tests              end-to-end tests; tests/bugs holds programs that must be refused
 ```
 

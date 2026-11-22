@@ -1,0 +1,53 @@
+# The order examples/stun.anm is held to, and a discovery that does not keep
+# it: a request to the server's other address opens the NAT's filter to that
+# address, so a test of filtering made after it finds the filter open.
+property FilterFirst:
+    state Filtering:
+        on change_both -> Filtering
+        on change_port -> Filtering
+        on other_address -> Mapping
+        on other_port -> Mapping
+    state Mapping:
+        on other_address -> Mapping
+        on other_port -> Mapping
+
+workflow Discover(k: int[0..9]) -> int:
+    verify: sound, 1_safe
+
+    start -> binding:
+        heard = k > 3
+
+    choice after binding:
+        when not heard -> unheard
+        when heard -> other_address
+
+    step unheard -> done:
+        return 0
+
+    step other_address -> change_both:
+        moved = k > 6
+
+    step change_both:
+        passed = k > 8
+
+    choice after change_both:
+        when passed -> report
+        when not passed -> change_port
+
+    step change_port -> report:
+        print("asked for the other port")
+
+    merge report after change_both, change_port -> told
+
+    step told -> done:
+        return 1
+
+system Discovery:
+    compose:
+        client: Discover
+    check:
+        satisfies FilterFirst
+
+def main() -> int:
+    print(run_workflow Discover(9))
+    return 0

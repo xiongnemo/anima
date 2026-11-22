@@ -216,6 +216,8 @@ Every read of a `ByteView` and every slice is proved inside the view: [contracts
 
 A `File` is an owned handle and is closed on every path: [ownership.md](ownership.md).
 
+`cli.args()` is a `list[str]`: the program first (the source file under `anima run`, the executable natively), then the arguments it was run with. Under `anima run` those are what is written after the file, without a `--` that sets them apart: `anima run f.anm -- a -b` and `./f a -b` both give `[_, "a", "-b"]`.
+
 `ms` is an `int[0..86_400_000]`, a day at most; the kernel proves the value in range (`ms_bounds`).
 
 ## A `str` holds no NUL
