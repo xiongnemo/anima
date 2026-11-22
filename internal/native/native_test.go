@@ -305,6 +305,8 @@ def main() -> int:
         if x != -9223372036854775807 - 1:
             print(clamp(x), far(x), min(x, 0 - 1), max(x, 7), abs(min(x, 5)))
     print(gap(0 - 1000, 1000), gap(3, 3), gap(7, 0 - 2), abs(0 - 5), min(2, 3), max(2, 3))
+    keep = (q) => q
+    print(0 - 5 |> abs(), 0 - 6 |> abs, 3 |> min(2) |> max(0 - 1), [1, 2] |> len, 4 |> keep |> str)
     return 0
 `
 	const want = "0 9223372036854775807 -9223372036854775807 7 9223372036854775807\n" +
@@ -315,7 +317,8 @@ def main() -> int:
 		"255 255 -1 255 5\n" +
 		"255 256 -1 256 5\n" +
 		"255 9223372036854775807 -1 9223372036854775807 5\n" +
-		"2000 0 9 5 2 3\n"
+		"2000 0 9 5 2 3\n" +
+		"5 6 2 2 4\n"
 	onVM, onNative := run(t, "absminmax", src)
 	if onVM != want || onNative != want {
 		t.Errorf("VM printed %q, native %q, want %q", onVM, onNative, want)

@@ -58,6 +58,21 @@ def wait(a: int[0..1000], b: int[0..1000]) -> int:
 def area(a: int[-1000..1000], b: int[-1000..1000]) -> int[0..1000000]:
     return abs(a) * max(abs(b), 1)
 
+def piped(x: int[-9..9]) -> int[0..9]:
+    return x |> abs
+
+def piped_at(xs: list[int], i: int) -> int:
+    requires: len(xs) > 0
+    return xs[i |> max(0) |> min(len(xs) - 1)]
+
+def piped_wait(a: int[0..1000], b: int[0..1000]) -> int:
+    time.sleep_ms(a - b |> max(0))
+    return 10 / (a |> max(1))
+
+def xs_len(xs: list[int]) -> int:
+    ensures: result == len(xs)
+    return xs |> len()
+
 def part(a: int[-99..99], b: int[1..9]) -> int:
     return a / max(b, 3) + a / (abs(a) + 1) + a / min(0 - b, 0 - 1)
 
@@ -122,6 +137,12 @@ func TestAbsMinMaxRefused(t *testing.T) {
 		{"abs of a difference", "def f(a: int, b: int[0..9]) -> int:\n    requires: a < 0\n    return abs(a + b)\n", "def:f.int64_overflow"},
 		{"abs within abs", "def f(x: int) -> int:\n    return abs(abs(x))\n", "def:f.int64_overflow"},
 		{"abs under min", "def f(x: int) -> int:\n    return min(abs(x), 3)\n", "def:f.int64_overflow"},
+		{"abs after a pipe", "def f(x: int) -> int:\n    y = x |> abs()\n    if y < 0:\n        return 1\n    return 0\n", "def:f.int64_overflow"},
+		{"abs after a pipe, by its name", "def f(x: int) -> int:\n    return x |> abs\n", "def:f.int64_overflow"},
+		{"abs in the middle of a pipeline", "def f(x: int) -> int:\n    return x |> abs() |> min(5) |> max(-5)\n", "def:f.int64_overflow"},
+		{"abs after a pipe in a lambda", "def f(xs: list[int]) -> list[int]:\n    return xs |> map((q) => (q |> abs()))\n", "int64_overflow"},
+		{"max after a pipe may be 0", "def f(x: int) -> int:\n    return 100 / (x |> max(0))\n", "def:f.div_nonzero"},
+		{"a divisor piped to a lambda", "def f() -> int:\n    g = (a) => 10 / a\n    return 0 |> g\n", "def:f.div_nonzero"},
 		{"abs in a lambda", "def f(xs: list[int]) -> list[int]:\n    return xs |> map((q) => abs(q))\n", "int64_overflow"},
 		{"abs in an invariant", "entity P:\n    d: int\n    invariant: abs(d) >= 0\n", "entity:P.int64_overflow"},
 		{"abs in a monitor's guard", strings.Replace(monitorSrc, "GUARD", "abs(n - 9223372036854775807 - 1) > 0", 1), "monitor:Gate.int64_overflow"},

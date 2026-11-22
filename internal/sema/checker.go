@@ -40,6 +40,7 @@ func Check(prog *ast.Program) (*ProgramInfo, error) {
 	if err := c.checkProgram(); err != nil {
 		return c.info, err
 	}
+	c.callAllPiped()
 	return c.info, nil
 }
 
@@ -51,6 +52,10 @@ type checker struct {
 	// `x |> o.f(a)`: the x each such call o.f(a) is given first. By call,
 	// since an argument of a piped call may hold a piped call of its own.
 	piped map[*ast.CallExpr]ast.Expr
+	// pipedCalls: the call `x |> g(a)` or `x |> g` makes when g is called
+	// by its name and is no pipeline stage and no function of the program
+	// (a built-in function, a lambda in a variable): g(x, a).
+	pipedCalls map[*ast.PipeExpr]*ast.CallExpr
 }
 
 type scope struct {
@@ -3106,6 +3111,10 @@ func (c *checker) checkPipeExpr(e *ast.PipeExpr, sc *scope) (Type, error) {
 			call.Callee, call.TypeArgs = rhs.Callee, rhs.TypeArgs
 		}
 		call.Args = append([]ast.CallArg{{Value: e.Left, Span: e.Left.GetSpan()}}, callArgs...)
+		if c.pipedCalls == nil {
+			c.pipedCalls = map[*ast.PipeExpr]*ast.CallExpr{}
+		}
+		c.pipedCalls[e] = call
 		return c.checkExpr(call, sc)
 	}
 	// `x |> o.f(a)` calls o.f(x, a) on both backends too. The call that is

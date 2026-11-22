@@ -134,6 +134,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_semaphore_no_permit.anm", "permits_bounds"},
 		{"../tests/bugs/spark_sleep_unbounded.anm", "ms_bounds"},
 		{"../tests/bugs/spark_abs_of_least_int.anm", "def:neg.int64_overflow"},
+		{"../tests/bugs/spark_piped_abs_of_least_int.anm", "def:neg.int64_overflow"},
+		{"../tests/bugs/spark_piped_lambda_alias.anm", "def:main.div_nonzero"},
 		{"../tests/bugs/sema_closure_argument_element_range.anm", "expects list[int[1..9]], got unknown"},
 		{"../tests/bugs/sema_variant_fields_out_of_order.anm", "the fields of a variant are given in order"},
 		{"../tests/bugs/spark_keyword_literal_range.anm", "list_elem_bounds"},

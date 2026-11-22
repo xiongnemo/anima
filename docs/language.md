@@ -82,7 +82,7 @@ What is called has to exist when the program runs.
 
 - A lambda, a built-in function (`abs`, `min`, `max`, `str`, `len`, `assert`) and a pipeline stage are given exactly the arguments they take, by position. An argument that is not given would be `None` when the program runs.
 - A stage's function has one parameter (`fold`: two).
-- `fp.take(xs, 2)` is `xs |> take(2)`, and `x |> g(a)` is `g(x, a)` for a lambda or a built-in function too.
+- `fp.take(xs, 2)` is `xs |> take(2)`, and `x |> g(a)` is `g(x, a)` for a lambda or a built-in function too. The kernels are given that call: `x |> abs()` has the obligation of `abs(x)`, and what `p |> keep` gives may be `p` itself.
 - An entity or a variant is made by a call, not by a stage.
 - `unwrap_or` gives what the variant holds or the default, so an int has the range of both, and a list, a map or a variant default has the very type of what is held. `fold` likewise: what it starts with or what its function gives.
 - The function of `and_then` gives the same kind of variant as it is given.
