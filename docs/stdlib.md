@@ -78,7 +78,15 @@ Every socket has one owner that closes it on every path; none is used after it i
 - `Some(x)` is `x` and `None` is `null`; any other variant is the string of its text, so `Circle(3)` is `"Circle(3)"`;
 - a value met again inside itself is `null`.
 
-`json.decode` reads these escapes back, a `\uXXXX` pair of surrogates as one character and half a pair as U+FFFD. A text with `\u0000` in a string or a key is an `Err` on both backends: a string of the native backend ends at a NUL.
+`json.decode` reads a JSON text as RFC 8259 defines one, with the same parser on both backends: a text is the same value on both, or an `Err` with the same message on both.
+
+- The text is one value with only spaces, tabs and line ends around it. `{"a":1} x`, `[1,]`, `{"a":1,}`, a comment, `NaN` and a text that is empty are each an `Err`.
+- A number is an `int`: `-0`, `10`, anything from `-9223372036854775808` to `9223372036854775807`, read exactly. `01`, `+1` and `.5` are not JSON. `1.0`, `1e2` and a number outside 64 bits are JSON but no `int`, and are an `Err` wherever a value is made of them; in a member that the entity of `json.decode[E]` does not declare they are skipped with it.
+- A string holds the escapes `\" \\ \/ \b \f \n \r \t \uXXXX` and no other, and no control character unescaped. A `\uXXXX` pair of surrogates is one character and half a pair is U+FFFD. A byte that is not UTF-8 is U+FFFD.
+- A text with `\u0000` in a string or a key is an `Err`: a string of the native backend ends at a NUL.
+- Of two members of an object with one key, the last is kept.
+- Arrays and objects are nested at most 1000 deep.
+- The `Err` says where: `invalid JSON at offset 7: unexpected character`, with the offset in bytes. What is wrong is one of `unexpected character`, `unexpected end of text`, `invalid escape`, `control character in string`, `NUL in string`, `number is not an int`, `nested too deep`.
 
 `json.decode[EntityType]` gives a value typed as the entity, so it checks all of it at the boundary, the same way and with the same `Err` text on both backends:
 
@@ -91,12 +99,13 @@ Every socket has one owner that closes it on every path; none is used after it i
 | `Option[T]` | `null` or a field that is absent is `None`, anything else is a `T` and gives `Some` of it |
 | an entity | an object with every field that is not an `Option`, each as declared, and the `invariant` of the entity holds |
 
+- A text that is not an object is `schema error: Order must be object`.
 - The `Err` names the part that is wrong: `schema violation: Order.lines[1].qty=0 below minimum 1`, `schema error: field Order.tags["a"] must be str`, `schema error: missing field Order.customer.name`, `entity invariant violated for Pair on JSON input`.
 - A member of the object that the entity does not declare is skipped.
 - Only an entity is named, and only one made of the types above: `json.decode[int]`, or an entity with a `Result`, another variant, a handle or a `map[int, T]` field, is refused by the checker, as there is no rule to check it by.
 - What `json.encode` writes of such an entity is read back by `json.decode`, except that `Some(None)` is written `null` and read as `None`.
 
-Without a type, what `json.decode` gives is of unknown type: [language.md](language.md#values-of-unknown-type).
+Without a type, `json.decode` gives the value of the text, whatever it is: `null` is `None`, an object is a map, an array is a list. It is of unknown type: [language.md](language.md#values-of-unknown-type).
 
 ## `std.bytes` and `std.crypto`
 

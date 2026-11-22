@@ -1591,9 +1591,59 @@ static AnimaVal time_now_ms(void) {
     return v_int((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
-// ─── std.json encode + minimal recursive JSON parser for schema decode ───
-static void json_skip_ws(const char **p) {
-    while (**p && isspace((unsigned char)**p)) (*p)++;
+// ─── std.json ───
+
+// The length of the well-formed UTF-8 sequence at s, or 0: what Go's
+// unicode/utf8 takes for one.
+static int utf8_seq_len(const unsigned char *s) {
+    unsigned char c = s[0];
+    int n = 0;
+    if (c < 0x80) return 1;
+    if (c >= 0xc2 && c <= 0xdf) n = 2;
+    else if (c >= 0xe0 && c <= 0xef) n = 3;
+    else if (c >= 0xf0 && c <= 0xf4) n = 4;
+    if (n == 0) return 0;
+    for (int i = 1; i < n; i++) if ((s[i] & 0xc0) != 0x80) return 0;
+    if (n == 3 && ((c == 0xe0 && s[1] < 0xa0) || (c == 0xed && s[1] > 0x9f))) return 0;
+    if (n == 4 && ((c == 0xf0 && s[1] < 0x90) || (c == 0xf4 && s[1] > 0x8f))) return 0;
+    return n;
+}
+
+// JsonParser reads a JSON text as RFC 8259 defines one, and nothing else.
+// It is the parser of the VM (jsonParser in json_parse.go), statement for
+// statement, so that a text is read as the same value, or refused with the
+// same words, on both backends. The end of the text is its NUL.
+//
+// A number that is not an int (one written with a fraction or an exponent,
+// or outside 64 bits) has no value: it is an error where ints is set, and
+// VAL_VOID, which is nothing a JSON text gives otherwise, where it is not.
+// Of two members with one key the last is kept.
+#define JSON_MAX_DEPTH 1000
+typedef struct { const char *s; size_t i; bool ints; int depth; char *err; } JsonParser;
+
+static void json_fail(JsonParser *p, const char *what) {
+    if (p->err) return;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "invalid JSON at offset %zu: %s", p->i, what);
+    p->err = strdup(msg);
+}
+
+// json_unexpected fails at the byte the parser is on, or at the end.
+static void json_unexpected(JsonParser *p) {
+    json_fail(p, p->s[p->i] ? "unexpected character" : "unexpected end of text");
+}
+
+static void json_ws(JsonParser *p) {
+    while (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r') p->i++;
+}
+
+static bool json_digit(JsonParser *p) { return p->s[p->i] >= '0' && p->s[p->i] <= '9'; }
+
+static bool json_word(JsonParser *p, const char *w) {
+    size_t n = strlen(w);
+    if (strncmp(p->s + p->i, w, n) != 0) return false;
+    p->i += n;
+    return true;
 }
 
 // json_hex4 reads the four hex digits of a \u escape, or gives -1.
@@ -1608,128 +1658,212 @@ static int json_hex4(const char *s) {
     return r;
 }
 
-static char *json_parse_str(const char **p) {
-    if (**p != '"') return NULL;
-    (*p)++;
-    size_t cap = 64, len = 0;
-    char *out = malloc(cap);
-    while (**p && **p != '"') {
-        char ch = **p;
-        if (ch == '\\' && (*p)[1] == 'u' && json_hex4(*p + 2) >= 0) {
-            // \uXXXX is a code point, written here as UTF-8; two of them
-            // can be a surrogate pair, and half a pair is U+FFFD, as in Go.
-            long cp = json_hex4(*p + 2);
-            // A string here ends at a NUL, so it cannot hold one: the text
-            // is refused, on the VM too.
-            if (cp == 0) { free(out); return NULL; }
-            *p += 6;
-            if (cp >= 0xd800 && cp <= 0xdbff) {
-                int lo = (*p)[0] == '\\' && (*p)[1] == 'u' ? json_hex4(*p + 2) : -1;
-                if (lo >= 0xdc00 && lo <= 0xdfff) {
-                    cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                    *p += 6;
-                } else cp = 0xfffd;
-            } else if (cp >= 0xdc00 && cp <= 0xdfff) cp = 0xfffd;
-            if (len + 5 >= cap) { cap *= 2; out = realloc(out, cap); }
-            if (cp < 0x80) out[len++] = (char)cp;
-            else if (cp < 0x800) {
-                out[len++] = (char)(0xc0 | (cp >> 6));
-                out[len++] = (char)(0x80 | (cp & 0x3f));
-            } else if (cp < 0x10000) {
-                out[len++] = (char)(0xe0 | (cp >> 12));
-                out[len++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-                out[len++] = (char)(0x80 | (cp & 0x3f));
-            } else {
-                out[len++] = (char)(0xf0 | (cp >> 18));
-                out[len++] = (char)(0x80 | ((cp >> 12) & 0x3f));
-                out[len++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-                out[len++] = (char)(0x80 | (cp & 0x3f));
+// json_str reads a string, the parser being on its opening quote. NULL is
+// given with an error; what is given otherwise is freed by the caller.
+static char *json_str(JsonParser *p) {
+    p->i++;
+    AnimaBuf out = {0};
+    buf_put(&out, "");
+    for (;;) {
+        unsigned char c = (unsigned char)p->s[p->i];
+        if (c == 0) { json_unexpected(p); break; }
+        if (c == '"') { p->i++; return out.p; }
+        if (c < 0x20) { json_fail(p, "control character in string"); break; }
+        if (c == '\\') {
+            char e = p->s[p->i + 1];
+            if (e == 0) { p->i++; json_unexpected(p); break; }
+            if (e == 'u') {
+                long cp = json_hex4(p->s + p->i + 2);
+                if (cp < 0) { json_fail(p, "invalid escape"); break; }
+                // A string here ends at a NUL, so it cannot hold one: the
+                // text is refused on both backends.
+                if (cp == 0) { json_fail(p, "NUL in string"); break; }
+                p->i += 6;
+                // Two escapes can be a surrogate pair; half a pair is
+                // U+FFFD, and what follows it is read on its own.
+                if (cp >= 0xd800 && cp <= 0xdbff) {
+                    int lo = p->s[p->i] == '\\' && p->s[p->i + 1] == 'u' ? json_hex4(p->s + p->i + 2) : -1;
+                    if (lo >= 0xdc00 && lo <= 0xdfff) {
+                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        p->i += 6;
+                    } else cp = 0xfffd;
+                } else if (cp >= 0xdc00 && cp <= 0xdfff) cp = 0xfffd;
+                char u[5] = {0};
+                if (cp < 0x80) u[0] = (char)cp;
+                else if (cp < 0x800) {
+                    u[0] = (char)(0xc0 | (cp >> 6));
+                    u[1] = (char)(0x80 | (cp & 0x3f));
+                } else if (cp < 0x10000) {
+                    u[0] = (char)(0xe0 | (cp >> 12));
+                    u[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+                    u[2] = (char)(0x80 | (cp & 0x3f));
+                } else {
+                    u[0] = (char)(0xf0 | (cp >> 18));
+                    u[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+                    u[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+                    u[3] = (char)(0x80 | (cp & 0x3f));
+                }
+                buf_put(&out, u);
+                continue;
             }
-            continue;
-        }
-        if (ch == '\\' && (*p)[1]) {
-            (*p)++;
-            switch (**p) {
-                case 'n': ch = '\n'; break;
-                case 't': ch = '\t'; break;
-                case 'r': ch = '\r'; break;
+            char ch;
+            switch (e) {
+                case '"': case '\\': case '/': ch = e; break;
                 case 'b': ch = '\b'; break;
                 case 'f': ch = '\f'; break;
-                default: ch = **p; break;
+                case 'n': ch = '\n'; break;
+                case 'r': ch = '\r'; break;
+                case 't': ch = '\t'; break;
+                default: ch = 0; break;
             }
+            if (ch == 0) { json_fail(p, "invalid escape"); break; }
+            buf_putn(&out, &ch, 1);
+            p->i += 2;
+            continue;
         }
-        if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
-        out[len++] = ch;
-        (*p)++;
+        // A byte that is not UTF-8 is U+FFFD, as json.encode writes it.
+        int n = utf8_seq_len((const unsigned char *)p->s + p->i);
+        if (n == 0) { buf_put(&out, "\xef\xbf\xbd"); p->i++; continue; }
+        buf_putn(&out, p->s + p->i, (size_t)n);
+        p->i += (size_t)n;
     }
-    if (**p == '"') (*p)++;
-    out[len] = '\0';
-    return out;
+    free(out.p);
+    return NULL;
 }
 
-static AnimaVal json_parse_val(const char **p, bool *ok);
+static AnimaVal json_number(JsonParser *p) {
+    size_t start = p->i;
+    if (p->s[p->i] == '-') p->i++;
+    if (!json_digit(p)) { json_unexpected(p); return v_none(); }
+    // A number does not start with a 0 it could do without: 01 ends at the
+    // 0, and the 1 is where no character is expected.
+    if (p->s[p->i] == '0') p->i++;
+    else while (json_digit(p)) p->i++;
+    bool is_int = true;
+    if (p->s[p->i] == '.') {
+        is_int = false;
+        p->i++;
+        if (!json_digit(p)) { json_unexpected(p); return v_none(); }
+        while (json_digit(p)) p->i++;
+    }
+    if (p->s[p->i] == 'e' || p->s[p->i] == 'E') {
+        is_int = false;
+        p->i++;
+        if (p->s[p->i] == '+' || p->s[p->i] == '-') p->i++;
+        if (!json_digit(p)) { json_unexpected(p); return v_none(); }
+        while (json_digit(p)) p->i++;
+    }
+    if (is_int) {
+        // Only the digits of this number: strtoll would read on into the
+        // text after a leading 0, which is not part of it.
+        size_t k = start;
+        bool neg = p->s[k] == '-';
+        if (neg) k++;
+        // Summed as a negative, which has room for the smallest int64.
+        int64_t n = 0;
+        bool fits = true;
+        for (; k < p->i; k++) {
+            int d = p->s[k] - '0';
+            if (n < (INT64_MIN + d) / 10) { fits = false; break; }
+            n = n * 10 - d;
+        }
+        if (fits && (neg || n != INT64_MIN)) return v_int(neg ? n : -n);
+    }
+    if (p->ints) { p->i = start; json_fail(p, "number is not an int"); return v_none(); }
+    return v_void();
+}
 
-static AnimaVal json_parse_val(const char **p, bool *ok) {
-    json_skip_ws(p);
-    char ch = **p;
-    if (ch == '"') {
-        char *s = json_parse_str(p);
-        if (!s) { *ok = false; return v_none(); }
+static AnimaVal json_value(JsonParser *p);
+
+static bool json_open(JsonParser *p) {
+    if (p->depth >= JSON_MAX_DEPTH) { json_fail(p, "nested too deep"); return false; }
+    p->depth++;
+    p->i++;
+    json_ws(p);
+    return true;
+}
+
+static AnimaVal json_array(JsonParser *p) {
+    if (!json_open(p)) return v_none();
+    AnimaVal out = v_list_new(0, NULL);
+    if (p->s[p->i] == ']') { p->i++; p->depth--; return out; }
+    for (;;) {
+        json_ws(p);
+        AnimaVal v = json_value(p);
+        if (p->err) return v_none();
+        v_list_push(out, v);
+        json_ws(p);
+        if (p->s[p->i] == ',') { p->i++; continue; }
+        if (p->s[p->i] == ']') { p->i++; p->depth--; return out; }
+        json_unexpected(p);
+        return v_none();
+    }
+}
+
+static AnimaVal json_object(JsonParser *p) {
+    if (!json_open(p)) return v_none();
+    AnimaVal out = v_map_new();
+    if (p->s[p->i] == '}') { p->i++; p->depth--; return out; }
+    for (;;) {
+        json_ws(p);
+        if (p->s[p->i] != '"') { json_unexpected(p); return v_none(); }
+        char *k = json_str(p);
+        if (p->err) return v_none();
+        json_ws(p);
+        if (p->s[p->i] != ':') { free(k); json_unexpected(p); return v_none(); }
+        p->i++;
+        json_ws(p);
+        AnimaVal v = json_value(p);
+        if (p->err) { free(k); return v_none(); }
+        v_map_set(out, k, v);
+        free(k);
+        json_ws(p);
+        if (p->s[p->i] == ',') { p->i++; continue; }
+        if (p->s[p->i] == '}') { p->i++; p->depth--; return out; }
+        json_unexpected(p);
+        return v_none();
+    }
+}
+
+static AnimaVal json_value(JsonParser *p) {
+    char c = p->s[p->i];
+    if (c == '"') {
+        char *s = json_str(p);
+        if (!s) return v_none();
         AnimaVal v = v_str(s);
         free(s);
         return v;
     }
-    if (strncmp(*p, "true", 4) == 0) { *p += 4; return v_bool(true); }
-    if (strncmp(*p, "false", 5) == 0) { *p += 5; return v_bool(false); }
-    if (strncmp(*p, "null", 4) == 0) { *p += 4; return v_none(); }
-    if (ch == '-' || isdigit((unsigned char)ch)) {
-        char *end = NULL;
-        int64_t iv = strtoll(*p, &end, 10);
-        if (end == *p) { *ok = false; return v_none(); }
-        *p = end;
-        return v_int(iv);
-    }
-    if (ch == '[') {
-        (*p)++;
-        AnimaVal list = v_list_new(0, NULL);
-        json_skip_ws(p);
-        if (**p == ']') { (*p)++; return list; }
-        for (;;) {
-            AnimaVal el = json_parse_val(p, ok);
-            if (!*ok) return list;
-            v_list_push(list, el);
-            json_skip_ws(p);
-            if (**p == ',') { (*p)++; continue; }
-            if (**p == ']') { (*p)++; break; }
-            *ok = false; break;
-        }
-        return list;
-    }
-    if (ch == '{') {
-        (*p)++;
-        AnimaVal m = v_map_new();
-        json_skip_ws(p);
-        if (**p == '}') { (*p)++; return m; }
-        for (;;) {
-            json_skip_ws(p);
-            char *k = json_parse_str(p);
-            if (!k) { *ok = false; return m; }
-            json_skip_ws(p);
-            if (**p != ':') { free(k); *ok = false; return m; }
-            (*p)++;
-            AnimaVal val = json_parse_val(p, ok);
-            v_map_set(m, k, val);
-            free(k);
-            if (!*ok) return m;
-            json_skip_ws(p);
-            if (**p == ',') { (*p)++; continue; }
-            if (**p == '}') { (*p)++; break; }
-            *ok = false; break;
-        }
-        return m;
-    }
-    *ok = false;
+    if (c == '{') return json_object(p);
+    if (c == '[') return json_array(p);
+    if (c == '-' || (c >= '0' && c <= '9')) return json_number(p);
+    if (json_word(p, "true")) return v_bool(true);
+    if (json_word(p, "false")) return v_bool(false);
+    if (json_word(p, "null")) return v_none();
+    json_unexpected(p);
     return v_none();
+}
+
+// json_parse gives the value of a JSON text, or sets *err to what is wrong
+// with it (freed by the caller).
+static AnimaVal json_parse(const char *s, bool ints, char **err) {
+    JsonParser p = { s ? s : "", 0, ints, 0, NULL };
+    json_ws(&p);
+    AnimaVal v = json_value(&p);
+    if (!p.err) {
+        json_ws(&p);
+        if (p.s[p.i]) json_fail(&p, "unexpected character");
+    }
+    *err = p.err;
+    return v;
+}
+
+// json.decode with no type: the value of the text, whatever it is.
+static AnimaVal json_decode_raw(const char *raw) {
+    char *err = NULL;
+    AnimaVal v = json_parse(raw, true, &err);
+    if (err) { AnimaVal r = v_err(err); free(err); return r; }
+    return v_ok(v);
 }
 
 // What json.decode[E] checks a value against: a type of the program, with
@@ -1854,14 +1988,20 @@ static AnimaVal json_as(const JType *t, AnimaVal raw, AnimaBuf *path, char **err
 }
 
 static AnimaVal json_decode_as(const JEntity *e, const char *raw) {
-    bool ok = true;
-    const char *p = raw;
-    AnimaVal m = json_parse_val(&p, &ok);
-    if (!ok || m.kind != VAL_MAP) return v_err("invalid json object");
+    char *err = NULL;
+    AnimaVal m = json_parse(raw, false, &err);
+    if (err) { AnimaVal r = v_err(err); free(err); return r; }
+    // Only an object is an entity: a null is not one with every field
+    // absent.
+    if (m.kind != VAL_MAP) {
+        char *msg = json_as_msg("schema error: %s must be object", e->name);
+        AnimaVal r = v_err(msg);
+        free(msg);
+        return r;
+    }
     JType top = { JT_ENTITY, false, 0, 0, NULL, e };
     AnimaBuf path = {0};
     buf_put(&path, e->name);
-    char *err = NULL;
     AnimaVal v = json_as(&top, m, &path, &err);
     free(path.p);
     if (err) { AnimaVal r = v_err(err); free(err); return r; }
@@ -1893,16 +2033,8 @@ static void json_put_str(AnimaBuf *b, const char *str) {
             s++;
             continue;
         }
-        // The length of a well-formed UTF-8 sequence, or 0.
-        int n = 0;
-        if (c >= 0xc2 && c <= 0xdf) n = 2;
-        else if (c >= 0xe0 && c <= 0xef) n = 3;
-        else if (c >= 0xf0 && c <= 0xf4) n = 4;
-        bool ok = n > 0;
-        for (int i = 1; ok && i < n; i++) ok = (s[i] & 0xc0) == 0x80;
-        if (ok && n == 3) ok = !(c == 0xe0 && s[1] < 0xa0) && !(c == 0xed && s[1] > 0x9f);
-        if (ok && n == 4) ok = !(c == 0xf0 && s[1] < 0x90) && !(c == 0xf4 && s[1] > 0x8f);
-        if (!ok) { buf_put(b, "\\ufffd"); s++; continue; }
+        int n = utf8_seq_len(s);
+        if (n == 0) { buf_put(b, "\\ufffd"); s++; continue; }
         if (n == 3 && c == 0xe2 && s[1] == 0x80 && (s[2] == 0xa8 || s[2] == 0xa9)) {
             buf_put(b, s[2] == 0xa8 ? "\\u2028" : "\\u2029");
         } else {

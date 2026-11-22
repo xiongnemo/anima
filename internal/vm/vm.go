@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -1208,38 +1207,6 @@ func findStepAfter(wfc *WorkflowCompiled, after string) *WorkflowStepMeta {
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
-}
-
-func decodeJSONToMap(raw string) (map[string]any, error) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return nil, err
-	}
-	if escapedNUL(raw) {
-		return nil, fmt.Errorf("a string holds a NUL")
-	}
-	return m, nil
-}
-
-// escapedNUL reports whether a string or a key of a JSON text holds a NUL
-// (written \u0000). A string of the native runtime ends at one, so the text
-// is refused on both backends rather than read as two different values. The
-// text is searched, not what it decodes to: of two members with one key Go
-// keeps the last, and the native parser has read both.
-func escapedNUL(raw string) bool {
-	inStr := false
-	for i := 0; i < len(raw); i++ {
-		switch {
-		case raw[i] == '"':
-			inStr = !inStr
-		case inStr && raw[i] == '\\':
-			if strings.HasPrefix(raw[i+1:], "u0000") {
-				return true
-			}
-			i++
-		}
-	}
-	return false
 }
 
 var _ = time.Millisecond
