@@ -1,0 +1,18 @@
+# recv_text makes room for max_bytes before it reads. The VM ran out of
+# memory on 1 << 46 and the native runtime gave "Bad address"; the kernel
+# refuses the call: max_bytes_bounds.
+import std.socket as sock
+
+def main() -> int:
+    match sock.listen_tcp("127.0.0.1", 0):
+        Ok(ln) ->
+            match sock.connect_tcp("127.0.0.1", ln.port()):
+                Ok(c) ->
+                    match c.recv_text(1 << 46):
+                        Ok(t) -> print(t)
+                        Err(e) -> print(e)
+                    c.close()
+                Err(e) -> print(e)
+            ln.close()
+        Err(e) -> print(e)
+    return 0

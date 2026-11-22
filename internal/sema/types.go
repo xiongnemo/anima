@@ -269,6 +269,13 @@ type HandleType struct {
 	Protocol *TypestateSpec
 }
 
+// ArgRange is an argument of a standard call and the range it is proved in.
+type ArgRange struct {
+	Expr  ast.Expr
+	Name  string
+	Range *IntType
+}
+
 type TypestateSpec struct {
 	InitState    string
 	AcceptStates []string                     // states legal when handle drops out of scope (e.g. "Closed")
@@ -367,6 +374,10 @@ type ProgramInfo struct {
 	// TimeoutArgs: the timeout_ms argument of a call that blocks on the
 	// network, which the kernel proves in 1..300_000.
 	TimeoutArgs map[*ast.CallExpr]ast.Expr
+	// ArgRanges: the arguments of a standard call that the runtime takes
+	// for a number of a few bits (a port, a count of bytes), which the
+	// kernel proves in their range.
+	ArgRanges   map[*ast.CallExpr][]ArgRange
 	Imports     map[string]string // alias -> canonical std module path
 	StdHandles  map[string]*TypestateSpec
 	Diagnostics []string

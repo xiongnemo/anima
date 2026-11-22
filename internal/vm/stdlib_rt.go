@@ -228,22 +228,10 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 
 	// ─── std.socket ───
 	case "std.socket.listen_tcp":
-		host := args[0].Str
-		port := args[1].Int
-		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
-		if err != nil {
-			return VErr(err.Error()), nil
-		}
-		return VOk(Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleListener, Listener: ln}}), nil
+		return sockListenTCP(args[0].Str, args[1].Int), nil
 
 	case "std.socket.connect_tcp":
-		host := args[0].Str
-		port := args[1].Int
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 5*time.Second)
-		if err != nil {
-			return VErr(err.Error()), nil
-		}
-		return VOk(Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleStream, Conn: conn}}), nil
+		return sockConnectTCP(args[0].Str, args[1].Int), nil
 
 	// ─── std.requests ───
 	case "std.requests.get":
@@ -503,15 +491,7 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 			addr := h.Listener.Addr().(*net.TCPAddr)
 			return VInt(int64(addr.Port)), nil
 		case "accept":
-			ms := extractTimeoutMsFromMethod(cm, args, 0, 5000)
-			if tl, ok := h.Listener.(*net.TCPListener); ok {
-				_ = tl.SetDeadline(time.Now().Add(time.Duration(ms) * time.Millisecond))
-			}
-			conn, err := h.Listener.Accept()
-			if err != nil {
-				return VErr(err.Error()), nil
-			}
-			return VOk(Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleStream, Conn: conn}}), nil
+			return sockAccept(h, extractTimeoutMsFromMethod(cm, args, 0, 5000)), nil
 		case "close":
 			h.Close()
 			return VVoid(), nil
@@ -519,29 +499,13 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 	case HandleStream:
 		switch cm.CalleeName {
 		case "send_text":
-			if h.Closed {
-				return VErr("socket closed"), nil
-			}
-			n, err := h.Conn.Write([]byte(args[0].Str))
-			if err != nil {
-				return VErr(err.Error()), nil
-			}
-			return VOk(VInt(int64(n))), nil
+			return sockSend(h, args[0].Str), nil
 		case "recv_text":
-			if h.Closed {
-				return VErr("socket closed"), nil
+			maxB := int64(4096)
+			if len(args) >= 1 {
+				maxB = args[0].Int
 			}
-			maxB := 4096
-			if len(args) >= 1 && args[0].Int > 0 {
-				maxB = int(args[0].Int)
-			}
-			_ = h.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			buf := make([]byte, maxB)
-			n, err := h.Conn.Read(buf)
-			if err != nil && n == 0 {
-				return VErr(err.Error()), nil
-			}
-			return textRead(buf[:n]), nil
+			return sockRecv(h, maxB), nil
 		case "close":
 			h.Close()
 			return VVoid(), nil

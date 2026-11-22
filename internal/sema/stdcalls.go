@@ -30,6 +30,9 @@ type stdParam struct {
 	name string
 	kind stdArg
 	opt  bool // may be left out; only at the end
+	// An int the kernel proves in lo..hi (ProgramInfo.ArgRanges).
+	ranged bool
+	lo, hi int64
 }
 
 // stdSig is what a standard function takes. One with timeout also takes
@@ -47,11 +50,21 @@ func intP(name string) stdParam    { return stdParam{name: name, kind: argInt} }
 func strP(name string) stdParam    { return stdParam{name: name, kind: argStr} }
 func anyP(name string) stdParam    { return stdParam{name: name, kind: argAny} }
 func (p stdParam) maybe() stdParam { p.opt = true; return p }
+func (p stdParam) within(lo, hi int64) stdParam {
+	p.ranged, p.lo, p.hi = true, lo, hi
+	return p
+}
+
+// A port is a number of 16 bits; 0 asks the system for a free one.
+func portP() stdParam { return intP("port").within(0, 65535) }
+
+// MaxRecvText is the most bytes one recv_text asks for.
+const MaxRecvText = 1 << 20
 
 // stdSigs is keyed by `std.module.function` and by `handle.method`.
 var stdSigs = map[string]stdSig{
-	"std.socket.listen_tcp":  sig(strP("host"), intP("port")),
-	"std.socket.connect_tcp": sig(strP("host"), intP("port")),
+	"std.socket.listen_tcp":  sig(strP("host"), portP()),
+	"std.socket.connect_tcp": sig(strP("host"), portP()),
 
 	"std.requests.get":     sig(strP("url")).withTimeout(),
 	"std.requests.post":    sig(strP("url"), strP("body")).withTimeout(),
@@ -89,7 +102,7 @@ var stdSigs = map[string]stdSig{
 	"sock.TcpListener.close":  sig(),
 
 	"sock.TcpStream.send_text": sig(strP("text")),
-	"sock.TcpStream.recv_text": sig(intP("max_bytes").maybe()),
+	"sock.TcpStream.recv_text": sig(intP("max_bytes").within(1, MaxRecvText).maybe()),
 	"sock.TcpStream.close":     sig(),
 
 	"fs.File.read_text":  sig(),
@@ -190,6 +203,7 @@ func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
 		named = named || (s.timeout && a.Name == "timeout_ms")
 	}
 	given := 0
+	var ranges []ArgRange
 	for i, a := range args {
 		at := c.info.ExprTypes[a.Value]
 		if a.Mut || a.Own {
@@ -216,6 +230,12 @@ func (c *checker) checkStdCall(e *ast.CallExpr, fe *ast.FieldExpr) error {
 		if err := c.checkStdArg(a, at, p, what, i+1, elem); err != nil {
 			return err
 		}
+		if p.ranged {
+			ranges = append(ranges, ArgRange{Expr: a.Value, Name: p.name, Range: NewIntRange(p.lo, p.hi, "")})
+		}
+	}
+	if len(ranges) > 0 {
+		c.info.ArgRanges[e] = ranges
 	}
 	for _, p := range s.params[given:] {
 		if !p.opt {
