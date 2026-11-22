@@ -39,7 +39,7 @@ What is not found is `not told`, never a guess:
 
 - a server that names no other address, or one that differs from its own in the address only or the port only: mapping and filtering are both `not told` (mapping `none` is still found);
 - a `CHANGE-REQUEST` answered with an error, or from an end that was not asked for: filtering is `not told`;
-- no answer from the other address, or one without a mapped address: mapping is `not told`.
+- no answer to the request sent to the other address, or one without a mapped address: mapping is `not told`. Where that answer came from is not looked at: its mapped address is what the server saw of a request sent to that address, whichever of its ends answers.
 
 The RFC 3489 class is read off the two:
 
@@ -61,6 +61,12 @@ No answer to the first request is `UDP blocked`.
 `stun server IP IP2 [PORT PORT2]` binds four sockets, the two ports at each address, and serves until it is killed. It answers a Binding request from the end the `CHANGE-REQUEST` asks for, with `XOR-MAPPED-ADDRESS`, `MAPPED-ADDRESS`, `RESPONSE-ORIGIN` and `OTHER-ADDRESS`. A request without the magic cookie is answered as RFC 3489 has it: `MAPPED-ADDRESS`, `SOURCE-ADDRESS`, `CHANGED-ADDRESS`. A request with a comprehension-required attribute it does not know is answered with error 420 and `UNKNOWN-ATTRIBUTES`. A datagram that is no Binding request, or whose attributes do not end where it does, is not answered. Neither backend reads more than 1500 bytes of a datagram, so a longer one is answered only if its first 1500 bytes are a whole request.
 
 It has no `FINGERPRINT`, no `MESSAGE-INTEGRITY`, no `RESPONSE-PORT` and no `PADDING`, and it listens on UDP only.
+
+It is a server to try the client against, not one to leave on the internet:
+
+- **It answers whoever asks, as often as asked.** An answer is some three times its request and goes to the address the request says it came from, from another address of the server when the request asks so. RFC 5780 recommends a limit on how often; this server has none.
+- **Run natively it grows until it is killed.** The native backend gives no value back before the program ends ([backends.md](backends.md)): measured, about 60 kB a second with nothing to hear (it looks at each socket every 5 ms) and about 20 kB a request. On the VM it does not grow. The scenes and the client end, and are not touched by this.
+- **It hears its four sockets in turn**, 5 ms each, so a request waits 15 ms at most and one socket answers some 70 requests a second.
 
 In the scenes the server stands on `127.0.0.1` and `127.0.0.2` and plays the NAT as well: a `Scene` says which mapped address it reports for each of its ends, which of its ends may answer given the ends the client has sent to, and which kind of server it is (RFC 5780, RFC 3489, one that names no other address, one that refuses `CHANGE-REQUEST`).
 
