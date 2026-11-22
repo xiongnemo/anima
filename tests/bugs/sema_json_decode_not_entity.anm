@@ -1,0 +1,12 @@
+# Only an entity is decoded into: what this gave was the JSON object as a
+# map, typed as an int.
+import std.json as json
+
+def main() -> int:
+    match json.decode[int]("{\"a\":0}"):
+        Ok(n) ->
+            if n != 0:
+                print(10 / n)
+        Err(m) ->
+            print(m)
+    return 0

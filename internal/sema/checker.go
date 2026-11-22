@@ -2118,6 +2118,15 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				if err != nil {
 					return nil, err
 				}
+				// What is decoded is given the type named, so every part
+				// of that type has to be one the decoder checks.
+				et, ok := targetTy.(*EntityType)
+				if !ok {
+					return nil, fmt.Errorf("%s: json.decode[%s]: only an entity is decoded into", e.Span, targetTy)
+				}
+				if why := jsonUndecodable(et, et.Name, map[string]bool{}); why != "" {
+					return nil, fmt.Errorf("%s: json.decode[%s]: %s", e.Span, et.Name, why)
+				}
 			}
 			return c.instantiateADT("Result", []Type{targetTy, StrType{}}), nil
 		}
@@ -2912,6 +2921,41 @@ func hasGap(t Type) bool {
 // slotGap reports whether t has such a part in something that is written
 // after it is made: an element of a list, an entry of a map, what a mutex
 // holds. A list of nothing has no element to write.
+// jsonUndecodable says why a JSON text cannot be decoded into t, or "". The
+// decoder checks an int against its range, a bool, a str, the elements of a
+// list, the values of a map with str keys, what an Option holds and the
+// fields of an entity; it has no rule for anything else, and what it does
+// not check would be given the declared type as it comes.
+func jsonUndecodable(t Type, path string, open map[string]bool) string {
+	switch x := t.(type) {
+	case *IntType, BoolType, StrType:
+		return ""
+	case *ListType:
+		return jsonUndecodable(x.Elem, path+"[]", open)
+	case *MapType:
+		if _, ok := x.Key.(StrType); !ok {
+			return fmt.Sprintf("%s is a %s, and the keys of a JSON object are str", path, t)
+		}
+		return jsonUndecodable(x.Val, path+"[]", open)
+	case *ADTType:
+		if x.Name == "Option" && len(x.TypeArgs) == 1 {
+			return jsonUndecodable(x.TypeArgs[0], path, open)
+		}
+	case *EntityType:
+		if open[x.Name] {
+			return ""
+		}
+		open[x.Name] = true
+		for _, f := range x.Fields {
+			if why := jsonUndecodable(f.Type, path+"."+f.Name, open); why != "" {
+				return why
+			}
+		}
+		return ""
+	}
+	return fmt.Sprintf("%s is a %s, which is not read from JSON (an int, a bool, a str, a list, a map with str keys, an Option and an entity of these are)", path, t)
+}
+
 func slotGap(t Type) bool {
 	switch x := t.(type) {
 	case *ListType:

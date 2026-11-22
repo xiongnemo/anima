@@ -1,0 +1,15 @@
+# json.decode has no rule for a Result, so it would be typed as declared
+# without a check.
+import std.json as json
+
+entity Reply:
+    code: int[1..9]
+    outcome: Result[int, str]
+
+def main() -> int:
+    match json.decode[Reply]("{\"code\":1,\"outcome\":5}"):
+        Ok(r) ->
+            print(r.code)
+        Err(m) ->
+            print(m)
+    return 0

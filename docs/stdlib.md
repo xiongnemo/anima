@@ -75,12 +75,28 @@ Every socket has one owner that closes it on every path; none is used after it i
 
 - an entity and a map are objects with their keys sorted, a list is an array;
 - a string is escaped as Go's `encoding/json` escapes it: `<`, `>`, `&` and the control characters with no short escape are `\u00XX`, a byte that is not UTF-8 is `\ufffd`;
-- a variant is the string of its text: `Some(4)` is `"Some(4)"`, `None` is `null`;
+- `Some(x)` is `x` and `None` is `null`; any other variant is the string of its text, so `Circle(3)` is `"Circle(3)"`;
 - a value met again inside itself is `null`.
 
 `json.decode` reads these escapes back, a `\uXXXX` pair of surrogates as one character and half a pair as U+FFFD. A text with `\u0000` in a string or a key is an `Err` on both backends: a string of the native backend ends at a NUL.
 
-`json.decode[EntityType]` checks what it reads at the boundary: every `int[lo..hi]` range of the entity and its `invariant`. Without a type, what it gives is of unknown type: [language.md](language.md#values-of-unknown-type).
+`json.decode[EntityType]` gives a value typed as the entity, so it checks all of it at the boundary, the same way and with the same `Err` text on both backends:
+
+| Declared | JSON |
+|---|---|
+| `int`, `int[lo..hi]` | an integer, within the range |
+| `bool`, `str` | `true` or `false`, a string |
+| `list[T]` | an array, every element a `T` |
+| `map[str, T]` | an object, every value a `T` |
+| `Option[T]` | `null` or a field that is absent is `None`, anything else is a `T` and gives `Some` of it |
+| an entity | an object with every field that is not an `Option`, each as declared, and the `invariant` of the entity holds |
+
+- The `Err` names the part that is wrong: `schema violation: Order.lines[1].qty=0 below minimum 1`, `schema error: field Order.tags["a"] must be str`, `schema error: missing field Order.customer.name`, `entity invariant violated for Pair on JSON input`.
+- A member of the object that the entity does not declare is skipped.
+- Only an entity is named, and only one made of the types above: `json.decode[int]`, or an entity with a `Result`, another variant, a handle or a `map[int, T]` field, is refused by the checker, as there is no rule to check it by.
+- What `json.encode` writes of such an entity is read back by `json.decode`, except that `Some(None)` is written `null` and read as `None`.
+
+Without a type, what `json.decode` gives is of unknown type: [language.md](language.md#values-of-unknown-type).
 
 ## `std.bytes` and `std.crypto`
 

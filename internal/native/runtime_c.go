@@ -4,6 +4,7 @@ package native
 // emitted by `anima build` into generated native executables.
 const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -1731,6 +1732,142 @@ static AnimaVal json_parse_val(const char **p, bool *ok) {
     return v_none();
 }
 
+// What json.decode[E] checks a value against: a type of the program, with
+// the range of an int, the element type of a list, map or Option, and the
+// fields and invariant of an entity. The compiler writes a table for each
+// entity. What is decoded is typed as declared, so nothing is let through
+// unchecked; the rule and the words are those of jsonAs in the VM.
+enum { JT_INT, JT_BOOL, JT_STR, JT_LIST, JT_MAP, JT_OPTION, JT_ENTITY };
+typedef struct JType JType;
+typedef struct JEntity JEntity;
+struct JType { int kind; bool ranged; int64_t lo; int64_t hi; const JType *elem; const JEntity *ent; };
+typedef struct { const char *name; const JType *type; } JField;
+struct JEntity { const char *name; const JField *fields; size_t n; bool (*inv)(AnimaVal); };
+
+static char *json_as_msg(const char *fmt, ...) {
+    va_list ap, aq;
+    va_start(ap, fmt);
+    va_copy(aq, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *out = malloc((size_t)n + 1);
+    vsnprintf(out, (size_t)n + 1, fmt, aq);
+    va_end(aq);
+    return out;
+}
+
+// json_as gives raw as a value of type t, or sets *err to what is wrong.
+// path names the part being checked, as E.xs[0], E.m["k"], E.inner.d.
+static AnimaVal json_as(const JType *t, AnimaVal raw, AnimaBuf *path, char **err) {
+    size_t at = path->len;
+    switch (t->kind) {
+        case JT_INT:
+            if (raw.kind != VAL_INT) { *err = json_as_msg("schema error: field %s must be integer", path->p); return v_none(); }
+            if (t->ranged && raw.u.i < t->lo) {
+                *err = json_as_msg("schema violation: %s=%lld below minimum %lld", path->p, (long long)raw.u.i, (long long)t->lo);
+                return v_none();
+            }
+            if (t->ranged && raw.u.i > t->hi) {
+                *err = json_as_msg("schema violation: %s=%lld exceeds maximum %lld", path->p, (long long)raw.u.i, (long long)t->hi);
+                return v_none();
+            }
+            return raw;
+        case JT_BOOL:
+            if (raw.kind != VAL_BOOL) { *err = json_as_msg("schema error: field %s must be bool", path->p); return v_none(); }
+            return raw;
+        case JT_STR:
+            if (raw.kind != VAL_STR) { *err = json_as_msg("schema error: field %s must be str", path->p); return v_none(); }
+            return raw;
+        case JT_LIST: {
+            if (raw.kind != VAL_LIST || !raw.u.list) { *err = json_as_msg("schema error: field %s must be list", path->p); return v_none(); }
+            AnimaVal out = v_list_new(0, NULL);
+            for (size_t i = 0; i < raw.u.list->len; i++) {
+                char idx[32];
+                snprintf(idx, sizeof(idx), "[%zu]", i);
+                buf_put(path, idx);
+                AnimaVal el = json_as(t->elem, raw.u.list->items[i], path, err);
+                path->len = at; path->p[at] = 0;
+                if (*err) return v_none();
+                v_list_push(out, el);
+            }
+            return out;
+        }
+        case JT_MAP: {
+            if (raw.kind != VAL_MAP || !raw.u.map) { *err = json_as_msg("schema error: field %s must be map", path->p); return v_none(); }
+            AnimaMap *m = raw.u.map;
+            // Checked in the order of the keys, so that the first thing
+            // wrong is the one the VM names; kept in the order written.
+            AnimaMapEntry **sorted = malloc((m->len + 1) * sizeof(*sorted));
+            AnimaVal *vals = malloc((m->len + 1) * sizeof(*vals));
+            for (size_t i = 0; i < m->len; i++) sorted[i] = &m->entries[i];
+            qsort(sorted, m->len, sizeof(*sorted), v_entry_cmp);
+            for (size_t i = 0; i < m->len && !*err; i++) {
+                buf_put(path, "[");
+                v_fmt_key(path, sorted[i]->key);
+                buf_put(path, "]");
+                vals[sorted[i] - m->entries] = json_as(t->elem, sorted[i]->val, path, err);
+                path->len = at; path->p[at] = 0;
+            }
+            AnimaVal out = v_map_new();
+            for (size_t i = 0; i < m->len && !*err; i++) v_map_set(out, m->entries[i].key, vals[i]);
+            free(sorted);
+            free(vals);
+            return *err ? v_none() : out;
+        }
+        case JT_OPTION: {
+            if (raw.kind == VAL_NONE) return v_none();
+            AnimaVal in = json_as(t->elem, raw, path, err);
+            if (*err) return v_none();
+            return v_some(in);
+        }
+        case JT_ENTITY: {
+            const JEntity *e = t->ent;
+            if (raw.kind != VAL_MAP || !raw.u.map) { *err = json_as_msg("schema error: field %s must be %s", path->p, e->name); return v_none(); }
+            AnimaVal ent = v_entity_new(e->name);
+            for (size_t i = 0; i < e->n; i++) {
+                const JField *f = &e->fields[i];
+                AnimaVal fv = v_none();
+                bool has = false;
+                for (size_t k = 0; k < raw.u.map->len; k++) {
+                    if (strcmp(raw.u.map->entries[k].key, f->name) == 0) { fv = raw.u.map->entries[k].val; has = true; break; }
+                }
+                if (!has && f->type->kind != JT_OPTION) {
+                    *err = json_as_msg("schema error: missing field %s.%s", path->p, f->name);
+                    return v_none();
+                }
+                buf_put(path, ".");
+                buf_put(path, f->name);
+                AnimaVal v = json_as(f->type, fv, path, err);
+                path->len = at; path->p[at] = 0;
+                if (*err) return v_none();
+                v_entity_set(ent, f->name, v);
+            }
+            if (e->inv && !e->inv(ent)) {
+                *err = json_as_msg("entity invariant violated for %s on JSON input", e->name);
+                return v_none();
+            }
+            return ent;
+        }
+    }
+    *err = json_as_msg("schema error: field %s is not read from JSON", path->p);
+    return v_none();
+}
+
+static AnimaVal json_decode_as(const JEntity *e, const char *raw) {
+    bool ok = true;
+    const char *p = raw;
+    AnimaVal m = json_parse_val(&p, &ok);
+    if (!ok || m.kind != VAL_MAP) return v_err("invalid json object");
+    JType top = { JT_ENTITY, false, 0, 0, NULL, e };
+    AnimaBuf path = {0};
+    buf_put(&path, e->name);
+    char *err = NULL;
+    AnimaVal v = json_as(&top, m, &path, &err);
+    free(path.p);
+    if (err) { AnimaVal r = v_err(err); free(err); return r; }
+    return v_ok(v);
+}
+
 // json_put_str writes s as Go's encoding/json does: the VM encodes with it.
 // Control characters, <, > and & are escaped, U+2028 and U+2029 too, and a
 // byte that is not UTF-8 becomes U+FFFD.
@@ -1823,8 +1960,10 @@ static void json_put(AnimaBuf *b, AnimaVal v, const BoxOpen *up) {
             else buf_put(b, "{}");
             break;
         case VAL_VARIANT: {
-            // A variant is its text, as on the VM.
+            // Some(x) is x, which is what json.decode reads an Option
+            // from; any other variant is its text. As on the VM.
             if (!v.u.var) { buf_put(b, "null"); break; }
+            if (strcmp(v.u.var->name, "Some") == 0 && v.u.var->len == 1) { json_put(b, v.u.var->fields[0], &here); break; }
             AnimaBuf t = {0};
             buf_put(&t, "");
             v_fmt_in(&t, v, up);
