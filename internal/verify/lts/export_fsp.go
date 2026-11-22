@@ -84,12 +84,31 @@ func writeFSPProcess(sb *strings.Builder, name string, comp *ComponentLTS) {
 	if len(comp.States) == 0 {
 		return
 	}
+	// An action the process is written with and never does is in its
+	// alphabet all the same: `+ {a}` holds a back in a composition.
+	done := map[string]bool{}
+	for _, edges := range comp.Edges {
+		for _, e := range edges {
+			done[e.Action] = true
+		}
+	}
+	var never []string
+	for a := range comp.Alphabet {
+		if !done[a] {
+			never = append(never, sanitizeFSPAct(a))
+		}
+	}
+	sort.Strings(never)
+	end := "."
+	if len(never) > 0 {
+		end = " + {" + strings.Join(never, ", ") + "}."
+	}
 	sb.WriteString(fmt.Sprintf("%s = %s,\n", name, sanitizeFSPState(comp.States[comp.Init])))
 	for i, stLabel := range comp.States {
 		sname := sanitizeFSPState(stLabel)
 		sep := ","
 		if i == len(comp.States)-1 {
-			sep = "."
+			sep = end
 		}
 		edges := comp.Edges[i]
 		if len(edges) == 0 {

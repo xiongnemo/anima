@@ -582,8 +582,10 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 			}
 		}
 		for _, inv := range m.States[0].Invariants {
+			v.invariantHasValue(inv, initEnv, scope)
 			b := v.evalBool(inv, initEnv, scope)
 			v.prove(fmt.Sprintf("%s.init.%s_invariant", m.Name, m.States[0].Name), scope, inv.GetSpan(), initEnv, b)
+			initEnv.assume(b)
 		}
 	}
 
@@ -622,12 +624,23 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 			}
 			// Check target state invariants
 			for _, dstInv := range stateInvMap[tr.TargetState] {
+				v.invariantHasValue(dstInv, tEnv, scope)
 				b := v.evalBool(dstInv, tEnv, scope)
 				v.prove(fmt.Sprintf("%s.%s->%s.target_invariant", m.Name, tr.Action, tr.TargetState),
 					scope, tr.Span, tEnv, b)
+				tEnv.assume(b)
 			}
 		}
 	}
+}
+
+// invariantHasValue proves, where a machine arrives in a state, that an
+// invariant of the state has a value there: no overflow, no division by
+// zero, no shift by a count outside 0..63. The LTS kernel works it out at
+// each arrival, and what has no value there it does not make up.
+func (v *verifier) invariantHasValue(inv ast.Expr, env *symEnv, scope string) {
+	v.checkArith(inv, env, scope)
+	v.evalSideEffects(inv, env, scope)
 }
 
 func (v *verifier) resolveSimpleRange(te ast.TypeExpr) (*sema.IntType, error) {

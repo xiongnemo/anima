@@ -41,6 +41,9 @@ func Check(prog *ast.Program) (*ProgramInfo, error) {
 		return c.info, err
 	}
 	c.callAllPiped()
+	if err := c.checkModels(); err != nil {
+		return c.info, err
+	}
 	return c.info, nil
 }
 

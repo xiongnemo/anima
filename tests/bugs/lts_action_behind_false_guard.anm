@@ -1,0 +1,22 @@
+# BUG (LTS): an action whose guard never holds was left out of the alphabet
+# of the monitor, so the car made `go` without the gate, as often as it
+# liked, and the system was deadlock free. The gate never lets it go.
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    n: control int[0..3] = 0
+
+    state S:
+        on go when n > 5 -> S
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

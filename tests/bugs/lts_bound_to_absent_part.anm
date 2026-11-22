@@ -1,0 +1,19 @@
+# BUG (LTS): `left=f9` of a system with no f9 bound left to nothing, and
+# `left.get` was done alone.
+machine Fork:
+    state Free:
+        on put -> Free
+
+machine Phil:
+    state T:
+        on left.get -> T
+
+system Sys:
+    compose:
+        f0: Fork
+        p0: Phil(left=f9)
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

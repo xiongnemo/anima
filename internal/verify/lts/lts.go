@@ -63,48 +63,45 @@ type SystemLTS struct {
 }
 
 // CompileMachine converts a MachineDecl (expanding state x control vars) into an explicit ComponentLTS.
+//
+// The alphabet is every action the machine is written with, in a state it
+// reaches or not, under a guard that holds somewhere or nowhere: what it
+// names it takes part in, and an action it never offers never happens. The
+// edges are the transitions it can make.
 func CompileMachine(m *ast.MachineDecl, info *sema.ProgramInfo) (*ComponentLTS, error) {
 	type ctrlVar struct {
 		name string
 		lo   int64
 		hi   int64
-		init int64
 	}
 	var cvs []ctrlVar
-	for _, cv := range m.ControlVars {
-		lo, hi := int64(0), int64(1)
-		if ir, ok := cv.Type.(*ast.IntRangeType); ok {
-			lo, hi = ir.Lo, ir.Hi
-		} else if st, ok := cv.Type.(*ast.SimpleType); ok {
-			if ty, ok := info.Types[st.Name]; ok {
-				if it, ok := ty.(*sema.IntType); ok && it.IsBounded {
-					lo, hi = it.Lo, it.Hi
-				}
+	initEnv := map[string]int64{}
+	inRange := func(span ast.Span, env map[string]int64, when string) error {
+		for _, cv := range cvs {
+			if v := env[cv.name]; v < cv.lo || v > cv.hi {
+				return fmt.Errorf("%s: control variable %s of %s is %d %s, outside its range %d..%d", span, cv.name, m.Name, v, when, cv.lo, cv.hi)
 			}
 		}
-		if hi-lo > 32 {
-			return nil, fmt.Errorf("%s: control variable %s range [%d..%d] exceeds explicit LTS bound (max 32)", cv.Span, cv.Name, lo, hi)
+		return nil
+	}
+	for _, cv := range m.ControlVars {
+		lo, hi, err := sema.ControlRange(cv, info.Types)
+		if err != nil {
+			return nil, err
 		}
+		// A first value is worked out with those before it, as the contract
+		// kernel reads it; with none written it is the least of the range.
 		initVal := lo
 		if cv.Init != nil {
-			initVal = evalConstInt(cv.Init, map[string]int64{})
-		}
-		cvs = append(cvs, ctrlVar{name: cv.Name, lo: lo, hi: hi, init: initVal})
-	}
-
-	// Build Cartesian combinations of control variables
-	var envList []map[string]int64
-	envList = []map[string]int64{{}}
-	for _, cv := range cvs {
-		var next []map[string]int64
-		for _, env := range envList {
-			for val := cv.lo; val <= cv.hi; val++ {
-				cp := cloneIntMap(env)
-				cp[cv.name] = val
-				next = append(next, cp)
+			if initVal, err = evalInt(cv.Init, initEnv); err != nil {
+				return nil, err
 			}
 		}
-		envList = next
+		cvs = append(cvs, ctrlVar{name: cv.Name, lo: lo, hi: hi})
+		initEnv[cv.Name] = initVal
+		if err := inRange(cv.Span, initEnv, "at first"); err != nil {
+			return nil, err
+		}
 	}
 
 	lts := &ComponentLTS{
@@ -146,17 +143,35 @@ func CompileMachine(m *ast.MachineDecl, info *sema.ProgramInfo) (*ComponentLTS, 
 		return nil, fmt.Errorf("%s: %s %s has no states", m.Span, m.Kind, m.Name)
 	}
 
-	// Initial state
-	initEnv := map[string]int64{}
-	for _, cv := range cvs {
-		initEnv[cv.name] = cv.init
-	}
-	lts.Init = ensureState(m.States[0].Name, initEnv)
-
 	stateDecls := map[string]ast.StateDecl{}
 	for _, st := range m.States {
 		stateDecls[st.Name] = st
+		for _, tr := range st.Transitions {
+			lts.Alphabet[tr.Action] = true
+			lts.BaseAlpha[baseAct(tr.Action)] = true
+		}
 	}
+
+	// The contract kernel proves each invariant where a transition arrives,
+	// so one that does not hold is of a program it refused.
+	invariants := func(span ast.Span, stName string, env map[string]int64) error {
+		for _, inv := range stateDecls[stName].Invariants {
+			holds, err := evalBool(inv, env)
+			if err != nil {
+				return err
+			}
+			if !holds {
+				return fmt.Errorf("%s: %s arrives in %s where the invariant of %s at %s does not hold", span, m.Name, stateKey(stName, env), stName, inv.GetSpan())
+			}
+		}
+		return nil
+	}
+
+	// Initial state
+	if err := invariants(m.Span, m.States[0].Name, initEnv); err != nil {
+		return nil, err
+	}
+	lts.Init = ensureState(m.States[0].Name, initEnv)
 
 	// BFS reachable concrete (State, ControlVars) pairs
 	type workItem struct {
@@ -172,25 +187,28 @@ func CompileMachine(m *ast.MachineDecl, info *sema.ProgramInfo) (*ComponentLTS, 
 		queue = queue[1:]
 		sd := stateDecls[cur.stName]
 		for _, tr := range sd.Transitions {
-			if tr.Guard != nil && !evalConstBool(tr.Guard, cur.env) {
-				continue
+			if tr.Guard != nil {
+				open, err := evalBool(tr.Guard, cur.env)
+				if err != nil {
+					return nil, err
+				}
+				if !open {
+					continue
+				}
 			}
 			nextEnv := cloneIntMap(cur.env)
 			for _, bs := range tr.Body {
-				execConcreteStmt(bs, nextEnv)
-			}
-			// Check invariants on destination if any
-			valid := true
-			if dstDecl, ok := stateDecls[tr.TargetState]; ok {
-				for _, inv := range dstDecl.Invariants {
-					if !evalConstBool(inv, nextEnv) {
-						valid = false
-						break
-					}
+				if err := execStmt(bs, nextEnv); err != nil {
+					return nil, err
 				}
 			}
-			if !valid {
-				continue
+			// A value outside its range would be a state the model does not
+			// hold, and one after another of them a model without end.
+			if err := inRange(tr.Span, nextEnv, fmt.Sprintf("after %s from %s", tr.Action, stateKey(cur.stName, cur.env))); err != nil {
+				return nil, err
+			}
+			if err := invariants(tr.Span, tr.TargetState, nextEnv); err != nil {
+				return nil, err
 			}
 			dstID := ensureState(tr.TargetState, nextEnv)
 			act := tr.Action
@@ -199,8 +217,6 @@ func CompileMachine(m *ast.MachineDecl, info *sema.ProgramInfo) (*ComponentLTS, 
 				parts := strings.SplitN(act, ".", 2)
 				targetMon = parts[0]
 			}
-			lts.Alphabet[act] = true
-			lts.BaseAlpha[baseAct(act)] = true
 			lts.Edges[cur.id] = append(lts.Edges[cur.id], Edge{
 				Action:     act,
 				BaseAction: baseAct(act),
@@ -544,22 +560,96 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 		}
 	}
 
-	// Track instances referenced as bound resources (e.g. left=f0 or relabel -> f0.get)
-	// so they only transition when synchronized with a caller, never solo!
+	// Track instances referenced as bound resources (left=f0, or an action
+	// f0.get, written so or relabelled to it) so they only transition when
+	// synchronized with a caller, never solo! A part named by `on f0.get`
+	// alone was left to do its get and put by itself, and with a fork that
+	// is taken and put down by no one the philosophers were never stuck.
 	isBoundResource := make([]bool, n)
-	for _, im := range insts {
+	for i, im := range insts {
 		for _, target := range im.bindings {
 			if rIdx, ok := byName[target]; ok {
 				isBoundResource[rIdx] = true
 			}
 		}
-		for _, to := range im.relabels {
-			if strings.Contains(to, ".") {
-				parts := strings.SplitN(to, ".", 2)
-				if rIdx, ok := byName[parts[0]]; ok {
-					isBoundResource[rIdx] = true
+		for act := range im.comp.Alphabet {
+			parts := strings.SplitN(relabelled(im.relabels, act), ".", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if _, bound := im.bindings[parts[0]]; bound {
+				continue
+			}
+			if rIdx, ok := byName[parts[0]]; ok && rIdx != i {
+				isBoundResource[rIdx] = true
+			}
+		}
+	}
+
+	// What an action is done with is in the system. `on left.get` of a part
+	// with no left, `Phil(left=f9)` of a system with no f9, and `sync Gate.go`
+	// of a system with no monitor Gate would each be done alone, as often as
+	// the part likes: the guards of what it names would hold nothing back.
+	for i, im := range insts {
+		for _, target := range sortedValues(im.bindings) {
+			if rIdx, ok := byName[target]; !ok || rIdx == i {
+				return nil, fmt.Errorf("%s: %s of system %s is bound to %s, which is no other part of the system", sys.Instances[i].Span, im.name, sys.Name, target)
+			}
+		}
+		with := map[string]string{}
+		for act := range im.comp.Alphabet {
+			if rep, ok := im.relabels[act]; ok {
+				act = rep
+			}
+			if parts := strings.SplitN(act, ".", 2); len(parts) == 2 {
+				with[parts[0]] = act
+			}
+		}
+		// A monitor, and a part other parts do their actions with, moves
+		// only with the part that calls it. Its own `on b.put` would be
+		// matched to a caller's put with b left where it is.
+		if im.isMonitor || isBoundResource[i] {
+			if names := sortedKeys(with); len(names) > 0 {
+				what := "other parts do their actions with it"
+				if im.isMonitor {
+					what = "it is a monitor"
+				}
+				return nil, fmt.Errorf("%s: %s of system %s does %s, and %s: it moves only with the part that calls it, and calls none", sys.Instances[i].Span, im.name, sys.Name, with[names[0]], what)
+			}
+			continue
+		}
+		for _, edges := range im.comp.Edges {
+			for _, e := range edges {
+				if e.TargetMon != "" {
+					if _, seen := with[e.TargetMon]; !seen {
+						with[e.TargetMon] = e.TargetMon + "." + e.BaseAction
+					}
 				}
 			}
+		}
+		for _, name := range sortedKeys(with) {
+			_, bound := im.bindings[name]
+			rIdx, part := byName[name]
+			if part && !bound && rIdx == i {
+				return nil, fmt.Errorf("%s: %s of system %s does %s with itself", sys.Instances[i].Span, im.name, sys.Name, with[name])
+			}
+			// `Gate.go` names a monitor by its type, and is done with one.
+			if mons := monitorsByType[name]; !bound && !part && len(mons) > 1 {
+				return nil, fmt.Errorf("%s: %s of system %s does %s with the monitor %s, and the system has two: %s and %s", sys.Instances[i].Span, im.name, sys.Name, with[name], name, insts[mons[0]].name, insts[mons[1]].name)
+			}
+			_, declared := info.Machines[name]
+			// A workflow calls methods of its values too: `xs.append(1)`.
+			if bound || part || len(monitorsByType[name]) > 0 || (im.comp.IsWorkflow && !declared) {
+				continue
+			}
+			what := "bound to no part of the system"
+			if m, ok := info.Machines[name]; ok {
+				what = "a " + m.Kind + " the system has no part of"
+				if m.Kind != "monitor" {
+					what = "a " + m.Kind + " and no monitor"
+				}
+			}
+			return nil, fmt.Errorf("%s: %s of system %s does %s with %s, which is %s", sys.Instances[i].Span, im.name, sys.Name, with[name], name, what)
 		}
 	}
 
@@ -689,7 +779,7 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 					rIdx := byName[receiver]
 					rComp := insts[rIdx].comp
 					for _, re := range rComp.Edges[vec[rIdx]] {
-						if re.Action == base || re.BaseAction == base {
+						if ra := relabelled(insts[rIdx].relabels, re.Action); ra == base {
 							nv := append([]int{}, vec...)
 							nv[i] = e.Target
 							nv[rIdx] = re.Target
@@ -711,7 +801,7 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 						mIdx := mIndices[0]
 						mComp := insts[mIdx].comp
 						for _, me := range mComp.Edges[vec[mIdx]] {
-							if me.Action == base || me.BaseAction == base {
+							if ma := relabelled(insts[mIdx].relabels, me.Action); ma == base {
 								nv := append([]int{}, vec...)
 								nv[i] = e.Target
 								nv[mIdx] = me.Target
@@ -857,12 +947,38 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 	return sysLTS, nil
 }
 
-func hasAction(comp *ComponentLTS, relabels map[string]string, target string) bool {
-	if comp.Alphabet[target] {
-		return true
+// relabelled is the name an instance with relabels gives the action act.
+func relabelled(relabels map[string]string, act string) string {
+	if to, ok := relabels[act]; ok {
+		return to
 	}
-	for _, to := range relabels {
-		if to == target {
+	return act
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hasAction reports whether target is in the alphabet of comp as an instance
+// with relabels: the actions of comp, each under the name the instance gives
+// it. An action relabelled away is not in it.
+func hasAction(comp *ComponentLTS, relabels map[string]string, target string) bool {
+	for act := range comp.Alphabet {
+		if relabelled(relabels, act) == target {
 			return true
 		}
 	}
@@ -905,145 +1021,6 @@ func cloneIntMap(m map[string]int64) map[string]int64 {
 		cp[k] = v
 	}
 	return cp
-}
-
-func evalConstInt(expr ast.Expr, env map[string]int64) int64 {
-	switch e := expr.(type) {
-	case *ast.IntLit:
-		return e.Value
-	case *ast.Ident:
-		return env[e.Name]
-	case *ast.UnaryExpr:
-		if e.Op == "-" {
-			return -evalConstInt(e.Expr, env)
-		}
-		if e.Op == "~" {
-			return ^evalConstInt(e.Expr, env)
-		}
-	case *ast.CallExpr:
-		// The built-in functions of ints; the contract kernel has proved
-		// abs is not of the least int.
-		id, ok := e.Callee.(*ast.Ident)
-		if !ok {
-			break
-		}
-		var xs []int64
-		for _, a := range e.Args {
-			if a.Name != "" {
-				return 0
-			}
-			xs = append(xs, evalConstInt(a.Value, env))
-		}
-		switch {
-		case id.Name == "abs" && len(xs) == 1:
-			if xs[0] < 0 {
-				return -xs[0]
-			}
-			return xs[0]
-		case id.Name == "min" && len(xs) == 2:
-			return min(xs[0], xs[1])
-		case id.Name == "max" && len(xs) == 2:
-			return max(xs[0], xs[1])
-		}
-	case *ast.BinaryExpr:
-		l := evalConstInt(e.Left, env)
-		r := evalConstInt(e.Right, env)
-		switch e.Op {
-		case "+":
-			return l + r
-		case "-":
-			return l - r
-		case "*":
-			return l * r
-		case "/":
-			if r != 0 {
-				return l / r
-			}
-		case "%":
-			if r != 0 {
-				return l % r
-			}
-		case "&":
-			return l & r
-		case "|":
-			return l | r
-		case "^":
-			return l ^ r
-		case "<<":
-			if r >= 0 && r <= 63 {
-				return l << uint(r)
-			}
-		case ">>":
-			if r >= 0 && r <= 63 {
-				return l >> uint(r)
-			}
-		}
-	}
-	return 0
-}
-
-func evalConstBool(expr ast.Expr, env map[string]int64) bool {
-	switch e := expr.(type) {
-	case *ast.BoolLit:
-		return e.Value
-	case *ast.UnaryExpr:
-		if e.Op == "not" {
-			return !evalConstBool(e.Expr, env)
-		}
-	case *ast.BinaryExpr:
-		switch e.Op {
-		case "and":
-			return evalConstBool(e.Left, env) && evalConstBool(e.Right, env)
-		case "or":
-			return evalConstBool(e.Left, env) || evalConstBool(e.Right, env)
-		case "implies":
-			return !evalConstBool(e.Left, env) || evalConstBool(e.Right, env)
-		case "==":
-			return evalConstInt(e.Left, env) == evalConstInt(e.Right, env)
-		case "!=":
-			return evalConstInt(e.Left, env) != evalConstInt(e.Right, env)
-		case "<":
-			return evalConstInt(e.Left, env) < evalConstInt(e.Right, env)
-		case "<=":
-			return evalConstInt(e.Left, env) <= evalConstInt(e.Right, env)
-		case ">":
-			return evalConstInt(e.Left, env) > evalConstInt(e.Right, env)
-		case ">=":
-			return evalConstInt(e.Left, env) >= evalConstInt(e.Right, env)
-		}
-	}
-	return false
-}
-
-func execConcreteStmt(stmt ast.Stmt, env map[string]int64) {
-	switch s := stmt.(type) {
-	case *ast.LetAssignStmt:
-		env[s.Name] = evalConstInt(s.Value, env)
-	case *ast.CompoundAssignStmt:
-		if id, ok := s.Target.(*ast.Ident); ok {
-			v := evalConstInt(s.Value, env)
-			switch s.Op {
-			case "+=":
-				env[id.Name] += v
-			case "-=":
-				env[id.Name] -= v
-			case "*=":
-				env[id.Name] *= v
-			}
-		}
-	case *ast.IfStmt:
-		for _, br := range s.Branches {
-			if evalConstBool(br.Cond, env) {
-				for _, bs := range br.Body {
-					execConcreteStmt(bs, env)
-				}
-				return
-			}
-		}
-		for _, es := range s.Else {
-			execConcreteStmt(es, env)
-		}
-	}
 }
 
 // SortedAlphabet returns deterministic ordered action list.

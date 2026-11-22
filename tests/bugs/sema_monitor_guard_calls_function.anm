@@ -1,0 +1,25 @@
+# BUG (LTS): the model does not run a function, and a guard that calls one
+# was False in it. With the alphabet as it is now the gate would never let
+# the car go, which `ok` does not say either.
+machine Car:
+    state A:
+        on go -> A
+
+def ok(n: int) -> bool:
+    return n < 3
+
+monitor Gate:
+    n: control int[0..3] = 0
+
+    state S:
+        on go when ok(n) -> S
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

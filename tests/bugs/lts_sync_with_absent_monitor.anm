@@ -1,0 +1,18 @@
+# BUG (LTS): `Gate.go` of a system with no part that is a Gate was done
+# alone. The gate never lets it go, and the system was deadlock free.
+machine Car:
+    state A:
+        on Gate.go -> A
+
+monitor Gate:
+    state S:
+        on go when False -> S
+
+system Sys:
+    compose:
+        car: Car
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

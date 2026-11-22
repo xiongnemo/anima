@@ -1,0 +1,18 @@
+# BUG (LTS): the guard of a transition of a property was read and dropped,
+# so a property that allows `a` never was one that allows it always.
+machine A:
+    state S:
+        on a -> S
+
+property NeverA:
+    state P:
+        on a when False -> P
+
+system Sys:
+    compose:
+        x: A
+    check:
+        satisfies NeverA
+
+def main() -> int:
+    return 0
