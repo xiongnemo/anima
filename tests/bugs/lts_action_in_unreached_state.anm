@@ -1,0 +1,21 @@
+# BUG (LTS): an action written only in a state the monitor never reaches
+# was left out of its alphabet, so the car made `go` without the gate.
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    state Shut:
+        on knock -> Shut
+    state Open:
+        on go -> Open
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

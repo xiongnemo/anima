@@ -1,0 +1,42 @@
+# BUG (LTS): a part that another names in an action, `on f0.get`, with no
+# binding, did its own get and put alone as well. With forks that are taken
+# and put down by no one the system always had a step to make, and the
+# philosophers, each holding one fork and waiting for the other, were not
+# found.
+machine Fork:
+    state Free:
+        on get -> Taken
+    state Taken:
+        on put -> Free
+
+machine PhilA:
+    state T:
+        on f0.get -> H
+    state H:
+        on f1.get -> E
+    state E:
+        on f0.put -> P
+    state P:
+        on f1.put -> T
+
+machine PhilB:
+    state T:
+        on f1.get -> H
+    state H:
+        on f0.get -> E
+    state E:
+        on f1.put -> P
+    state P:
+        on f0.put -> T
+
+system Sys:
+    compose:
+        f0: Fork
+        f1: Fork
+        a: PhilA
+        b: PhilB
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

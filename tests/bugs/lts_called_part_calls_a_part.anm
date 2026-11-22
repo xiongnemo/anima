@@ -1,0 +1,29 @@
+# BUG (LTS): a fork that p0 takes and puts down, and that is put down with b, which
+# never offers put. The put of p0 was matched to the fork's b.put with b left
+# out of it, so the fork was put down and the system found deadlock free.
+machine Fork:
+    state Free:
+        on get -> Taken
+    state Taken:
+        on b.put -> Free
+
+machine Phil:
+    state T:
+        on left.get -> H
+    state H:
+        on left.put -> T
+
+machine B:
+    state S:
+        on put when False -> S
+
+system Sys:
+    compose:
+        f0: Fork
+        b: B
+        p0: Phil(left=f0)
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

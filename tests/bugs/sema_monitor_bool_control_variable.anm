@@ -1,0 +1,21 @@
+# BUG (LTS): a control variable that is a bool was False wherever it was
+# named, whatever it was set to.
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    open: control bool = True
+
+    state S:
+        on go when open -> S
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

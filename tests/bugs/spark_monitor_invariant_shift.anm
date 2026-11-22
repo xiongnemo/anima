@@ -1,0 +1,26 @@
+# BUG (SPARK): an invariant of a state was not proved to have a value where
+# a transition arrives. With n = 3 this one shifts by -1, which the model
+# made 0.
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    n: control int[0..3] = 0
+
+    state S:
+        invariant: 8 >> (2 - n) >= 0
+        on go when n < 3 -> S:
+            n = n + 1
+        on go when n == 3 -> S:
+            n = 0
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0

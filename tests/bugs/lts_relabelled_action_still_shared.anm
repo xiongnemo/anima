@@ -1,0 +1,25 @@
+# BUG (LTS): an instance that gives its action `a` the name `b` was still a
+# party to `a`, and offered it under no name `x` knows, so `x` was held back
+# and NoA held.
+# With `a` relabelled away, `x` does `a` alone.
+machine A:
+    state S:
+        on a -> S
+
+machine B:
+    state S:
+        on a -> S
+
+property NoA:
+    state P:
+        on a -> ERROR
+
+system Sys:
+    compose:
+        x: A
+        y: B / {a -> b}
+    check:
+        satisfies NoA
+
+def main() -> int:
+    return 0
