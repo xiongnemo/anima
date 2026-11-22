@@ -547,7 +547,7 @@ def main() -> int:
 // connections: one to it is neither made nor refused.
 func fullListener(t *testing.T) string {
 	t.Helper()
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,6 +642,118 @@ def main() -> int:
 		// Six requests of 600 ms each, and none that ends early or late.
 		if took := time.Since(start); took < 3600*time.Millisecond || took > 8*time.Second {
 			t.Errorf("%v: six requests of 600 ms took %v", argv[len(argv)-1], took)
+		}
+	}
+}
+
+// A request that ran out of time leaves nothing behind it. Go's transport
+// goes on connecting, and shaking hands over TLS, for a request that is
+// over, in case the next can use the connection; with the VM none can, so
+// each request a silent server made give up left a socket open, for as
+// long as the server kept silent.
+func TestE2EHTTPRequestLeavesNoSocket(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("the sockets of a process are counted in /proc")
+	}
+	full := fullListener(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+		}
+	}()
+	silent := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	src := strings.NewReplacer("FULL", full, "SILENT", silent).Replace(`import std.requests as req
+import std.time as time
+
+def ask(url: str) -> int:
+    match req.get(url, timeout_ms=200):
+        Ok(x) -> print("ok", x.status)
+        Err(m) -> print("err")
+    return 0
+
+def main() -> int:
+    print("before")
+    time.sleep_ms(1500)
+    for i in [1, 2, 3, 4]:
+        ask("http://127.0.0.1:FULL/a")
+        ask("https://127.0.0.1:SILENT/a")
+        ask("http://127.0.0.1:SILENT/a")
+    s = req.Session(pool_size=2)
+    f = s.get_async("https://127.0.0.1:SILENT/a", timeout_ms=200)
+    g = s.get_async("http://127.0.0.1:FULL/a", timeout_ms=200)
+    match f.await():
+        Ok(x) -> print("ok", x.status)
+        Err(m) -> print("err")
+    match g.await():
+        Ok(x) -> print("ok", x.status)
+        Err(m) -> print("err")
+    s.close()
+    print("after")
+    time.sleep_ms(1500)
+    return 0
+`)
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	path := filepath.Join(tmp, "left.anm")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeBin := filepath.Join(tmp, "left")
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	sockets := func(pid int) int {
+		dir := "/proc/" + strconv.Itoa(pid) + "/fd"
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, e := range ents {
+			if to, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && strings.HasPrefix(to, "socket:") {
+				n++
+			}
+		}
+		return n
+	}
+	for _, argv := range [][]string{{animaBin, "run", path}, {nativeBin}} {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		// The sockets it has while it sleeps, before and after it asked.
+		var before, after, errs int
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			switch sc.Text() {
+			case "before":
+				time.Sleep(300 * time.Millisecond)
+				before = sockets(cmd.Process.Pid)
+			case "after":
+				time.Sleep(300 * time.Millisecond)
+				after = sockets(cmd.Process.Pid)
+			case "err":
+				errs++
+			}
+		}
+		if err := cmd.Wait(); err != nil || errs != 14 {
+			t.Errorf("%v: err=%v, %d of 14 requests ran out of time", argv[len(argv)-1], err, errs)
+		}
+		if after != before {
+			t.Errorf("%v: %d sockets before the requests, %d after", argv[len(argv)-1], before, after)
 		}
 	}
 }

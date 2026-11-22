@@ -748,11 +748,35 @@ var plainTransport = newTransport()
 // proxy the environment names, and the one time limit is the request's.
 func newTransport() *http.Transport {
 	return &http.Transport{
-		DialContext:        (&net.Dialer{}).DialContext,
+		DialContext:        dialUntil,
 		DisableCompression: true,
 		DisableKeepAlives:  true,
 		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
+}
+
+// until is the key of a request's context under which its time limit is
+// kept for the dialer.
+type until struct{}
+
+// dialUntil connects for a request, and what it connects ends with the
+// request. Go's transport goes on connecting, and shaking hands over TLS,
+// for a request that is over, so that the next may use the connection;
+// here none does, and a server that never answered kept a socket of every
+// request that gave it up. The connection is one request's, so the
+// request's time limit is the connection's.
+func dialUntil(ctx context.Context, network, addr string) (net.Conn, error) {
+	end, ok := ctx.Value(until{}).(time.Time)
+	if !ok {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	ctx, cancel := context.WithDeadline(ctx, end)
+	defer cancel()
+	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err == nil {
+		_ = c.SetDeadline(end)
+	}
+	return c, err
 }
 
 // asAnswered hides from Go's client where a redirect leads, so that the
@@ -799,8 +823,12 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	// One time limit for the whole request. It is kept here and not by
 	// http.Client.Timeout: that ends a request in two ways at once, and
 	// which of the two is first decides the words of the error.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	end := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), until{}, end), end)
 	defer cancel()
+	// The time is up by the clock: the request and its connection end at
+	// the same moment, and either may be the first to say so.
+	late := func() bool { return ctx.Err() != nil || !time.Now().Before(end) }
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		// Why an address in [ ] is none is said in more words than the
@@ -838,7 +866,7 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	resp, err := cl.Do(req)
 	if err != nil {
 		var ue *neturl.Error
-		if ctx.Err() != nil && errors.As(err, &ue) {
+		if late() && errors.As(err, &ue) {
 			ue.Err = errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
 		}
 		msg := err.Error()
@@ -858,7 +886,7 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		if ctx.Err() != nil {
+		if late() {
 			return VErr("context deadline exceeded (Client.Timeout or context cancellation while reading body)")
 		}
 		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
