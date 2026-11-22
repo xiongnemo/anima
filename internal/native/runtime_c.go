@@ -1549,13 +1549,14 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
     int err = X509_STORE_CTX_get_error(sc);
     X509 *cert = X509_STORE_CTX_get_current_cert(sc);
     bool own = X509_STORE_CTX_get_error_depth(sc) == 0;
-    bool dates = err == X509_V_ERR_CERT_HAS_EXPIRED || err == X509_V_ERR_CERT_NOT_YET_VALID;
-    bool names = err == X509_V_ERR_HOSTNAME_MISMATCH || err == X509_V_ERR_IP_ADDRESS_MISMATCH;
-    int rank = own && dates ? 3 : names ? 2 : 1;
+    bool dates = cert && (err == X509_V_ERR_CERT_HAS_EXPIRED || err == X509_V_ERR_CERT_NOT_YET_VALID);
+    bool names = cert && (err == X509_V_ERR_HOSTNAME_MISMATCH || err == X509_V_ERR_IP_ADDRESS_MISMATCH);
+    // An authority out of its dates is named before one that is not known.
+    int rank = dates ? (own ? 4 : 2) : names ? 3 : 1;
     tls_seen.bad = true;
     if (rank <= tls_seen.rank) return 1;
     tls_seen.rank = rank;
-    if (rank == 3 && cert) {
+    if (dates) {
         bool late = err == X509_V_ERR_CERT_HAS_EXPIRED;
         struct tm edge = {0}, now = {0};
         char at[40] = "", is[40] = "";
@@ -1566,7 +1567,7 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
             tls_time(&edge, true, at, sizeof(at));
         tls_why("certificate has expired or is not yet valid: current time ", is,
             late ? " is after " : " is before ", at);
-    } else if (rank == 2 && cert) {
+    } else if (names) {
         tls_not_for(cert, tls_seen.host);
     } else {
         switch (err) {
@@ -1576,9 +1577,17 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
         case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
         case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
         case X509_V_ERR_CERT_UNTRUSTED:
-        case X509_V_ERR_CERT_HAS_EXPIRED:
-        case X509_V_ERR_CERT_NOT_YET_VALID:
+        // A certificate that may not sign, or did not sign, is no authority.
+        case X509_V_ERR_INVALID_CA:
+        case X509_V_ERR_CERT_SIGNATURE_FAILURE:
+        case X509_V_ERR_AKID_SKID_MISMATCH:
             tls_why("certificate signed by unknown authority", "", "", "");
+            break;
+        case X509_V_ERR_INVALID_PURPOSE:
+            tls_why("certificate specifies an incompatible key usage", "", "", "");
+            break;
+        case X509_V_ERR_PATH_LENGTH_EXCEEDED:
+            tls_why("too many intermediates for path length constraint", "", "", "");
             break;
         default:
             tls_why(X509_verify_cert_error_string(err), "", "", "");
@@ -1662,6 +1671,9 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         // first label only, and the subject's common name is no name.
         X509_VERIFY_PARAM_set_hostflags(vp,
             X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT);
+        // Every certificate among the authorities stands for itself and
+        // for what it signed, whether or not another signed it.
+        X509_VERIFY_PARAM_set_flags(vp, X509_V_FLAG_PARTIAL_CHAIN);
         // "a.test." is the name "a.test", to the certificate and the server.
         char name[256];
         snprintf(name, sizeof(name), "%s", host);

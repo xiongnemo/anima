@@ -25,29 +25,45 @@ import (
 	"time"
 )
 
-// An authority that signs the certificates of a test.
+// An authority that signs the certificates of a test. A server with a
+// certificate of it sends "sends" after its own: the authorities between
+// the certificate and the first one.
 type authority struct {
-	cert *x509.Certificate
-	key  *ecdsa.PrivateKey
-	pem  []byte
+	cert  *x509.Certificate
+	key   *ecdsa.PrivateKey
+	pem   []byte
+	sends [][]byte
 }
 
 func newAuthority(t *testing.T, name string) *authority {
+	t.Helper()
+	return signedAuthority(t, nil, &x509.Certificate{Subject: pkix.Name{CommonName: name}})
+}
+
+// signedAuthority is an authority that parent stands for; a nil parent
+// leaves it to stand for itself.
+func signedAuthority(t *testing.T, parent *authority, tmpl *x509.Certificate) *authority {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: name},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	tmpl.SerialNumber = big.NewInt(1)
+	// One that says it is no authority is left to say so.
+	if !tmpl.BasicConstraintsValid {
+		tmpl.IsCA, tmpl.BasicConstraintsValid = true, true
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
+	if tmpl.NotAfter.IsZero() {
+		tmpl.NotBefore = time.Now().Add(-time.Hour)
+		tmpl.NotAfter = time.Now().Add(time.Hour)
+	}
+	by, signer := tmpl, key
+	var sends [][]byte
+	if parent != nil {
+		by, signer = parent.cert, parent.key
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, by, &key.PublicKey, signer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,13 +71,21 @@ func newAuthority(t *testing.T, name string) *authority {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &authority{cert, key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+	if parent != nil {
+		sends = append([][]byte{der}, parent.sends...)
+	}
+	return &authority{cert, key, pemOf(der), sends}
+}
+
+func pemOf(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 // tlsServer answers every request with "in" over TLS, as the server the
 // certificate describes, and gives its port. A nil authority signs the
-// certificate with its own key. conf, if given, changes how the server
-// speaks TLS; a server that only exchanges keys by RSA has an RSA key.
+// certificate with its own key, and the certificate is left in tmpl.Raw.
+// conf, if given, changes how the server speaks TLS; a server that only
+// exchanges keys by RSA has an RSA key.
 func tlsServer(t *testing.T, ca *authority, tmpl *x509.Certificate, conf func(*tls.Config)) string {
 	t.Helper()
 	sc := &tls.Config{}
@@ -81,7 +105,9 @@ func tlsServer(t *testing.T, ca *authority, tmpl *x509.Certificate, conf func(*t
 	}
 	tmpl.SerialNumber = big.NewInt(2)
 	tmpl.KeyUsage |= x509.KeyUsageDigitalSignature
-	tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	if tmpl.ExtKeyUsage == nil {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	}
 	if tmpl.NotAfter.IsZero() {
 		tmpl.NotBefore = time.Now().Add(-time.Hour)
 		tmpl.NotAfter = time.Now().Add(time.Hour)
@@ -94,7 +120,12 @@ func tlsServer(t *testing.T, ca *authority, tmpl *x509.Certificate, conf func(*t
 	if err != nil {
 		t.Fatal(err)
 	}
-	sc.Certificates = []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}
+	tmpl.Raw = der
+	chain := [][]byte{der}
+	if ca != nil {
+		chain = append(chain, ca.sends...)
+	}
+	sc.Certificates = []tls.Certificate{{Certificate: chain, PrivateKey: key}}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", sc)
 	if err != nil {
 		t.Fatal(err)
@@ -178,36 +209,14 @@ def main() -> int:
 ` + calls.String() + `    return 0
 `
 	tmp := t.TempDir()
-	animaBin := buildCLI(t, tmp)
-	path := filepath.Join(tmp, "tls.anm")
-	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	nativeBin := filepath.Join(tmp, "tls")
-	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
-		t.Fatalf("anima build failed: %v\n%s", err, out)
-	}
+	run := tlsBackends(t, "tls", src)
 	roots := filepath.Join(tmp, "roots.pem")
 	if err := os.WriteFile(roots, ca.pem, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The time of the request is the one part of a message that differs
-	// from run to run.
-	now := regexp.MustCompile(`current time \S+ is`)
-	run := func(backend string, env []string, want string, argv ...string) {
-		t.Helper()
-		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Env = append(os.Environ(), env...)
-		out, err := cmd.CombinedOutput()
-		got := now.ReplaceAllString(string(out), "current time NOW is")
-		if err != nil || got != want {
-			t.Errorf("%s %v: err=%v, output:\n%s\nwant:\n%s", backend, env, err, got, want)
-		}
-	}
 	for _, zone := range []string{"TZ=UTC", "TZ=Australia/Sydney"} {
 		trusted := []string{"SSL_CERT_FILE=" + roots, zone}
-		run("VM", trusted, want.String(), animaBin, "run", path)
-		run("native", trusted, want.String(), nativeBin)
+		run(trusted, want.String())
 	}
 	// An empty file of authorities holds none; the system's own do not
 	// know the test's either.
@@ -220,9 +229,134 @@ def main() -> int:
 		t.Fatal(err)
 	}
 	for _, env := range [][]string{nil, {"SSL_CERT_FILE=" + empty, "SSL_CERT_DIR=" + none}} {
-		run("VM", env, untrusted.String(), animaBin, "run", path)
-		run("native", env, untrusted.String(), nativeBin)
+		run(env, untrusted.String())
 	}
+}
+
+// tlsBackends builds src for both backends and gives a function that runs
+// both with env added to the environment and wants the same output of
+// each. The time of the request is the one part of a message that differs
+// from run to run: it is written NOW in want.
+func tlsBackends(t *testing.T, name, src string) func(env []string, want string) {
+	t.Helper()
+	tmp := t.TempDir()
+	animaBin := buildCLI(t, tmp)
+	path := filepath.Join(tmp, name+".anm")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeBin := filepath.Join(tmp, name)
+	if out, err := exec.Command(animaBin, "build", "-o", nativeBin, path).CombinedOutput(); err != nil {
+		t.Fatalf("anima build failed: %v\n%s", err, out)
+	}
+	now := regexp.MustCompile(`current time \S+ is`)
+	// Only the VM goes on to say why an authority is not known.
+	hint := regexp.MustCompile(` \(possibly because of ".*" while trying to verify candidate authority certificate "[^"]*"\)`)
+	return func(env []string, want string) {
+		t.Helper()
+		for _, argv := range [][]string{{animaBin, "run", path}, {nativeBin}} {
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Env = append(os.Environ(), env...)
+			out, err := cmd.CombinedOutput()
+			got := now.ReplaceAllString(string(out), "current time NOW is")
+			got = hint.ReplaceAllString(got, "")
+			if err != nil || got != want {
+				t.Errorf("%v %v: err=%v, output:\n%s\nwant:\n%s", argv[1:], env, err, got, want)
+			}
+		}
+	}
+}
+
+// An authority is one the system's authorities stand for, through others
+// the server sends; and whatever is among the system's authorities stands
+// for itself and for what it signed, whether it is the first of its line
+// or not. The native client took only one that signed itself, so a server
+// under an authority trusted in the middle of its line was refused. One
+// that is not what it has to be is refused in the VM's words.
+func TestE2ETLSLineOfAuthorities(t *testing.T) {
+	local := []net.IP{net.ParseIP("127.0.0.1")}
+	old := func() (time.Time, time.Time) {
+		return time.Date(2001, 1, 2, 3, 4, 5, 0, time.UTC), time.Date(2002, 1, 2, 3, 4, 5, 0, time.UTC)
+	}
+	// first is among the system's authorities; of the other lines only
+	// the one named is.
+	first := newAuthority(t, "first")
+	second := signedAuthority(t, first, &x509.Certificate{Subject: pkix.Name{CommonName: "second"}})
+	third := signedAuthority(t, second, &x509.Certificate{Subject: pkix.Name{CommonName: "third"}})
+	silent := *second
+	silent.sends = nil
+	late := &x509.Certificate{Subject: pkix.Name{CommonName: "late"}}
+	late.NotBefore, late.NotAfter = old()
+	narrow := signedAuthority(t, first, &x509.Certificate{Subject: pkix.Name{CommonName: "narrow"}, MaxPathLenZero: true})
+	// One with second's name and another key, sent in second's place.
+	other := signedAuthority(t, first, &x509.Certificate{Subject: pkix.Name{CommonName: "second"}})
+	swapped := *second
+	swapped.sends = other.sends
+	leaf := signedAuthority(t, first, &x509.Certificate{Subject: pkix.Name{CommonName: "leaf"}, BasicConstraintsValid: true})
+	unknown := newAuthority(t, "unknown")
+	middle := signedAuthority(t, unknown, &x509.Certificate{Subject: pkix.Name{CommonName: "middle"}})
+	lateFirst := &x509.Certificate{Subject: pkix.Name{CommonName: "late first"}}
+	lateFirst.NotBefore, lateFirst.NotAfter = old()
+	own := x509.Certificate{Subject: pkix.Name{CommonName: "own"}, IPAddresses: local}
+	servers := []struct {
+		name string
+		ca   *authority
+		cert *x509.Certificate
+		want string
+	}{
+		{"second", second, &x509.Certificate{IPAddresses: local}, "200 in"},
+		{"third", third, &x509.Certificate{IPAddresses: local}, "200 in"},
+		{"second-not-sent", &silent, &x509.Certificate{IPAddresses: local},
+			"x509: certificate signed by unknown authority"},
+		{"second-with-another-key", &swapped, &x509.Certificate{IPAddresses: local},
+			"x509: certificate signed by unknown authority"},
+		{"no-authority", leaf, &x509.Certificate{IPAddresses: local},
+			"x509: certificate signed by unknown authority"},
+		{"late-authority", signedAuthority(t, first, late), &x509.Certificate{IPAddresses: local},
+			"x509: certificate has expired or is not yet valid: current time NOW is after 2002-01-02T03:04:05Z"},
+		{"late-first-authority", signedAuthority(t, nil, lateFirst), &x509.Certificate{IPAddresses: local},
+			"x509: certificate has expired or is not yet valid: current time NOW is after 2002-01-02T03:04:05Z"},
+		{"one-too-many", signedAuthority(t, narrow, &x509.Certificate{Subject: pkix.Name{CommonName: "below"}}), &x509.Certificate{IPAddresses: local},
+			"x509: too many intermediates for path length constraint"},
+		{"for-a-client", first, &x509.Certificate{IPAddresses: local, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}},
+			"x509: certificate specifies an incompatible key usage"},
+		{"middle-trusted", middle, &x509.Certificate{IPAddresses: local}, "200 in"},
+		{"itself-trusted", unknown, &own, "200 in"},
+		{"itself-trusted-other-address", unknown, &x509.Certificate{IPAddresses: []net.IP{net.ParseIP("10.1.2.3")}},
+			"x509: certificate is valid for 10.1.2.3, not 127.0.0.1"},
+	}
+	var calls, want strings.Builder
+	roots := append(append([]byte{}, first.pem...), middle.pem...)
+	for _, s := range servers {
+		port := tlsServer(t, s.ca, s.cert, nil)
+		if strings.HasPrefix(s.name, "itself-trusted") {
+			roots = append(roots, pemOf(s.cert.Raw)...)
+		}
+		if s.name == "late-first-authority" {
+			roots = append(roots, s.ca.pem...)
+		}
+		calls.WriteString(`    get("` + s.name + `", "https://127.0.0.1:` + port + `/")` + "\n")
+		line := s.name + " " + s.want
+		if strings.HasPrefix(s.want, "x509") {
+			line = s.name + ` ERR Get "https://127.0.0.1:` + port + `/": tls: failed to verify certificate: ` + s.want
+		}
+		want.WriteString(line + "\n")
+	}
+	file := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(file, roots, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tlsBackends(t, "tls_line", `import std.requests as req
+
+def get(name: str, url: str) -> int:
+    match req.get(url, timeout_ms=5000):
+        Ok(r) -> print(name, r.status, r.body)
+        Err(m) -> print(name, "ERR", m)
+    return 0
+
+def main() -> int:
+`+calls.String()+`    return 0
+`)([]string{"SSL_CERT_FILE=" + file}, want.String())
 }
 
 // The native client speaks TLS as the VM does: 1.2 or later, and with a
