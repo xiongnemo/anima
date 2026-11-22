@@ -1469,6 +1469,8 @@ entity O:
 		{"cp = (p) => p with {t: 3}\n    q = cp(P(5, 1, \"a\"))", "entity P has no field \"t\""},
 		{"cp = (p) => p with {d: 3, d: 4}\n    q = cp(P(5, 1, \"a\"))", "field P.d is given twice"},
 		{"cp = (p) => p with {d: nope}", "undefined identifier \"nope\""},
+		{"cp = (ps) => (ps |> map((p) => p with {d: 3}))\n    g = (x) => cp([x])\n    qs = cp([5])", "'with' copies an entity with some fields replaced, got int"},
+		{"cp = (ps) => (ps |> map((p) => p with {d: 3}))\n    g = (x) => cp([x])\n    qs = cp([P(5, 1, \"a\")])\n    rs = g(P(5, 1, \"a\"))", ""},
 	}
 	for _, tc := range cases {
 		src := decls + "def main() -> int:\n    " + tc.body + "\n    return 0\n"

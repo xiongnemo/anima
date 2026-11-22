@@ -99,6 +99,7 @@ A lambda with parameters that is given a name (`g = (v) => v > 1`) has no declar
 
 - It takes the types of its **first use**, a call or a stage, and its body is checked with them.
 - Every later use gives it those types.
+- A use in the body of another named lambda, with a parameter of that one or something that holds it (`k = (v) => g([v])`), is not its first: it is checked when `k` is first used.
 - So the first use has to say them whole: `g(None)` or `g([])` first is refused. Use it first with a value of a declared type.
 - The name is only called or given to a stage (`xs |> filter(g)`), not stored, passed or assigned again.
 

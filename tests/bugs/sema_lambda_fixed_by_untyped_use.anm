@@ -1,0 +1,15 @@
+# BUG (sema soundness): a named lambda takes the types of its first use.
+# `w(Some(x))` in the body of k, where x has no type yet, was that use: w
+# took an Option of anything and gave one back, so b was an Option of
+# anything too. The VM divided by zero and the native program printed 0.
+def main() -> int:
+    w = (o) => o
+    k = (x) => w(Some(x))
+    a = w(Some(0))
+    b = w(Some("s"))
+    match b:
+        Some(v) ->
+            if v != 0:
+                print(10 / v)
+        None -> print("n")
+    return 0

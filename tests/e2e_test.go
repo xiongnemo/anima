@@ -249,6 +249,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_relation_given_an_int.anm", "field O.buyer expects A, got int"},
 		{"../tests/bugs/spark_entity_invariant_callers_variable.anm", "def:mk.construct_P_inv_1"},
 		{"../tests/bugs/sema_with_of_no_entity.anm", "'with' copies an entity with some fields replaced, got int"},
+		{"../tests/bugs/sema_lambda_fixed_by_untyped_use.anm", "w takes Option[int] where it is first used, got Option[str]"},
 	}
 
 	for _, tc := range cases {

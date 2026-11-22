@@ -3159,8 +3159,11 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 	if len(args) != len(nl.expr.Params) {
 		return nil, fmt.Errorf("%s: this function takes %s, got %d", span, plural(len(nl.expr.Params), "argument"), len(args))
 	}
+	// An argument made where another named lambda is written, of a
+	// parameter that has no type yet, says nothing of this one: `[x]` there
+	// would fix it as taking a list of anything, for every later use.
 	for _, a := range args {
-		if generic(a) {
+		if holdsGeneric(a) {
 			return UnknownType{Generic: true}, nil
 		}
 	}
@@ -3188,6 +3191,27 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 		}
 	}
 	return nl.ret, nil
+}
+
+// holdsGeneric reports whether t is, or has as a part, the type of a
+// parameter of a named lambda where the lambda is written.
+func holdsGeneric(t Type) bool {
+	switch x := t.(type) {
+	case UnknownType:
+		return x.Generic
+	case *ListType:
+		return holdsGeneric(x.Elem)
+	case *MapType:
+		return holdsGeneric(x.Key) || holdsGeneric(x.Val)
+	case *ADTType:
+		return slices.ContainsFunc(x.TypeArgs, holdsGeneric)
+	case *HandleType:
+		return x.Elem != nil && holdsGeneric(x.Elem)
+	case *FuncType:
+		return x.Return != nil && holdsGeneric(x.Return) ||
+			slices.ContainsFunc(x.Params, func(p FuncParamInfo) bool { return holdsGeneric(p.Type) })
+	}
+	return false
 }
 
 // hasGap reports whether t has a part no value has given a type: the
