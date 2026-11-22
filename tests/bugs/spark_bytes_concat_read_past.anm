@@ -1,0 +1,11 @@
+# Two views joined are as long as both, and no longer: with n == 0 this one
+# has two bytes, and the read of four runs past its end.
+import std.bytes as bytes
+
+def head(n: int[0..16]) -> int:
+    pkt = bytes.u16_be(1).concat(bytes.random(n))
+    return pkt.read_u32_be(0)
+
+def main() -> int:
+    print(head(0))
+    return 0

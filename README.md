@@ -96,7 +96,7 @@ The six programs the language is being built towards:
 | Program | Status |
 |---|---|
 | Concurrent HTTP server | done (`examples/concurrent_http.anm`) |
-| STUN NAT detection | in progress: bit operators are in, UDP sockets and byte building are next |
+| STUN NAT detection | in progress: bit operators, byte building and UDP sockets are in, the program is next |
 | Mini Redis, then Raft replication | not started |
 | DNS server | not started |
 | TFTP server | not started |

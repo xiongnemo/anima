@@ -1,0 +1,11 @@
+# bytes.u8 writes one byte, so a number past 255 has no place in it: both
+# backends would keep its low byte and say nothing. The kernel refuses the
+# call: value_bounds.
+import std.bytes as bytes
+
+def tag(n: int) -> bytes.ByteView:
+    return bytes.u8(n)
+
+def main() -> int:
+    print(tag(300).to_hex())
+    return 0

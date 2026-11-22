@@ -261,8 +261,10 @@ func sockRecvFrom(h *HandleValue, maxBytes int64, timeoutMs int) Value {
 	if err != nil {
 		return VErr(err.Error())
 	}
+	// Where it came from is an address and no more: the zone of an IPv6
+	// one is not said, as no socket is given a host with one.
 	_, v6 := udpWhere(h)
-	addr := from.Addr()
+	addr := from.Addr().WithZone("")
 	if !v6 {
 		addr = addr.Unmap()
 	}
@@ -270,7 +272,7 @@ func sockRecvFrom(h *HandleValue, maxBytes int64, timeoutMs int) Value {
 		TypeName: "Datagram",
 		Fields: map[string]Value{
 			"data": viewOf(append([]byte(nil), buf[:n]...)),
-			"host": VStr(addr.String()),
+			"host": VStr(addr.Unmap().String()),
 			"port": VInt(int64(from.Port())),
 			"ip":   viewOf(addr.AsSlice()),
 		},

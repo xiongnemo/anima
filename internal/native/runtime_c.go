@@ -2410,7 +2410,7 @@ static AnimaVal sock_connect_tcp(const char *host, int64_t port) {
     return v_ok(sock_handle(HDL_STREAM, fd, "tcp", true));
 }
 
-static AnimaVal hdl_listener_port(AnimaVal hv) {
+static AnimaVal hdl_sock_port(AnimaVal hv) {
     struct sockaddr_storage ss = {0};
     socklen_t len = sizeof(ss);
     getsockname(hv.u.hdl->fd, (struct sockaddr *)&ss, &len);
@@ -2575,28 +2575,21 @@ static AnimaVal hdl_udp_recv_from(AnimaVal hv, int64_t max_b, int64_t timeout_ms
             AnimaVal ent = v_entity_new("Datagram");
             v_entity_set(ent, "data", bytes_view(buf, (size_t)n));
             free(buf);
-            char host[INET6_ADDRSTRLEN + IF_NAMESIZE + 16] = {0};
+            // Where it came from is an address and no more: the zone of an
+            // IPv6 one is not said, as no socket is given a host with one.
+            char host[INET6_ADDRSTRLEN] = {0};
             if (ss.ss_family == AF_INET) {
                 struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
                 inet_ntop(AF_INET, &sa->sin_addr, host, sizeof(host));
-                v_entity_set(ent, "host", v_str(host));
                 v_entity_set(ent, "port", v_int(ntohs(sa->sin_port)));
                 v_entity_set(ent, "ip", bytes_view((const uint8_t *)&sa->sin_addr, 4));
             } else {
                 struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&ss;
-                // The text of the address is that of the socket's, less
-                // its port and the [ ] it may stand in.
-                char text[128];
-                sock_text(&ss, text, sizeof(text));
-                char *end = strrchr(text, ':');
-                if (end) *end = '\0';
-                size_t tl = strlen(text);
-                if (tl >= 2 && text[0] == '[' && text[tl - 1] == ']') { text[tl - 1] = '\0'; snprintf(host, sizeof(host), "%s", text + 1); }
-                else snprintf(host, sizeof(host), "%s", text);
-                v_entity_set(ent, "host", v_str(host));
+                ip6_text(sa->sin6_addr.s6_addr, host, sizeof(host));
                 v_entity_set(ent, "port", v_int(ntohs(sa->sin6_port)));
                 v_entity_set(ent, "ip", bytes_view(sa->sin6_addr.s6_addr, 16));
             }
+            v_entity_set(ent, "host", v_str(host));
             return v_ok(ent);
         }
         if (errno == EINTR) continue;

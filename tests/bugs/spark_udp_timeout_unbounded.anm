@@ -1,0 +1,15 @@
+# recv_from waits timeout_ms, and a wait is bounded: timeout_bounds.
+import std.socket as sock
+
+def wait(s: sock.UdpSocket, ms: int) -> int:
+    match s.recv_from(1500, timeout_ms=ms):
+        Ok(d) -> return d.data.len()
+        Err(e) -> return 0
+
+def main() -> int:
+    match sock.bind_udp("127.0.0.1", 0):
+        Ok(s) ->
+            print(wait(s, 100))
+            s.close()
+        Err(e) -> print(e)
+    return 0

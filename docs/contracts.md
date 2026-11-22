@@ -184,12 +184,16 @@ The length is known from:
 
 - `from_str` of a string (its bytes);
 - `from_hex` of a literal (an empty view when the literal is not pairs of hex digits);
+- `bytes.u8`, `u16_be`, `u32_be` (1, 2, 4) and `bytes.random(n)` (`n`);
+- `a.concat(b)` (the two lengths added);
 - another name for a view (`w = bv`, a field `p.body`);
 - a slice.
 
+It is not known of a view that a function returns (an `ensures` does not speak of `result.len()`), nor of the `data` and `ip` of a datagram, which are as long as their sender made them: those are read under a check, `if d.data.len() >= 20: ...`.
+
 `bv.slice(lo, hi)` is proved to have `0 <= lo <= hi <= bv.len()`, and is then `hi - lo` long. Both backends would bring ends outside the view inside it, and the program would go on with a shorter view than it asked for.
 
-A view that is not held by a variable or a field of one (`bv.slice(0, 2).read_u8(0)`, `vs[0]`) has to be given a name first, and so has the parameter of a lambda that the semantic checker has no type for.
+A view that is made where it is read needs no name: `bv.slice(0, 2).read_u8(0)`, `bytes.u16_be(k).concat(body).read_u8(2)`. An element of a list (`vs[0]`) has to be given a name and a check first, and so has the parameter of a lambda that the semantic checker has no type for.
 
 ## The solver
 

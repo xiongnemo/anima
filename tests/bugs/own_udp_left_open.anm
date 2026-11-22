@@ -1,0 +1,8 @@
+import std.socket as sock
+
+# The socket is bound and never closed.
+def main() -> int:
+    match sock.bind_udp("127.0.0.1", 0):
+        Ok(s) -> print(s.port())
+        Err(e) -> print(e)
+    return 0

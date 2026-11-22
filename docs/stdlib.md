@@ -58,8 +58,12 @@ A channel, a mutex and a future hold one type: [language.md](language.md#handles
 | `stream.send_text` | `text` |
 | `stream.recv_text` | `max_bytes?` |
 | `stream.close` | |
+| `sock.bind_udp` | `host`, `port` |
+| `udp.port`, `udp.close` | |
+| `udp.send_to` | `data`, `host`, `port` |
+| `udp.recv_from` | `max_bytes`, `timeout_ms=` |
 
-Every socket has one owner that closes it on every path; none is used after it is closed or moved, and a stream is not shared between threads: [ownership.md](ownership.md).
+Every socket has one owner that closes it on every path; none is used after it is closed or moved, and a stream or a UDP socket is not shared between threads: [ownership.md](ownership.md).
 
 - `host` is an IPv4 address (`127.0.0.1`), an IPv6 address written without brackets and without a zone (`::1`), or a name in ASCII. Only what Go's `netip.ParseAddr` takes is an address: `127.1` and `0x7f.0.0.1` are names no host has. Anything else is an `Err` and no socket is made: `listen tcp: missing host` (the empty text), `dial tcp: address ::1%lo: invalid host`, `... non-ASCII host name`, `listen tcp: lookup no.such.host: no such host`.
 - `port` is an `int[0..65535]`; the kernel proves the value in range (`port_bounds`), so a port that is computed needs a type or a check that says so. `listen_tcp` at port `0` listens at a port the system picks, which `listener.port()` gives as an `int[1..65535]`.
@@ -68,6 +72,36 @@ Every socket has one owner that closes it on every path; none is used after it i
 - `send_text` sends the whole text or is an `Err`; it and `recv_text` each wait five seconds at most (`read tcp 127.0.0.1:40000->127.0.0.1:8080: i/o timeout`). `accept` waits `timeout_ms`.
 - `recv_text` gives what has arrived, `max_bytes` of it at most: an `int[1..1_048_576]` the kernel proves in range (`max_bytes_bounds`), 4096 when left out. A peer that closed is `Err("EOF")`. What was received and holds a NUL byte is an `Err`, and is gone ([a `str` holds no NUL](#a-str-holds-no-nul)). It is cut by bytes, so a text may end in the middle of a character.
 - An `Err` is in Go's words on both backends: `listen tcp4 127.0.0.1:8080: bind: address already in use`, `accept tcp4 127.0.0.1:8080: i/o timeout`, `dial tcp 127.0.0.1:1: connect: connection refused`, `write tcp 127.0.0.1:40000->127.0.0.1:8080: write: broken pipe`, `read tcp ...: read: connection reset by peer`.
+
+### UDP
+
+```
+match sock.bind_udp("0.0.0.0", 0):
+    Ok(s) ->
+        match s.send_to(bytes.u16_be(1).concat(bytes.u16_be(0)), "192.0.2.7", 3478):
+            Ok(sent) ->
+                match s.recv_from(1500, timeout_ms=500):
+                    Ok(d) -> print(d.host, d.port, d.data.to_hex())
+                    Err(e) -> print(e)
+            Err(e) -> print(e)
+        s.close()
+    Err(e) -> print(e)
+```
+
+- `bind_udp` takes `host` and `port` as `listen_tcp` does, and the socket is at the one address its host is: `0.0.0.0` hears every IPv4 address of the machine, `::` every IPv6 one and not the IPv4 ones too. At port `0` it is at a port the system picks, which `udp.port()` gives as an `int[1..65535]`. The address of a group is not bound at: `listen udp4 224.0.0.1:0: multicast address`.
+- `send_to` sends the bytes of `data`, a `ByteView` that may be empty, as one datagram, and gives how many they were. `port` is an `int[1..65535]` the kernel proves in range (`port_bounds`). `host` is an address of the family the socket is of, or a name, which is sent to at its first address of that family: an IPv4 socket does not send to `::1` (`write udp4 127.0.0.1:40000: address ::1: non-IPv4 address`), nor an IPv6 one to `127.0.0.1` or `::ffff:127.0.0.1`. What is too long for one datagram is an `Err` (`... sendto: message too long`), as is what the system does not send. It waits five seconds at most.
+- `recv_from` waits `timeout_ms` for one datagram (`read udp4 127.0.0.1:40000: i/o timeout`) and gives a `sock.Datagram`. `max_bytes` is an `int[1..65535]` the kernel proves in range (`max_bytes_bounds`); what a datagram has past it is lost, and nothing says so, so only with `65535` is every datagram whole.
+- A `sock.Datagram` is an entity:
+
+| Field | Type | |
+|---|---|---|
+| `data` | `bytes.ByteView` | what was sent, which may be nothing: a read of it is proved under a check of `d.data.len()` |
+| `host` | `str` | the address it came from, as text, without the zone of an IPv6 one |
+| `port` | `int[0..65535]` | the port it came from; a datagram may say `0`, which is not sent to, so an answer is sent under `d.port > 0` |
+| `ip` | `bytes.ByteView` | the 4 bytes of that address on an IPv4 socket, the 16 on an IPv6 one |
+
+- A host with a zone is none to a socket, so a datagram from a link-local IPv6 address of another machine is heard and its answer is an `Err` of the system.
+- UDP says nothing of a datagram that did not arrive: `send_to` is `Ok` when the system took it.
 
 ## `std.requests`
 
@@ -150,11 +184,21 @@ Without a type, `json.decode` gives the value of the text, whatever it is: `null
 | `bv.len` | |
 | `bv.read_u8`, `bv.read_u16_be`, `bv.read_u32_be` | `offset` |
 | `bv.slice` | `lo`, `hi` |
+| `bytes.u8`, `bytes.u16_be`, `bytes.u32_be` | `value` |
+| `bytes.random` | `n` |
+| `bv.concat` | `other` |
+| `bv.to_hex` | |
 | `crypto.sha256` | `text` |
 | `crypto.hmac_sha256` | `key`, `text` |
 | `crypto.constant_time_eq` | `a`, `b` |
 
 Every read of a `ByteView` and every slice is proved inside the view: [contracts.md](contracts.md#byte-views).
+
+- A `ByteView` never changes. `bytes.u8(v)`, `u16_be(v)` and `u32_be(v)` are the 1, 2 and 4 bytes of `v`, the highest first, and `a.concat(b)` is a new view of the bytes of `a` and then those of `b`: a message is built by joining its parts.
+- `value` is proved to fit (`value_bounds`): an `int[0..255]`, `int[0..65535]`, `int[0..4_294_967_295]`. Both backends would keep the low bytes of a larger number and say nothing.
+- `bytes.random(n)` is `n` bytes from the system's source of random bytes, `n` an `int[0..65536]` proved in range (`n_bounds`). They are what no run and neither backend gives twice: a transaction id, not a value a test compares.
+- `bv.to_hex()` is the text `from_hex` reads back, in lower case.
+- Two views are equal (`==`, `!=`, `in`) when they hold the same bytes, whatever made them; they are not ordered and are not the key of a map. The text of a view is that of a handle (`<handle:9>`) and `json.encode` writes it as `null`: `to_hex` is its text.
 
 ## `std.fs`, `std.cli`, `std.time`
 

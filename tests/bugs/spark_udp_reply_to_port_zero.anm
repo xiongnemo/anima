@@ -1,0 +1,19 @@
+# A datagram may say that it came from port 0, and nothing is sent to that
+# port: the answer is sent under a check of d.port. port_bounds.
+import std.socket as sock
+
+def echo(s: sock.UdpSocket) -> int:
+    match s.recv_from(1500, timeout_ms=100):
+        Ok(d) ->
+            match s.send_to(d.data, d.host, d.port):
+                Ok(n) -> return n
+                Err(e) -> return 0
+        Err(e) -> return 0
+
+def main() -> int:
+    match sock.bind_udp("127.0.0.1", 0):
+        Ok(s) ->
+            print(echo(s))
+            s.close()
+        Err(e) -> print(e)
+    return 0

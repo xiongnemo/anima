@@ -136,8 +136,8 @@ func Verify(info *sema.ProgramInfo) *Report {
 // Linear Resource Ownership & Typestate Verifier (Sockets, Files, Ports)
 // ---------------------------------------------------------------------------
 //
-// Every linear handle (sock.TcpStream, sock.TcpListener, fs.File,
-// conc.ThreadPool) has exactly one owner. The checker is modular: a function is checked against its own
+// Every linear handle (sock.TcpStream, sock.TcpListener, sock.UdpSocket,
+// fs.File, conc.ThreadPool) has exactly one owner. The checker is modular: a function is checked against its own
 // signature and the signatures of the functions it calls.
 //
 //   - A handle parameter is borrowed unless declared `own`. A borrowed handle

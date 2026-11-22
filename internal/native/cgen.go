@@ -1711,7 +1711,7 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 	case "len":
 		return fmt.Sprintf("v_int(anima_len(%s))", recv)
 	case "port":
-		return fmt.Sprintf("hdl_listener_port(%s)", recv)
+		return fmt.Sprintf("hdl_sock_port(%s)", recv)
 	case "accept":
 		return fmt.Sprintf("hdl_listener_accept(%s, (%s).u.i)", recv, timeoutArg)
 	case "send_text":
