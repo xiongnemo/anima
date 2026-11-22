@@ -1,0 +1,8 @@
+# A shift moves the bits by 0 to 63 places, and nothing says that n is one
+# of those: both backends stop the program on any other count.
+def field(word: int[0..65535], n: int) -> int:
+    return word >> n & 0xFF
+
+def main() -> int:
+    print(field(4660, 64))
+    return 0

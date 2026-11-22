@@ -18,6 +18,7 @@ A verified program does the same on both backends. Tests run one source on both 
 
 - Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`).
 - A division or modulo by zero, which no verified program reaches, stops a native program with the VM's message and exit code 1 rather than a signal.
+- `&`, `|`, `^`, `<<`, `>>` and `~` are those of a two's-complement int64: `>>` brings the sign in, in C too, where the standard leaves that open. A shift by a count outside `0..63`, which no verified program reaches, stops both with the same message.
 - The HTTP client reads an answer as Go's `net/http` does, well formed or not: the same status and body, or an `Err` with the same words. A chunked body is decoded, a body is exactly as long as its `Content-Length` (`unexpected EOF` when the server stops short), 204 and 304 have none, a 1xx answer is passed over, and `timeout_ms` is for the whole request, not for each read. Neither follows a redirect, decompresses a body or uses a connection twice: [stdlib.md](stdlib.md#stdrequests). A test gives both the same answers, listed and changed at random, whole and in pieces (`TestE2EHTTPAnswerParity`).
 - No `str` holds a NUL byte, and a text read from outside that holds one is refused the same way: [stdlib.md](stdlib.md#a-str-holds-no-nul).
 - A request is sent whole, whatever the length of its body.
@@ -37,7 +38,7 @@ Known differences, none of which a kernel relies on:
 - A few certificates the VM takes and the native client refuses, none the other way round in what was tried: one whose name is a `*` right under a top-level name (`*.test`), one with a `*` before a label that has a `_` (`*.a_b.test`), one whose name is written with a dot at its end, one with an RSA key of 1024 bits in it or in an authority above it (`EE certificate key too weak`; what is too weak is the system's OpenSSL setting), one whose extended key usage, or an authority's, is `any` rather than server authentication, one whose key usage does not let it sign a handshake, and, with OpenSSL 3.0.2, one with no subject that is itself among the authorities after two or more others. In `SSL_CERT_DIR` the VM reads every file, the native client the ones named by their hash (as `c_rehash` names them).
 - Which address of a name is dialed first: each backend asks its own resolver (the VM Go's, the native client the system's `getaddrinfo`), and the two may order the addresses differently, or find different ones where the system's lookup is set up in a way Go's does not read. With one address, or with the same order, the two do the same.
 - A server that answers and closes before it has read the whole request: the VM gives an `Err` or the answer, depending on timing; the native client gives the answer.
-- `+`, `-` and `*` are proved not to overflow, so what each backend would do on overflow is never reached; the two have not been compared there.
+- `+`, `-`, `*` and `<<` are proved not to overflow, so what each backend would do on overflow is never reached; the two have not been compared there.
 
 ## The studio
 

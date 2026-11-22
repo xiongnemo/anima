@@ -1095,6 +1095,9 @@ func (g *cgen) emitExprInline(expr ast.Expr) string {
 		if e.Op == "-" {
 			return fmt.Sprintf("v_int(-(%s).u.i)", inner)
 		}
+		if e.Op == "~" {
+			return fmt.Sprintf("v_int(~(%s).u.i)", inner)
+		}
 		if e.Op == "not" {
 			return fmt.Sprintf("v_bool(!v_truthy(%s))", inner)
 		}
@@ -1151,6 +1154,12 @@ func (g *cgen) emitExprInline(expr ast.Expr) string {
 			return fmt.Sprintf("v_bool(v_order(%s, %s) %s 0)", l, r, e.Op)
 		case "in":
 			return fmt.Sprintf("v_bool(v_in(%s, %s))", l, r)
+		case "&", "|", "^":
+			return fmt.Sprintf("v_int((%s).u.i %s (%s).u.i)", l, e.Op, r)
+		case "<<":
+			return fmt.Sprintf("v_shl(%s, %s, %d)", l, r, e.Span.Line)
+		case ">>":
+			return fmt.Sprintf("v_shr(%s, %s, %d)", l, r, e.Span.Line)
 		}
 	case *ast.ListLit:
 		if len(e.Elems) == 0 {

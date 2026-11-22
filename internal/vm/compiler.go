@@ -949,10 +949,15 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 		if err := f.compileExpr(e.Expr); err != nil {
 			return err
 		}
-		if e.Op == "-" {
+		switch e.Op {
+		case "-":
 			f.emit(EncodeImm(OpNeg, 0), e.Span.Line)
-		} else if e.Op == "not" {
+		case "~":
+			f.emit(EncodeImm(OpBitNot, 0), e.Span.Line)
+		case "not":
 			f.emit(EncodeImm(OpNot, 0), e.Span.Line)
+		default:
+			return fmt.Errorf("%s: no code for the operator %q", e.Span, e.Op)
 		}
 	case *ast.BinaryExpr:
 		if e.Op == "and" {
@@ -1026,6 +1031,18 @@ func (f *fnCompiler) compileExpr(expr ast.Expr) error {
 			f.emit(EncodeImm(OpGe, 0), e.Span.Line)
 		case "in":
 			f.emit(EncodeImm(OpIn, 0), e.Span.Line)
+		case "&":
+			f.emit(EncodeImm(OpBitAnd, 0), e.Span.Line)
+		case "|":
+			f.emit(EncodeImm(OpBitOr, 0), e.Span.Line)
+		case "^":
+			f.emit(EncodeImm(OpBitXor, 0), e.Span.Line)
+		case "<<":
+			f.emit(EncodeImm(OpShl, 0), e.Span.Line)
+		case ">>":
+			f.emit(EncodeImm(OpShr, 0), e.Span.Line)
+		default:
+			return fmt.Errorf("%s: no code for the operator %q", e.Span, e.Op)
 		}
 	case *ast.ListLit:
 		for _, el := range e.Elems {

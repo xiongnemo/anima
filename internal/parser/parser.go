@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -2378,7 +2379,7 @@ func (p *Parser) parseRange() (ast.Expr, error) {
 }
 
 func (p *Parser) parseWith() (ast.Expr, error) {
-	left, err := p.parseAdd()
+	left, err := p.parseBits(0)
 	if err != nil {
 		return nil, err
 	}
@@ -2409,6 +2410,35 @@ func (p *Parser) parseWith() (ast.Expr, error) {
 			return nil, err
 		}
 		return &ast.WithExpr{Span: tok.Span, Base: left, Fields: fields}, nil
+	}
+	return left, nil
+}
+
+// bitLevels are the operators on the bits of an int, loosest first, as in
+// Python: `a | b ^ c & d << 1 + 2` is `a | (b ^ (c & (d << (1 + 2))))`, and
+// all of them bind tighter than a comparison.
+var bitLevels = [][]lexer.TokenKind{
+	{lexer.TokBar},
+	{lexer.TokCaret},
+	{lexer.TokAmp},
+	{lexer.TokShl, lexer.TokShr},
+}
+
+func (p *Parser) parseBits(level int) (ast.Expr, error) {
+	if level == len(bitLevels) {
+		return p.parseAdd()
+	}
+	left, err := p.parseBits(level + 1)
+	if err != nil {
+		return nil, err
+	}
+	for slices.Contains(bitLevels[level], p.cur().Kind) {
+		tok := p.advance()
+		right, err := p.parseBits(level + 1)
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpr{Span: tok.Span, Op: tok.Text, Left: left, Right: right}
 	}
 	return left, nil
 }
@@ -2453,6 +2483,14 @@ func (p *Parser) parseUnary() (ast.Expr, error) {
 			return nil, err
 		}
 		return &ast.UnaryExpr{Span: tok.Span, Op: "-", Expr: inner}, nil
+	}
+	if p.at(lexer.TokTilde) {
+		tok := p.advance()
+		inner, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.UnaryExpr{Span: tok.Span, Op: "~", Expr: inner}, nil
 	}
 	return p.parsePostfix()
 }

@@ -51,6 +51,8 @@ A `workflow` takes part in a composition through its `sync` operations (`sync Va
 
 Composition is the `||` of FSP, with relabelling, hiding (`hide:`) and action priority (`priority_low:`).
 
+The guards and the assignments of a `monitor` are not run by either backend; this kernel works them out, over the values its control variables can take. The contract kernel proves of each of them what it proves of a function's: no overflow, no division by zero, no shift by a count outside `0..63`.
+
 A failed check gives a trace to the violation. `anima check --save-cex trace.json` saves it, and `anima run --replay trace.json` replays it on the VM.
 
 ## Export

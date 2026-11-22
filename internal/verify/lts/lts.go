@@ -917,6 +917,9 @@ func evalConstInt(expr ast.Expr, env map[string]int64) int64 {
 		if e.Op == "-" {
 			return -evalConstInt(e.Expr, env)
 		}
+		if e.Op == "~" {
+			return ^evalConstInt(e.Expr, env)
+		}
 	case *ast.BinaryExpr:
 		l := evalConstInt(e.Left, env)
 		r := evalConstInt(e.Right, env)
@@ -934,6 +937,20 @@ func evalConstInt(expr ast.Expr, env map[string]int64) int64 {
 		case "%":
 			if r != 0 {
 				return l % r
+			}
+		case "&":
+			return l & r
+		case "|":
+			return l | r
+		case "^":
+			return l ^ r
+		case "<<":
+			if r >= 0 && r <= 63 {
+				return l << uint(r)
+			}
+		case ">>":
+			if r >= 0 && r <= 63 {
+				return l >> uint(r)
 			}
 		}
 	}

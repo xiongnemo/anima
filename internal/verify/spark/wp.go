@@ -531,6 +531,8 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 
 // verifyEntityInvariantArith checks the arithmetic of each invariant under the field types
 // and the invariants before it, which is the order the runtime short-circuits them in.
+// json.decode runs an invariant on fields nothing else is known of, so a divisor or a
+// shift count in one is proved from the field types alone.
 func (v *verifier) verifyEntityInvariantArith(ent *ast.EntityDecl) {
 	et := v.info.Entities[ent.Name]
 	if et == nil {
@@ -543,6 +545,7 @@ func (v *verifier) verifyEntityInvariantArith(ent *ast.EntityDecl) {
 	}
 	for _, inv := range et.Invariants {
 		v.checkArith(inv, env, scope)
+		v.evalSideEffects(inv, env, scope)
 		env.assume(v.evalBool(inv, env, scope))
 	}
 }
@@ -600,6 +603,9 @@ func (v *verifier) verifyMachine(m *ast.MachineDecl) {
 			}
 			if tr.Guard != nil {
 				v.checkArith(tr.Guard, tEnv, scope)
+				// A guard is not run, but the LTS kernel gives a division by
+				// zero and a shift by a count no backend takes the value 0.
+				v.evalSideEffects(tr.Guard, tEnv, scope)
 				tEnv.assume(v.evalBool(tr.Guard, tEnv, scope))
 			}
 			for _, bs := range tr.Body {
@@ -1641,6 +1647,9 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			den := v.evalInt(e.Right, env, scope, true)
 			v.prove(scope+".div_nonzero", scope, e.Span, env, smt.Neq(den, smt.Const(0)))
 		}
+		if isShift(e.Op) {
+			v.proveShiftCount(e, v.evalInt(e.Right, env, scope, true), env, scope)
+		}
 	case *ast.IndexExpr:
 		v.evalSideEffects(e.List, env, scope)
 		v.evalSideEffects(e.Index, env, scope)
@@ -1897,6 +1906,15 @@ func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
 			num := v.evalInt(e.Left, env, scope, false)
 			den := v.evalInt(e.Right, env, scope, false)
 			v.proveArith(e, env, scope, smt.Or(smt.FitsInt64(num.Scale(-1)), smt.Neq(den, smt.Const(-1))))
+		case "<<":
+			v.checkArith(e.Right, env, scope)
+			// The bits shifted out are lost on both backends: x << n is
+			// x * 2^n only while that is an int64.
+			if why := v.shiftUnbounded(e, env, scope); why != "" {
+				v.record(scope+".int64_overflow", scope, v.arithSpan(e), "shift fits in 64 bits", VCUnknown, why, nil)
+				break
+			}
+			v.proveFitsInt64(e, env, scope)
 		default:
 			v.checkArith(e.Right, env, scope)
 		}
@@ -2501,9 +2519,18 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 		if e.Op == "-" {
 			return v.evalInt(e.Expr, env, scope, emitVCs).Scale(-1)
 		}
+		if e.Op == "~" {
+			return complement(v.evalInt(e.Expr, env, scope, emitVCs))
+		}
 	case *ast.BinaryExpr:
 		l := v.evalInt(e.Left, env, scope, emitVCs)
 		r := v.evalInt(e.Right, env, scope, emitVCs)
+		if isBitOp(e.Op) {
+			if emitVCs && isShift(e.Op) {
+				v.proveShiftCount(e, r, env, scope)
+			}
+			return v.evalBits(e, l, r, env)
+		}
 		switch e.Op {
 		case "+":
 			return l.Add(r)

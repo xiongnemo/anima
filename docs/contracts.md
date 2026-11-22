@@ -24,6 +24,33 @@ Contents: [Contracts](#contracts) · [Integers and overflow](#integers-and-overf
 - Only `fold(init, (a, x) => a + x)` is bounded as a sum.
 - Every length, of a view, a list or a string, is known to fit an int64, so `n <= len(xs) - 4` is arithmetic the kernel can follow. (`n + 4 <= len(xs)` is not: `n + 4` may overflow.)
 
+## Bit operators
+
+An `int` is 64 bits in two's complement, on both backends: `-1` is all ones, `x >> n` brings the sign in from the left (it is the floor of `x / 2^n`, also for a negative `x`), and `~x` is `-x - 1`.
+
+Two things are proved of every shift:
+
+- `shift_count`: the count is in `0..63`. Both backends stop the program on any other count, as they do on a division by zero.
+- `int64_overflow`, for `<<` only: no bit is shifted out, that is, `x << n` is `x * 2^n` and that is an int64. A shift by a count that is not a constant needs a range on both operands, like a product. `>>` and `&`, `|`, `^`, `~` cannot overflow.
+
+What the kernel knows of a result:
+
+| Expression | Known |
+|---|---|
+| `x << n`, `n` a constant | exactly `x * 2^n` |
+| `x >> n`, `n` a constant | `r` with `r * 2^n <= x <= r * 2^n + 2^n - 1` |
+| `~x` | exactly `-x - 1` |
+| `x & y`, one side not negative | `0 <= r`, and `r <=` that side: `x & 0xFF` is in `0..255` whatever `x` is |
+| `x & y`, both negative | `r < 0`, `r <= x`, `r <= y` |
+| `x \| y`, neither negative | `x <= r`, `y <= r`, `r <= x + y`, and `r` has no bit above the highest bit of the larger upper bound |
+| `x \| y`, one side negative | `r < 0`, and `r >=` that side |
+| `x ^ y`, neither negative | `0 <= r <= x + y`, `r >= x - y`, `r >= y - x`, and the same highest bit as for `\|` |
+| `x ^ y`, other signs | the sign of `r` |
+| `x << n`, `x >> n`, `n` not a constant | a range, from the ranges of `x` and `n` |
+| two constants | the value |
+
+That is enough for `hi << 8 | lo` to be in `0..65535` when `hi` and `lo` are bytes, and for `x >> 8 & 0xFF` to be a byte. It is not the value: of `x & 1 == 1` the kernel does not know that `x` is odd, `(x | 1) != 0` is not proved for an `x` whose sign is not known, and `x & 15` written twice is two numbers of which only the ranges are known, so `ensures: result == x & 15` is not proved. Use `%` and `/` where the value is needed.
+
 ## What is known after a statement
 
 - **Assignment.** An assignment replaces everything known about the variable. An entity or list the prover cannot follow becomes an arbitrary value of its type.
@@ -48,6 +75,8 @@ A function may break an entity's `invariant` between two field updates, but the 
 - as an element or field of another value.
 
 That is what lets a function assume the invariants of its parameters, of list elements and of matched payloads.
+
+An invariant is also run: `json.decode[E]` evaluates each one, in the order they are written, on the fields a text holds. So where the entity is declared, the arithmetic of an invariant is proved from the field types and the invariants written before it alone: no `+`, `-`, `*` or `<<` overflows, no divisor is zero, and every shift count is in `0..63`. `invariant: total / per <= 100` with `per: int[0..10]` is refused (`div_nonzero`); write `per != 0 implies total / per <= 100`, or give `per` the type `int[1..10]`.
 
 Where an entity is made (`Account(balance=b, frozen=f)`), its invariants and the ranges of its fields are proved of the arguments, each field standing for the argument it is given. A variable of the function that happens to be named like a field is not that field, and an argument the kernel cannot follow (a call, a nested constructor) is an arbitrary value of its type.
 
