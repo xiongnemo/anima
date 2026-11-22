@@ -1,0 +1,12 @@
+# BUG (sema/SPARK soundness): sema and the contract kernel took `len(xs)`
+# for the built-in, so `xs[len(xs) - 1]` was proved in bounds, while both
+# backends called this `def len`: i was 6, and xs[6] printed None. A
+# function cannot be named like a built-in that is called by its name.
+def len(xs: list[int]) -> int:
+    return 7
+
+def main() -> int:
+    xs = [1, 2]
+    i = len(xs) - 1
+    print(xs[i])
+    return 0

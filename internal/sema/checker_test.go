@@ -729,6 +729,86 @@ def f(xs: list[int]) -> int:
 	}
 }
 
+// A name is declared once. Sema, the kernels and the two backends each look
+// a name up in their own way. They disagreed on a function or variant named
+// like a built-in and on two parameters of one name; two fields or two
+// lambda parameters of one name failed the native build; of two steps of
+// one name the first was dropped unreported. The other cases here were
+// rejected later, by a kernel, or one declaration silently hid the other.
+func TestSemaANameIsDeclaredOnce(t *testing.T) {
+	main := "\ndef main() -> int:\n    return 0\n"
+	cases := []struct{ src, want string }{
+		// What is called: a function, an entity, a variant, a built-in.
+		{"def len(xs: list[int]) -> int:\n    return 7\n", "len is declared as a function, and is already a built-in"},
+		{"def str(x: int) -> int:\n    return 0\n", "str is declared as a function, and is already a built-in"},
+		{"def abs(x: int) -> int:\n    return 0\n", "abs is declared as a function, and is already a built-in"},
+		{"def Some(x: int) -> int:\n    return 0\n", "Some is declared as a function, and is already a built-in"},
+		{"def f() -> int:\n    return 0\n\ndef f() -> int[1..9]:\n    return 5\n", "f is declared as a function, and is already a function"},
+		{"entity f:\n    d: int\n\ndef f(d: int) -> int:\n    return 3\n", "f is declared as a function, and is already an entity"},
+		{"def f(d: int) -> int:\n    return 3\n\nentity f:\n    d: int\n", "f is declared as an entity, and is already a function"},
+		{"type T = F(n: int) | Other\n\ndef F(n: int) -> int:\n    return 3\n", "F is declared as a function, and is already a variant of T"},
+		{"type A = X(d: int[1..9]) | Y\ntype B = X(d: int) | Z\n", "X is declared as a variant of B, and is already a variant of A"},
+		{"type T = Some(s: str) | Nope\n", "Some is declared as a variant of T, and is already a built-in"},
+		{"type T = len(n: int) | Other\n", "len is declared as a variant of T, and is already a built-in"},
+		{"type T = take(n: int) | Other\n", "take is declared as a variant of T, and is already a built-in"},
+		{"entity len:\n    n: int\n", "len is declared as an entity, and is already a built-in"},
+		{"entity Ok:\n    n: int\n", "Ok is declared as an entity, and is already a built-in"},
+		// A function may be named like a pipeline stage, once.
+		{"def take(xs: list[int], n: int) -> int:\n    return n\n", ""},
+		{"def take(xs: list[int], n: int) -> int:\n    return n\n\ndef take(xs: list[int], n: int) -> int:\n    return 0\n", "take is declared as a function, and is already a function"},
+		// Types.
+		{"type D = int[1..9]\ntype D = int\n", "D is declared as a type, and is already a type"},
+		{"entity P:\n    d: int\n\nentity P:\n    d: int[1..9]\n", "P is declared as an entity, and is already an entity"},
+		{"type P = int\n\nentity P:\n    d: int\n", "P is declared as an entity, and is already a type"},
+		{"type int = int[1..9]\n", "int is declared as a type, and is already a built-in type"},
+		{"type list = int\n", "list is declared as a type, and is already a built-in type"},
+		{"entity Option:\n    d: int\n", "Option is declared as an entity, and is already a built-in type"},
+		// Models.
+		{"workflow W() -> int:\n    start -> a\n    step a -> done:\n        return 5\n\nworkflow W() -> int:\n    start -> a\n    step a -> done:\n        return 0\n", "W is declared as a workflow, and is already a workflow"},
+		// A workflow and a function are named apart: `run_workflow W()`.
+		{"workflow W() -> int:\n    start -> a\n    step a -> done:\n        return 5\n\ndef W() -> int:\n    return 0\n", ""},
+		// What a declaration names within itself.
+		{"def f(a: int, a: int[1..9]) -> int:\n    return 10 / a\n", "f has two parameters named a"},
+		{"workflow W(n: int, n: int[1..9]) -> int:\n    start -> a\n    step a -> done:\n        return 10 / n\n", "W has two parameters named n"},
+		{"entity P:\n    d: int\n    d: int[1..9]\n", "P has two fields named d"},
+		{"type S = C(r: int[1..9], r: int) | D\n", "C has two fields named r"},
+		{"port Log:\n    extern def put(n: int)\n    extern def put(s: str)\n", "Log has two extern functions named put"},
+		{"port Log:\n    extern def put(n: int, n: int)\n", "Log.put has two parameters named n"},
+		{"workflow W() -> int:\n    start -> a\n    step a -> b:\n        print(1)\n    step b -> done:\n        return 0\n    step a -> b:\n        print(2)\n", "W has two nodes named a"},
+		{"def g() -> int:\n    h = (x, x) => x\n    return 0\n", "a lambda has two parameters named x"},
+		{"property P:\n    state A:\n        on go -> B\n    state B:\n        on stop -> A\n    state B:\n        on go -> B\n", "P has two states named B"},
+		{"machine M:\n    state A:\n        on go -> A\n    state A:\n        on stop -> A\n", "M has two states named A"},
+		{"monitor M:\n    n: control int[0..1] = 0\n    n: control int[0..1] = 1\n\n    state A:\n        on go -> A\n", "M has two control variables named n"},
+		{"port Log:\n    protocol:\n        state Closed:\n            on open_log -> Open\n        state Open:\n            on close_log -> Closed\n        state Open:\n            on open_log -> Open\n    extern def open_log()\n    extern def close_log()\n", "Log has two states named Open"},
+		{"workflow W() -> int:\n    pool slot: int[0..2] = 2\n    pool slot: int[0..1] = 1\n\n    start -> a\n    step a -> done:\n        return 0\n", "W has two pools named slot"},
+		{"machine M:\n    state A:\n        on go -> A\n\nsystem S:\n    compose:\n        m: M\n        m: M\n    check:\n        deadlock_free\n", "S has two parts named m"},
+		{"machine M:\n    state A:\n        on go -> A\n\nmachine M:\n    state A:\n        on stop -> A\n", "M is declared as a machine, and is already a machine"},
+		{"property P:\n    state A:\n        on go -> A\n\nproperty P:\n    state A:\n        on stop -> A\n", "P is declared as a property, and is already a property"},
+		{"workflow W() -> int:\n    start -> f\n    fork f:\n        branch a:\n            step one\n        branch a:\n            step two\n    join j\n    step s after j -> done:\n        return 0\n", "f has two branches named a"},
+		{"type S = C(a: int, b: int) | D\n\ndef g(s: S) -> int:\n    match s:\n        C(r, r) -> return r\n        D -> return 0\n", "a pattern has two bindings named r"},
+		{"def g(o: Option[Option[int]]) -> int:\n    match o:\n        Some(Some(v)) -> return v\n        Some(None) -> return 1\n        None -> return 0\n", ""},
+		// One name in two patterns, two lambdas, two functions is not twice.
+		{"type S = C(a: int, b: int) | D(a: int)\n\ndef g(s: S, a: int) -> int:\n    h = (x) => x\n    k = (x) => x\n    match s:\n        C(r, q) -> return r\n        D(r) -> return r\n\ndef g2(s: S, a: int) -> int:\n    return a\n", ""},
+	}
+	for _, tc := range cases {
+		src := tc.src
+		if !strings.Contains(src, "def main()") {
+			src += main
+		}
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.src, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.src, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.src, tc.want, err)
+		}
+	}
+}
+
 // The backends give a workflow its arguments by position, so a keyword
 // argument has to name the parameter at its place.
 func TestSemaWorkflowArgumentsInOrder(t *testing.T) {

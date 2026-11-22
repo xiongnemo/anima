@@ -235,6 +235,12 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/petri_choice_join_deadlock.anm", "OPTION TO COMPLETE"},
 		{"../tests/bugs/petri_pool_leak.anm", "IMPROPER COMPLETION"},
 		{"../tests/bugs/requests_missing_timeout.anm", "timeout_ms"},
+		{"../tests/bugs/sema_function_named_like_len.anm", "len is declared as a function, and is already a built-in"},
+		{"../tests/bugs/sema_function_named_like_str.anm", "str is declared as a function, and is already a built-in"},
+		{"../tests/bugs/sema_two_parameters_one_name.anm", "f has two parameters named a"},
+		{"../tests/bugs/sema_two_workflow_parameters_one_name.anm", "W has two parameters named n"},
+		{"../tests/bugs/sema_two_steps_one_name.anm", "W has two nodes named a"},
+		{"../tests/bugs/lts_two_states_one_name.anm", "OpenOnce has two states named Opened"},
 	}
 
 	for _, tc := range cases {

@@ -242,8 +242,215 @@ func (c *checker) registerBuiltins() {
 	c.info.Types["bytes.ByteView"] = &HandleType{Name: "bytes.ByteView"}
 }
 
+// once is the names declared so far in one place: the parameters of a
+// function, the fields of an entity. Of two parameters of one name the VM
+// bound the first and sema typed the last, and the native build failed.
+type once struct {
+	what, of string
+	seen     map[string]bool
+}
+
+func newOnce(what, of string) *once { return &once{what: what, of: of, seen: map[string]bool{}} }
+
+func (o *once) add(name string, span ast.Span) error {
+	if o.seen[name] {
+		return fmt.Errorf("%s: %s has two %s named %s: a name is declared once", span, o.of, o.what, name)
+	}
+	o.seen[name] = true
+	return nil
+}
+
+// patternNames adds the names pat binds to seen.
+func patternNames(pat ast.Pattern, seen *once) error {
+	switch p := pat.(type) {
+	case *ast.VarPat:
+		return seen.add(p.Name, p.Span)
+	case *ast.VariantPat:
+		for _, f := range p.Fields {
+			if err := patternNames(f, seen); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkNames says a name is declared once. Each part of the toolchain looks
+// a name up in its own way: sema took `len(xs)` for the built-in while both
+// backends called the program's `def len`, and of an entity and a function
+// of one name the function could never be called, unreported. So a name
+// means one thing: what is called (a function, an entity,
+// a variant, a built-in) shares one set of names, types share another, and
+// so does each kind of model.
+func (c *checker) checkNames() error {
+	called := map[string]string{}
+	for n := range builtinCallables {
+		called[n] = "a built-in"
+	}
+	// A pipeline stage is the one built-in a function may be named like:
+	// `xs |> take(2)` is then a call of that function, to sema, the
+	// kernels and both backends.
+	stage := func(name, what string) bool {
+		return what == "a function" && called[name] == "a built-in" && !calledByName[name]
+	}
+	for n := range c.info.Variants {
+		called[n] = "a built-in variant"
+	}
+	types := map[string]string{"list": "a built-in type", "map": "a built-in type", "Channel": "a built-in type", "Mutex": "a built-in type", "Future": "a built-in type"}
+	for n := range c.info.Types {
+		types[n] = "a built-in type"
+	}
+	kinds := map[string]map[string]string{}
+	declare := func(in map[string]string, name, what string, span ast.Span) error {
+		if was, ok := in[name]; ok && !stage(name, what) {
+			return fmt.Errorf("%s: %s is declared as %s, and is already %s: a name is declared once", span, name, what, was)
+		}
+		in[name] = what
+		return nil
+	}
+	model := func(kind, name string, span ast.Span) error {
+		if kinds[kind] == nil {
+			kinds[kind] = map[string]string{}
+		}
+		return declare(kinds[kind], name, "a "+kind, span)
+	}
+	params := func(of string, ps []ast.Param) error {
+		seen := newOnce("parameters", of)
+		for _, p := range ps {
+			if err := seen.add(p.Name, p.Span); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Of two states of one name the model kept the last, so a property
+	// could be weakened by a second state the reader never reaches.
+	states := func(of string, sts []ast.StateDecl) error {
+		seen := newOnce("states", of)
+		for _, st := range sts {
+			if err := seen.add(st.Name, st.Span); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, d := range c.info.Program.Decls {
+		var err error
+		switch node := d.(type) {
+		case *ast.FuncDecl:
+			if err = declare(called, node.Name, "a function", node.Span); err == nil {
+				err = params(node.Name, node.Params)
+			}
+		case *ast.EntityDecl:
+			if err = declare(called, node.Name, "an entity", node.Span); err == nil {
+				err = declare(types, node.Name, "an entity", node.Span)
+			}
+			seen := newOnce("fields", node.Name)
+			for _, f := range node.Fields {
+				if err == nil {
+					err = seen.add(f.Name, f.Span)
+				}
+			}
+		case *ast.TypeDecl:
+			err = declare(types, node.Name, "a type", node.Span)
+			for _, v := range node.Variants {
+				if err == nil {
+					err = declare(called, v.Name, "a variant of "+node.Name, v.Span)
+				}
+				seen := newOnce("fields", v.Name)
+				for _, f := range v.Fields {
+					if err == nil {
+						err = seen.add(f.Name, f.Span)
+					}
+				}
+			}
+		case *ast.PortDecl:
+			err = declare(types, node.Name, "a port", node.Span)
+			if err == nil {
+				err = states(node.Name, node.States)
+			}
+			seen := newOnce("extern functions", node.Name)
+			for _, x := range node.Externs {
+				if err == nil {
+					err = seen.add(x.Name, x.Span)
+				}
+				if err == nil {
+					err = params(node.Name+"."+x.Name, x.Params)
+				}
+			}
+		case *ast.MachineDecl:
+			if err = model("machine", node.Name, node.Span); err == nil {
+				err = states(node.Name, node.States)
+			}
+			seen := newOnce("control variables", node.Name)
+			for _, cv := range node.ControlVars {
+				if err == nil {
+					err = seen.add(cv.Name, cv.Span)
+				}
+			}
+		case *ast.PropertyDecl:
+			if err = model("property", node.Name, node.Span); err == nil {
+				err = states(node.Name, node.States)
+			}
+		case *ast.ProgressDecl:
+			err = model("progress", node.Name, node.Span)
+		case *ast.WorkflowDecl:
+			if err = model("workflow", node.Name, node.Span); err == nil {
+				err = params(node.Name, node.Params)
+			}
+			pools := newOnce("pools", node.Name)
+			for _, pl := range node.Pools {
+				if err == nil {
+					err = pools.add(pl.Name, pl.Span)
+				}
+			}
+			// Both backends ran the last of two nodes of one name.
+			seen := newOnce("nodes", node.Name)
+			for _, n := range node.Nodes {
+				name, branches := "", []ast.ForkBranch(nil)
+				switch n := n.(type) {
+				case *ast.StepNode:
+					name = n.Name
+				case *ast.ChoiceNode:
+					name = n.Name
+				case *ast.MergeNode:
+					name = n.Name
+				case *ast.ForkNode:
+					name, branches = n.Name, n.Branches
+				case *ast.JoinNode:
+					name = n.Name
+				}
+				if err == nil && name != "" {
+					err = seen.add(name, n.GetSpan())
+				}
+				inFork := newOnce("branches", name)
+				for _, br := range branches {
+					if err == nil {
+						err = inFork.add(br.Name, br.Span)
+					}
+				}
+			}
+		case *ast.SystemDecl:
+			err = model("system", node.Name, node.Span)
+			seen := newOnce("parts", node.Name)
+			for _, in := range node.Instances {
+				if err == nil {
+					err = seen.add(in.Name, in.Span)
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *checker) checkProgram() error {
 	prog := c.info.Program
+	if err := c.checkNames(); err != nil {
+		return err
+	}
 
 	// Pass 1: Register imports and top-level names
 	for _, d := range prog.Decls {
@@ -1095,6 +1302,9 @@ func (c *checker) checkStmt(stmt ast.Stmt, sc *scope) error {
 		}
 		for _, arm := range s.Arms {
 			armSc := newScope(sc)
+			if err := patternNames(arm.Pattern, newOnce("bindings", "a pattern")); err != nil {
+				return err
+			}
 			if err := c.bindPattern(arm.Pattern, sty, armSc); err != nil {
 				return err
 			}
@@ -1627,6 +1837,9 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		var resTy Type = UnknownType{Empty: true}
 		for _, arm := range e.Arms {
 			armSc := newScope(sc)
+			if err := patternNames(arm.Pattern, newOnce("bindings", "a pattern")); err != nil {
+				return nil, err
+			}
 			if err := c.bindPattern(arm.Pattern, sty, armSc); err != nil {
 				return nil, err
 			}
@@ -1704,6 +1917,13 @@ var builtinCallables = map[string]bool{
 	"filter": true, "map": true, "flat_map": true, "fold": true, "sum": true,
 	"any": true, "all": true, "find": true, "take": true, "drop": true,
 	"filter_ok": true, "unwrap_or": true, "and_then": true,
+}
+
+// calledByName are the built-ins that are called as `name(...)` and not as
+// a pipeline stage. No function of the program has one of these names.
+var calledByName = map[string]bool{
+	"len": true, "print": true, "assert": true, "str": true, "to_str": true,
+	"abs": true, "min": true, "max": true, "Some": true, "Ok": true, "Err": true,
 }
 
 // checkCalleeNotShadowed rejects a call by a name that is a variable and a
@@ -2840,7 +3060,11 @@ func stageBody(fn ast.Expr) ast.Expr {
 func (c *checker) checkLambdaWith(lam *ast.LambdaExpr, sc *scope, types []Type) (*FuncType, error) {
 	lsc := newScope(sc)
 	ps := make([]FuncParamInfo, len(lam.Params))
+	seen := newOnce("parameters", "a lambda")
 	for i, pname := range lam.Params {
+		if err := seen.add(pname, lam.Span); err != nil {
+			return nil, err
+		}
 		lsc.defineLocal(pname, varBinding{ty: types[i], span: lam.Span})
 		ps[i] = FuncParamInfo{Name: pname, Type: types[i]}
 	}
