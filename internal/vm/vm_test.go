@@ -314,3 +314,24 @@ func TestValueReboundFromIsIdentityForReferences(t *testing.T) {
 		}
 	}
 }
+
+// Requests that look one name up at the same time are given one error by
+// Go, the same *net.DNSError. Each request cleared the resolver's address
+// in it, so two of them wrote to one error while a third read it. Under
+// the race detector this test is what finds that.
+func TestHTTPRequestsShareALookupError(t *testing.T) {
+	vm := &VM{}
+	const url = "http://nosuch.anima.invalid/x"
+	for round := 0; round < 4; round++ {
+		got := make(chan Value, 24)
+		for i := 0; i < cap(got); i++ {
+			go func() { got <- vm.httpDo("GET", url, "", 5000, nil) }()
+		}
+		for i := 0; i < cap(got); i++ {
+			v := <-got
+			if s := v.String(); !strings.Contains(s, `Get "`+url+`": `) || strings.Contains(s, " on ") {
+				t.Errorf("round %d: %s", round, s)
+			}
+		}
+	}
+}

@@ -837,16 +837,23 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	// written \x00.
 	resp, err := cl.Do(req)
 	if err != nil {
-		// Which resolver was asked is this machine's own business.
-		var de *net.DNSError
-		if errors.As(err, &de) {
-			de.Server = ""
-		}
 		var ue *neturl.Error
 		if ctx.Err() != nil && errors.As(err, &ue) {
 			ue.Err = errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
 		}
-		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
+		msg := err.Error()
+		// Which resolver was asked is this machine's own business. The
+		// error is not changed to leave it out: requests that look up one
+		// name at the same time are given the same one.
+		var de *net.DNSError
+		if errors.As(err, &de) && de.Server != "" {
+			unasked := *de
+			unasked.Server = ""
+			if at := strings.LastIndex(msg, de.Error()); at >= 0 {
+				msg = msg[:at] + unasked.Error() + msg[at+len(de.Error()):]
+			}
+		}
+		return VErr(strings.ReplaceAll(msg, "\x00", `\x00`))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
