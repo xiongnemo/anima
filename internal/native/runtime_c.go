@@ -1673,21 +1673,27 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         if (named) SSL_set_tlsext_host_name(ssl, name);
         SSL_set_fd(ssl, fd);
         tls_seen.bad = false; tls_seen.rank = 0;
-        free(tls_seen.why); tls_seen.why = NULL;
         tls_seen.host = host;
         bool shook = told && SSL_connect(ssl) > 0;
         // tls_refused lets the handshake go on to hear every reason, so
         // what it heard decides, not the handshake.
-        if (!shook || tls_seen.bad || SSL_get_verify_result(ssl) != X509_V_OK) {
+        bool refuse = !shook || tls_seen.bad || SSL_get_verify_result(ssl) != X509_V_OK;
+        // The reason is this request's: no later one finds it, and a
+        // thread that ends after one request leaves nothing behind.
+        char *heard = tls_seen.why;
+        tls_seen.why = NULL; tls_seen.host = NULL;
+        if (refuse) {
             SSL_free(ssl); SSL_CTX_free(ctx); close(fd);
-            if (!tls_seen.why) return http_err(method, url, "tls handshake failed", NULL);
+            if (!heard) return http_err(method, url, "tls handshake failed", NULL);
             AnimaBuf why = {0};
             buf_put(&why, "tls: failed to verify certificate: x509: ");
-            buf_put(&why, tls_seen.why);
+            buf_put(&why, heard);
+            free(heard);
             AnimaVal refused = http_err(method, url, why.p, NULL);
             free(why.p);
             return refused;
         }
+        free(heard);
     }
 
     // The request is as long as its path and body make it.
