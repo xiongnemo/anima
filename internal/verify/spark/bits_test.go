@@ -69,6 +69,12 @@ def least() -> int:
 
 def folded() -> int[3..3]:
     return 1 | 2 ^ 3 & 4 << 1 + 2
+
+def greatest() -> int[9223372036854775807..9223372036854775807]:
+    return ~(-9223372036854775807 - 1)
+
+def least_again(x: int[9223372036854775807..9223372036854775807]) -> int[-1..-1]:
+    return ~x + 9223372036854775807
 `
 	if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
 		t.Fatalf("not proved:\n%s", strings.Join(failed, "\n"))

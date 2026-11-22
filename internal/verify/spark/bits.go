@@ -100,6 +100,15 @@ func shlInterval(a, counts smt.Interval) (smt.Interval, bool) {
 	return out, true
 }
 
+// complement is ~x, every bit of x turned over: -x - 1, written -(x + 1)
+// where -x is not an int64.
+func complement(x smt.LinearTerm) smt.LinearTerm {
+	if t := x.Scale(-1).Sub(smt.Const(1)); !t.Overflow || x.Overflow {
+		return t
+	}
+	return x.Add(smt.Const(1)).Scale(-1)
+}
+
 // maskOf is the least 2^k - 1 that is at least x, for x >= 0: no bit of a
 // number in 0..x is above it.
 func maskOf(x int64) int64 {

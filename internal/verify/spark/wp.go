@@ -2517,8 +2517,7 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 			return v.evalInt(e.Expr, env, scope, emitVCs).Scale(-1)
 		}
 		if e.Op == "~" {
-			// Every bit turned over: ~x is -x - 1.
-			return v.evalInt(e.Expr, env, scope, emitVCs).Scale(-1).Sub(smt.Const(1))
+			return complement(v.evalInt(e.Expr, env, scope, emitVCs))
 		}
 	case *ast.BinaryExpr:
 		l := v.evalInt(e.Left, env, scope, emitVCs)
