@@ -1,6 +1,7 @@
 package spark
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -3893,5 +3894,58 @@ def g(xs: list[int], n: int) -> int:
 `)
 	if got := failedVCs(rep); len(got) != 0 {
 		t.Errorf("not proved: %v", got)
+	}
+}
+
+// Where an entity is made, its invariants are proved of the arguments its
+// fields are given, not of the variables of the function that makes it.
+func TestSPARKInvariantsAreProvedOfTheFieldsGiven(t *testing.T) {
+	decls := `
+entity Q:
+    d: int
+    ok: bool
+
+entity P:
+    d: int
+    ok: bool
+    xs: list[int]
+    s: str
+    inner: Q
+    invariant: d > 0
+    invariant: ok
+    invariant: len(xs) > 0
+    invariant: len(s) > 1
+    invariant: inner.d > 0
+`
+	locals := `
+    d = 5
+    ok = True
+    xs = [1, 2]
+    s = "ab"
+    inner = Q(d=3, ok=True)
+    zs: list[int] = []
+    bad = Q(d=0, ok=True)
+`
+	cases := []struct {
+		ctor string
+		want []string
+	}{
+		{`P(d=d, ok=ok, xs=xs, s=s, inner=inner)`, nil},
+		{`P(d, ok, xs, s, inner)`, nil},
+		{`P(d=1, ok=True, xs=[7], s="xyz", inner=inner)`, nil},
+		{`P(d=0, ok=ok, xs=xs, s=s, inner=inner)`, []string{"def:mk.construct_P_inv_1"}},
+		{`P(0, ok, xs, s, inner)`, []string{"def:mk.construct_P_inv_1"}},
+		{`P(d=d, ok=False, xs=xs, s=s, inner=inner)`, []string{"def:mk.construct_P_inv_2"}},
+		{`P(d=d, ok=ok, xs=zs, s=s, inner=inner)`, []string{"def:mk.construct_P_inv_3"}},
+		{`P(d=d, ok=ok, xs=[], s=s, inner=inner)`, []string{"def:mk.construct_P_inv_3"}},
+		{`P(d=d, ok=ok, xs=xs, s="a", inner=inner)`, []string{"def:mk.construct_P_inv_4"}},
+		{`P(d=d, ok=ok, xs=xs, s=s, inner=bad)`, []string{"def:mk.construct_P_inv_5"}},
+		{`P(d=d, ok=ok, xs=xs, s=s, inner=Q(d=0, ok=True))`, []string{"def:mk.construct_P_inv_5"}},
+	}
+	for _, tc := range cases {
+		rep := verifySrc(t, decls+"\ndef mk() -> P:"+locals+"    return "+tc.ctor+"\n")
+		if got := failedVCs(rep); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: failed %v, want %v", tc.ctor, got, tc.want)
+		}
 	}
 }

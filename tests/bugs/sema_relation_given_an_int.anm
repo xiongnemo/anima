@@ -1,0 +1,14 @@
+# BUG (sema soundness): a relation could be given any value at all. Here
+# o.buyer is the int 7, o.buyer.b is 0, and this divided by zero on both
+# backends.
+entity A:
+    b: int[1..9]
+
+entity O:
+    amount: int
+    rel buyer -> 1 A
+
+def main() -> int:
+    o = O(amount=1, buyer=7)
+    print(10 / o.buyer.b)
+    return 0

@@ -1,0 +1,12 @@
+# BUG (sema soundness): nothing asked that an entity be made with all of its
+# fields. A field that is given no value holds none: p.e, an int[1..9] to
+# sema and the kernel, was 0 when the program ran, and this divided by zero
+# on both backends.
+entity P:
+    d: int
+    e: int[1..9]
+
+def main() -> int:
+    p = P(d=5)
+    print(10 / p.e)
+    return 0

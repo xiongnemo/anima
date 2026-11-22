@@ -1,0 +1,19 @@
+# BUG (SPARK soundness): where an entity is made, its invariants were
+# proved with only the fields that have a range bound to their arguments.
+# Any other field was read as the variable of that name in the function
+# that makes the entity: here `d > 0` was proved of the local d, which is
+# 5, and use() divided by the field d, which is 0, on both backends.
+entity P:
+    d: int
+    invariant: d > 0
+
+def use(p: P) -> int:
+    return 10 / p.d
+
+def mk() -> P:
+    d = 5
+    return P(d=0)
+
+def main() -> int:
+    print(use(mk()))
+    return 0

@@ -1,0 +1,12 @@
+# BUG (SPARK soundness): the same for a list: [0] was never given the type
+# of its field, so nothing proved its elements to be in 1..9, and this
+# divided by zero on both backends.
+entity P:
+    d: int
+    xs: list[int[1..9]]
+
+def main() -> int:
+    p = P(1, [0])
+    for x in p.xs:
+        print(10 / x)
+    return 0

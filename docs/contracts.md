@@ -49,6 +49,8 @@ A function may break an entity's `invariant` between two field updates, but the 
 
 That is what lets a function assume the invariants of its parameters, of list elements and of matched payloads.
 
+Where an entity is made (`Account(balance=b, frozen=f)`), its invariants and the ranges of its fields are proved of the arguments, each field standing for the argument it is given. A variable of the function that happens to be named like a field is not that field, and an argument the kernel cannot follow (a call, a nested constructor) is an arbitrary value of its type.
+
 The room between two updates only exists for an entity that one variable alone can reach. Once it is shared, every field write has to leave the invariant true. An entity is shared when it is a loop variable, a matched payload, `r = rows[i]`, a second name `c = b`, or a variable that was put into a list, map, variant or entity.
 
 - Writing a field of an element in place (`rows[i].x = v`, `rows[i].x += v`) has to leave the element's invariant true at once, knowing only that it held before and what the one field becomes. Otherwise build the new element and assign it.
