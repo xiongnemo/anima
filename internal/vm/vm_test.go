@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -333,5 +334,61 @@ func TestHTTPRequestsShareALookupError(t *testing.T) {
 				t.Errorf("round %d: %s", round, s)
 			}
 		}
+	}
+}
+
+// heapAt is a standard output that measures the heap in use when it is written to.
+type heapAt struct{ inUse uint64 }
+
+func (h *heapAt) Write(p []byte) (int, error) {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	h.inUse = m.HeapAlloc
+	return len(p), nil
+}
+
+// A frame that never ends does not keep the views it has named: a server that
+// names one for each datagram would grow with every one it hears.
+func TestFrameDoesNotKeepTheViewsItNamed(t *testing.T) {
+	src := `import std.bytes as bytes
+
+def main() -> int:
+    n: int[0..50000] = 0
+    seen = 0
+    while n < 50000:
+        decreases: 50000 - n
+        v = bytes.random(4096)
+        if v.len() == 4096 and seen < 50000:
+            seen += 1
+        n += 1
+    print(seen)
+    return 0
+`
+	prog, err := parser.Parse("vm_test.anm", src)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	info, err := sema.Check(prog)
+	if err != nil {
+		t.Fatalf("sema error: %v", err)
+	}
+	if rep := spark.Verify(info); !rep.OK() {
+		t.Fatalf("spark error: %v", rep.Errors())
+	}
+	cp, err := Compile(info, src, true)
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	var before runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	out := &heapAt{}
+	if _, err := NewVM(cp, RunOptions{Stdout: out, Seed: 7}).Run(); err != nil {
+		t.Fatalf("vm runtime error: %v", err)
+	}
+	// 50000 views of 4096 bytes are 200 MB; the frame holds the last one.
+	if out.inUse > before.HeapAlloc+(32<<20) {
+		t.Fatalf("the frame of main holds %d MB at its end", (out.inUse-before.HeapAlloc)>>20)
 	}
 }
