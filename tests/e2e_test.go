@@ -33,8 +33,8 @@ func TestE2EAllExamplesDualBackendParityAndExports(t *testing.T) {
 	animaBin := buildCLI(t, tmp)
 
 	examples, err := filepath.Glob("../examples/*.anm")
-	if err != nil || len(examples) != 6 {
-		t.Fatalf("expected 6 flagship examples, got %v (err=%v)", examples, err)
+	if err != nil || len(examples) != 7 {
+		t.Fatalf("expected 7 flagship examples, got %v (err=%v)", examples, err)
 	}
 
 	for _, ex := range examples {
@@ -284,6 +284,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/lts_workflow_sync_relabelled_away.anm", "w of system Sys relabels Gate.go to go: a workflow does with a part what it is written to do with one"},
 		{"../tests/bugs/lts_step_before_its_choice.anm", `PROPERTY NeverProbes VIOLATED (ERROR=-1): action "probe"`},
 		{"../tests/bugs/lts_choice_after_merge.anm", `PROPERTY NeverEnds VIOLATED (ERROR=-1): action "fin"`},
+		{"../tests/bugs/lts_stun_filter_test_after_mapping_test.anm", `PROPERTY FilterFirst VIOLATED (ERROR=-1): action "change_both" illegal in property state "Mapping"`},
 		{"../tests/bugs/lts_join_before_its_choice.anm", `PROPERTY NeverJoins VIOLATED (ERROR=-1): action "join_both"`},
 		{"../tests/bugs/lts_part_named_in_action_runs_alone.anm", "DEADLOCK at state 4 [f0=Taken, f1=Taken, a=H, b=H]"},
 		{"../tests/bugs/sema_monitor_guard_calls_function.anm", "is not worked out in a model"},
