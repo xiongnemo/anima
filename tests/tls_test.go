@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"io"
 	"log"
@@ -470,4 +471,61 @@ def main() -> int:
 		`Get "` + url(names) + `": tls: failed to verify certificate: x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs` + "\n" +
 		`Get "` + url(self) + `": tls: failed to verify certificate: x509: certificate signed by unknown authority` + "\n"
 	runOnBothBackends(t, "tls_together", src, strings.Repeat(one, 8))
+}
+
+// 127.0.0.1 and ::ffff:127.0.0.1 are one address, to Go: a URL may name it
+// either way and a certificate may hold it either way. OpenSSL compares the
+// bytes, so the native client refused a server whose certificate wrote the
+// address the other way than the URL did; and it listed what a certificate
+// is valid for as the system writes an address, not as Go does.
+func TestE2ETLSAddressWrittenTwoWays(t *testing.T) {
+	ca := newAuthority(t, "anima test authority")
+	// Go writes an address into a certificate in 4 bytes where it can, so
+	// the 16-byte ones are written here.
+	wide := func(ips ...string) []pkix.Extension {
+		var names []byte
+		for _, ip := range ips {
+			names = append(append(names, 0x87, 16), net.ParseIP(ip).To16()...)
+		}
+		return []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: append([]byte{0x30, byte(len(names))}, names...)}}
+	}
+	servers := []struct {
+		cert  x509.Certificate
+		valid string // "" if the server is the one every URL names
+	}{
+		{x509.Certificate{IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}, ""},
+		{x509.Certificate{ExtraExtensions: wide("::ffff:127.0.0.1")}, ""},
+		{x509.Certificate{IPAddresses: []net.IP{net.ParseIP("10.1.2.3")}}, "10.1.2.3"},
+		{x509.Certificate{ExtraExtensions: wide("::ffff:10.1.2.3", "::102:304", "2001:db8::1:0:0:1")}, "10.1.2.3, ::102:304, 2001:db8::1:0:0:1"},
+	}
+	var calls, want strings.Builder
+	for i := range servers {
+		port := tlsServer(t, ca, &servers[i].cert, nil)
+		for _, host := range []string{"127.0.0.1", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[0:0:0:0:0:ffff:127.0.0.1]"} {
+			url := "https://" + host + ":" + port + "/"
+			calls.WriteString(`    get("` + url + `")` + "\n")
+			if servers[i].valid == "" {
+				want.WriteString("200 in\n")
+				continue
+			}
+			want.WriteString(`Get "` + url + `": tls: failed to verify certificate: x509: certificate is valid for ` +
+				servers[i].valid + ", not " + strings.Trim(host, "[]") + "\n")
+		}
+	}
+	src := `import std.requests as req
+
+def get(url: str) -> int:
+    match req.get(url, timeout_ms=5000):
+        Ok(r) -> print(r.status, r.body)
+        Err(m) -> print(m)
+    return 0
+
+def main() -> int:
+` + calls.String() + `    return 0
+`
+	roots := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(roots, ca.pem, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tlsBackends(t, "two_ways", src)([]string{"SSL_CERT_FILE=" + roots}, want.String())
 }

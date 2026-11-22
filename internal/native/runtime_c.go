@@ -1854,6 +1854,36 @@ static void http_peer4(HttpPeer *p, struct in_addr a, int port, bool any) {
     snprintf(p->text, sizeof(p->text), "%s:%d", ip, port);
 }
 
+// Go's text of an IPv6 address: an IPv4 address written as one is written
+// as the IPv4 one, the longest run of two or more zero fields is ::, and no
+// field is written as an IPv4 address.
+static void ip6_text(const unsigned char *a, char *out, size_t cap) {
+    if (IN6_IS_ADDR_V4MAPPED((const struct in6_addr *)a)) {
+        inet_ntop(AF_INET, a + 12, out, (socklen_t)cap);
+        return;
+    }
+    int best = -1, best_len = 0;
+    uint16_t f[8];
+    for (int i = 0; i < 8; i++) f[i] = (uint16_t)(a[2 * i] << 8 | a[2 * i + 1]);
+    for (int i = 0; i < 8; i++) {
+        int j = i;
+        while (j < 8 && f[j] == 0) j++;
+        if (j - i >= 2 && j - i > best_len) { best = i; best_len = j - i; }
+        if (j > i) i = j - 1;
+    }
+    size_t at = 0;
+    out[0] = '\0';
+    for (int i = 0; i < 8; i++) {
+        if (i == best) {
+            at += (size_t)snprintf(out + at, cap - at, "::");
+            i += best_len - 1;
+            continue;
+        }
+        if (i > 0 && i != best + best_len) at += (size_t)snprintf(out + at, cap - at, ":");
+        at += (size_t)snprintf(out + at, cap - at, "%x", f[i]);
+    }
+}
+
 static void http_peer6(HttpPeer *p, const struct in6_addr *a, uint32_t scope, int port) {
     // An IPv4 address written as an IPv6 one is dialed as the IPv4 one.
     if (IN6_IS_ADDR_V4MAPPED(a)) {
@@ -1866,29 +1896,9 @@ static void http_peer6(HttpPeer *p, const struct in6_addr *a, uint32_t scope, in
     memset(p, 0, sizeof(*p));
     sa->sin6_family = AF_INET6; sa->sin6_addr = *a; sa->sin6_port = htons((uint16_t)port); sa->sin6_scope_id = scope;
     p->len = sizeof(*sa); p->family = AF_INET6;
-    // Go's text of it: the longest run of two or more zero fields is ::,
-    // and no field is written as an IPv4 address.
-    int best = -1, best_len = 0;
-    uint16_t f[8];
-    for (int i = 0; i < 8; i++) f[i] = (uint16_t)(a->s6_addr[2 * i] << 8 | a->s6_addr[2 * i + 1]);
-    for (int i = 0; i < 8; i++) {
-        int j = i;
-        while (j < 8 && f[j] == 0) j++;
-        if (j - i >= 2 && j - i > best_len) { best = i; best_len = j - i; }
-        if (j > i) i = j - 1;
-    }
-    size_t at = 0;
-    p->text[at++] = '[';
-    for (int i = 0; i < 8; i++) {
-        if (i == best) {
-            p->text[at++] = ':'; p->text[at++] = ':';
-            i += best_len - 1;
-            continue;
-        }
-        if (i > 0 && i != best + best_len) p->text[at++] = ':';
-        at += (size_t)snprintf(p->text + at, sizeof(p->text) - at, "%x", f[i]);
-    }
-    snprintf(p->text + at, sizeof(p->text) - at, "]:%d", port);
+    char ip[INET6_ADDRSTRLEN];
+    ip6_text(a->s6_addr, ip, sizeof(ip));
+    snprintf(p->text, sizeof(p->text), "[%s]:%d", ip, port);
 }
 
 // A name is looked up on a thread of its own: getaddrinfo has no time
@@ -2193,7 +2203,7 @@ static void tls_not_for(X509 *cert, const char *host) {
             int n = ASN1_STRING_length(g->d.iPAddress);
             const unsigned char *d = ASN1_STRING_get0_data(g->d.iPAddress);
             if (n == 4) inet_ntop(AF_INET, d, one, sizeof(one));
-            else if (n == 16) inet_ntop(AF_INET6, d, one, sizeof(one));
+            else if (n == 16) ip6_text(d, one, sizeof(one));
             else continue;
             ips++;
             name = one; len = strlen(one);
@@ -2219,6 +2229,36 @@ static void tls_not_for(X509 *cert, const char *host) {
     free(valid.p);
 }
 
+// An address in 16 bytes, an IPv4 one as the IPv6 one that stands for it.
+static void ip_wide(const unsigned char *a, int n, unsigned char *out) {
+    if (n == 16) { memcpy(out, a, 16); return; }
+    memset(out, 0, 10);
+    out[10] = out[11] = 0xff;
+    memcpy(out + 12, a, 4);
+}
+
+// Whether a certificate names an address, as Go finds it: 127.0.0.1 and
+// ::ffff:127.0.0.1 are one address, in the URL and in the certificate.
+// OpenSSL compares the bytes, and to it they are two.
+static bool tls_names_ip(X509 *cert, const char *host) {
+    unsigned char raw[16], want[16], have[16];
+    if (inet_pton(AF_INET, host, raw) == 1) ip_wide(raw, 4, want);
+    else if (inet_pton(AF_INET6, host, raw) == 1) ip_wide(raw, 16, want);
+    else return false;
+    GENERAL_NAMES *sans = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    bool found = false;
+    for (int i = 0; i < sk_GENERAL_NAME_num(sans) && !found; i++) {
+        GENERAL_NAME *g = sk_GENERAL_NAME_value(sans, i);
+        if (g->type != GEN_IPADD) continue;
+        int n = ASN1_STRING_length(g->d.iPAddress);
+        if (n != 4 && n != 16) continue;
+        ip_wide(ASN1_STRING_get0_data(g->d.iPAddress), n, have);
+        found = memcmp(want, have, 16) == 0;
+    }
+    GENERAL_NAMES_free(sans);
+    return found;
+}
+
 // Called for each thing wrong with a certificate. Go looks at the server's
 // own dates first, then at its names, then for an authority, and names the
 // first that fails; OpenSSL looks in another order, so every one is heard
@@ -2230,6 +2270,11 @@ static int tls_refused(int ok, X509_STORE_CTX *sc) {
     bool own = X509_STORE_CTX_get_error_depth(sc) == 0;
     bool dates = cert && (err == X509_V_ERR_CERT_HAS_EXPIRED || err == X509_V_ERR_CERT_NOT_YET_VALID);
     bool names = cert && (err == X509_V_ERR_HOSTNAME_MISMATCH || err == X509_V_ERR_IP_ADDRESS_MISMATCH);
+    if (cert && err == X509_V_ERR_IP_ADDRESS_MISMATCH && tls_names_ip(cert, tls_seen.host)) {
+        // Nothing is wrong with it then, if nothing else was.
+        if (!tls_seen.bad) X509_STORE_CTX_set_error(sc, X509_V_OK);
+        return 1;
+    }
     // An authority out of its dates is named before one that is not known.
     int rank = dates ? (own ? 4 : 2) : names ? 3 : 1;
     tls_seen.bad = true;
