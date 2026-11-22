@@ -186,6 +186,26 @@ static AnimaVal v_mod(AnimaVal l, AnimaVal r, int line) {
     if (r.u.i == -1) return v_int(0);
     return v_int(l.u.i % r.u.i);
 }
+// The contract kernel proves the count of a shift: the check is for what it
+// does not read, as the check of a divisor is.
+static void v_shift_count(int64_t n, int line) {
+    if (n < 0 || n > 63) {
+        fflush(stdout);
+        fprintf(stderr, "runtime error: runtime shift by %lld bits at line %d\n", (long long)n, line);
+        exit(1);
+    }
+}
+static AnimaVal v_shl(AnimaVal l, AnimaVal r, int line) {
+    v_shift_count(r.u.i, line);
+    return v_int((int64_t)((uint64_t)l.u.i << r.u.i));
+}
+// The sign fills the bits that come in, whatever the compiler makes of >> on
+// a negative number.
+static AnimaVal v_shr(AnimaVal l, AnimaVal r, int line) {
+    v_shift_count(r.u.i, line);
+    if (l.u.i < 0) return v_int(~(~l.u.i >> r.u.i));
+    return v_int(l.u.i >> r.u.i);
+}
 static AnimaVal v_bool(bool b) { AnimaVal v = {0}; v.kind = VAL_BOOL; v.u.b = b; return v; }
 static AnimaVal v_str(const char *s) {
     AnimaVal v = {0}; v.kind = VAL_STR;

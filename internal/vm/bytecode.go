@@ -65,8 +65,15 @@ const (
 	OpRunWorkflow
 	OpHalt
 	// OpIn is `x in xs`: an element of a list, a key of a map, a part of a
-	// string. It is last so that the opcodes before it keep their numbers.
+	// string. It comes after the others so that they keep their numbers.
 	OpIn
+	// The operators on the bits of an int, after it for the same reason.
+	OpBitAnd
+	OpBitOr
+	OpBitXor
+	OpBitNot
+	OpShl
+	OpShr
 )
 
 var opNames = map[OpCode]string{
@@ -122,6 +129,12 @@ var opNames = map[OpCode]string{
 	OpRunWorkflow:    "RUN_WORKFLOW",
 	OpHalt:           "HALT",
 	OpIn:             "IN",
+	OpBitAnd:         "BIT_AND",
+	OpBitOr:          "BIT_OR",
+	OpBitXor:         "BIT_XOR",
+	OpBitNot:         "BIT_NOT",
+	OpShl:            "SHL",
+	OpShr:            "SHR",
 }
 
 func (op OpCode) String() string {

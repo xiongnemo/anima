@@ -1621,8 +1621,13 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			}
 			return BoolType{}, nil
 		}
-		if it, ok := ity.(*IntType); ok && e.Op == "-" {
-			if it.IsBounded {
+		// Both backends negate whatever they are given as if it were an int.
+		if !intLike(ity) {
+			return nil, fmt.Errorf("%s: %s needs an int, got %s", e.Span, e.Op, ity)
+		}
+		if it, ok := ity.(*IntType); ok {
+			// The least int has no negation: its range is not turned around.
+			if e.Op == "-" && it.IsBounded && it.Lo != math.MinInt64 {
 				return NewIntRange(-it.Hi, -it.Lo, ""), nil
 			}
 			return NewUnboundedInt(), nil
@@ -1645,6 +1650,11 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 			}
 			if (!intLike(lt)) || (!intLike(rt)) {
 				return nil, fmt.Errorf("%s: arithmetic %s requires int, got %s and %s", e.Span, e.Op, lt, rt)
+			}
+			return NewUnboundedInt(), nil
+		case "&", "|", "^", "<<", ">>":
+			if (!intLike(lt)) || (!intLike(rt)) {
+				return nil, fmt.Errorf("%s: %s works on the bits of two ints, got %s and %s", e.Span, e.Op, lt, rt)
 			}
 			return NewUnboundedInt(), nil
 		case "==", "!=", "<", "<=", ">", ">=", "and", "or", "implies", "in":

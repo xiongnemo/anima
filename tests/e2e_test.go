@@ -105,6 +105,9 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_overflow.anm", "SPARK FAILED"},
 		{"../tests/bugs/spark_int64_overflow.anm", "int64_overflow"},
 		{"../tests/bugs/spark_divzero.anm", "div_nonzero"},
+		{"../tests/bugs/spark_shift_count.anm", "shift_count"},
+		{"../tests/bugs/spark_shift_overflow.anm", "int64_overflow"},
+		{"../tests/bugs/spark_bits_out_of_range.anm", "return_range"},
 		{"../tests/bugs/spark_mut_call_stale_fact.anm", "div_nonzero"},
 		{"../tests/bugs/spark_match_assignment_lost.anm", "div_nonzero"},
 		{"../tests/bugs/spark_reassigned_entity.anm", "div_nonzero"},
@@ -2744,5 +2747,66 @@ O(amount=3, backup=Some(A(b=2)), buyer=A(b=5), others=[A(b=2), A(b=5)])
 O(amount=3, backup=Some(A(b=2)), buyer=A(b=5), others=[A(b=2), A(b=5)])
 schema error: missing field O.buyer
 schema violation: O.buyer.b=0 below minimum 1
+`)
+}
+
+// The operators on the bits of an int give on both backends what they give
+// on a two's-complement int64: >> brings the sign in, ~x is -x - 1, and a
+// << the kernel lets run loses no bit.
+func TestE2EBitOperatorsOnBothBackends(t *testing.T) {
+	runOnBothBackends(t, "bits", `import std.bytes as bytes
+
+type Byte = int[0..255]
+
+def be16(hi: Byte, lo: Byte) -> int[0..65535]:
+    return hi << 8 | lo
+
+def be32(a: Byte, b: Byte, c: Byte, d: Byte) -> int[0..4294967295]:
+    return a << 24 | b << 16 | c << 8 | d
+
+def byte_of(x: int, i: int[0..7]) -> Byte:
+    return x >> (i * 8) & 0xFF
+
+def ones(x: int) -> int[0..64]:
+    n: int[0..64] = 0
+    i: int[0..64] = 0
+    while i < 64:
+        invariant: n <= i
+        decreases: 64 - i
+        n = n + (x >> i & 1)
+        i = i + 1
+    return n
+
+def shifts(x: int, n: int[0..63]) -> int:
+    return x >> n
+
+def scaled(x: int[-8..7], n: int[0..60]) -> int:
+    return x << n
+
+def main() -> int:
+    print(be16(0x12, 0x34), be32(0xDE, 0xAD, 0xBE, 0xEF), byte_of(0x1122334455667788, 0), byte_of(0x1122334455667788, 7))
+    print(byte_of(-1, 7), byte_of(-256, 0), byte_of(-9223372036854775807 - 1, 7))
+    print(ones(0), ones(255), ones(-1), ones(9223372036854775807), ones(-9223372036854775807 - 1))
+    print(shifts(-1, 63), shifts(-9223372036854775807 - 1, 63), shifts(-9223372036854775807 - 1, 62), shifts(9223372036854775807, 62), shifts(-5, 1), shifts(5, 1), shifts(-1, 0))
+    print(scaled(7, 60), scaled(-8, 60), scaled(1, 60), scaled(-1, 0), scaled(0, 60), -1 << 63, 1 << 62)
+    print(~0, ~-1, ~9223372036854775807, ~(-9223372036854775807 - 1), -~7, ~~7)
+    print(6 & 3, 6 | 3, 6 ^ 3, -6 & 3, -6 | 3, -6 ^ 3, -6 & -3, -6 | -3, -6 ^ -3)
+    print(1 | 2 ^ 3 & 4 << 1 + 2, 1 < 2 << 1, 5 & 4 == 4, not 5 & 2 == 0)
+    xs = [1, 2, 3, 250] |> map((q) => q << 4 & 0xFF) |> filter((q) => q & 0x10 != 0)
+    print(xs, f"{0xF0 >> 4} {1 << 10}")
+    bv = bytes.from_hex("2112a442")
+    cookie = be32(bv.read_u8(0), bv.read_u8(1), bv.read_u8(2), bv.read_u8(3))
+    print(cookie == bv.read_u32_be(0), cookie ^ 0x2112A442, bv.read_u16_be(0) ^ (cookie >> 16))
+    return 0
+`, `4660 3735928559 136 17
+255 0 128
+0 8 64 63 1
+-1 -1 -2 1 -3 2 -1
+8070450532247928832 -9223372036854775808 1152921504606846976 -1 0 -9223372036854775808 4611686018427387904
+-1 0 -9223372036854775808 9223372036854775807 8 7
+2 7 5 2 -5 -7 -8 -1 7
+3 True True False
+[16, 48] 15 1024
+True 0 0
 `)
 }

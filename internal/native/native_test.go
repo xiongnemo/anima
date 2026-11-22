@@ -142,16 +142,21 @@ def main() -> int:
 	}
 }
 
-// A division by zero stops a native program as it stops the VM: with the
-// VM's message and exit code 1, not a signal. No verified program gets
-// there; this builds one the kernel was not asked about.
+// A division by zero, and a shift by a count that is not 0 to 63, stop a
+// native program as they stop the VM: with the VM's message and exit code 1,
+// not a signal or whatever the processor makes of the count. No verified
+// program gets there; this builds one the kernel was not asked about.
 func TestNativeDivisionByZeroIsARuntimeError(t *testing.T) {
-	cases := []struct{ name, expr, want string }{
-		{"div", "10 / d", "runtime division by zero at line 4"},
-		{"mod", "10 % d", "runtime modulo by zero at line 4"},
+	cases := []struct{ name, d, expr, want string }{
+		{"div", "0", "10 / d", "runtime division by zero at line 4"},
+		{"mod", "0", "10 % d", "runtime modulo by zero at line 4"},
+		{"shl", "64", "1 << d", "runtime shift by 64 bits at line 4"},
+		{"shr", "64", "8 >> d", "runtime shift by 64 bits at line 4"},
+		{"shl_negative", "0 - 1", "1 << d", "runtime shift by -1 bits at line 4"},
+		{"shr_negative", "0 - 1", "8 >> d", "runtime shift by -1 bits at line 4"},
 	}
 	for _, c := range cases {
-		src := "def main() -> int:\n    d = 0\n    print(1)\n    return " + c.expr + "\n"
+		src := "def main() -> int:\n    d = " + c.d + "\n    print(1)\n    return " + c.expr + "\n"
 		prog, err := parser.Parse(c.name+".anm", src)
 		if err != nil {
 			t.Fatalf("%s: parse: %v", c.name, err)

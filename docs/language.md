@@ -33,9 +33,33 @@ A name is declared once. Sema, the kernels and the two backends each look a name
 - `<`, `<=`, `>`, `>=` order two integers or two strings (byte by byte).
 - `and`, `or`, `implies` and `not` take booleans.
 - `x in xs` looks for an element of a list, a key of a map or a part of a string.
+- `&`, `|`, `^`, `<<`, `>>` and `~` work on the bits of an `int`, and take nothing else: `True & False` and `"a" | 1` are errors. The result is an `int` with no range of its own; the ranges the contract kernel knows are in [contracts.md](contracts.md#bit-operators).
 - Anything else (`xs == 5`, `"a" < 5`, `1 and 2`) is an error.
 
 The contract kernel reasons about the equality of integers, strings and booleans. Of lists, maps, entities and variants it assumes nothing, as they change in place.
+
+### Precedence
+
+From the loosest to the tightest, as in Python:
+
+| Operators | |
+|---|---|
+| `\|>` | pipeline |
+| `implies` | |
+| `or` | |
+| `and` | |
+| `not` | |
+| `==` `!=` `<` `<=` `>` `>=` `in` | |
+| `with` | a copy of an entity |
+| `\|` | bitwise or |
+| `^` | bitwise exclusive or |
+| `&` | bitwise and |
+| `<<` `>>` | shifts |
+| `+` `-` | |
+| `*` `/` `%` | |
+| `-x` `~x` | |
+
+So `a | b ^ c & d << 1 + 2` is `a | (b ^ (c & (d << (1 + 2))))`, and `x & 0xFF == 0` is `(x & 0xFF) == 0`.
 
 ## Calls
 

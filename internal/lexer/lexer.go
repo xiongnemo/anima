@@ -61,6 +61,11 @@ const (
 	TokPlusEq   // +=
 	TokMinusEq  // -=
 	TokStarEq   // *=
+	TokAmp      // &
+	TokCaret    // ^
+	TokTilde    // ~
+	TokShl      // <<
+	TokShr      // >>
 	TokArrow    // ->
 	TokFatArrow // =>
 	TokPipe     // |>
@@ -124,6 +129,11 @@ var kindNames = map[TokenKind]string{
 	TokPlusEq:      "+=",
 	TokMinusEq:     "-=",
 	TokStarEq:      "*=",
+	TokAmp:         "&",
+	TokCaret:       "^",
+	TokTilde:       "~",
+	TokShl:         "<<",
+	TokShr:         ">>",
 	TokArrow:       "->",
 	TokFatArrow:    "=>",
 	TokPipe:        "|>",
@@ -346,6 +356,14 @@ func Lex(file, src string) ([]Token, error) {
 					emit(TokLe, two, 0, lineNo, col)
 					i += 2
 					continue
+				case "<<":
+					emit(TokShl, two, 0, lineNo, col)
+					i += 2
+					continue
+				case ">>":
+					emit(TokShr, two, 0, lineNo, col)
+					i += 2
+					continue
 				case ">=":
 					emit(TokGe, two, 0, lineNo, col)
 					i += 2
@@ -401,6 +419,18 @@ func Lex(file, src string) ([]Token, error) {
 				continue
 			case '%':
 				emit(TokPercent, "%", 0, lineNo, col)
+				i++
+				continue
+			case '&':
+				emit(TokAmp, "&", 0, lineNo, col)
+				i++
+				continue
+			case '^':
+				emit(TokCaret, "^", 0, lineNo, col)
+				i++
+				continue
+			case '~':
+				emit(TokTilde, "~", 0, lineNo, col)
 				i++
 				continue
 			case '<':

@@ -62,3 +62,23 @@ func TestLexerRangesAndNumbers(t *testing.T) {
 		t.Fatalf("bad int values: %d, %d", toks[5].Int, toks[7].Int)
 	}
 }
+
+func TestLexerBitOperators(t *testing.T) {
+	toks, err := Lex("t.anm", `a & b | c ^ ~d << 1 >> 2 |> f() <= g >= h < i > j`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TokenKind{
+		TokIdent, TokAmp, TokIdent, TokBar, TokIdent, TokCaret, TokTilde, TokIdent, TokShl, TokInt, TokShr, TokInt,
+		TokPipe, TokIdent, TokLParen, TokRParen, TokLe, TokIdent, TokGe, TokIdent, TokLt, TokIdent, TokGt, TokIdent,
+		TokNewline, TokEOF,
+	}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens %v, want %d", len(toks), toks, len(want))
+	}
+	for i, w := range want {
+		if toks[i].Kind != w {
+			t.Fatalf("tok[%d] = %v, want %v", i, toks[i], w)
+		}
+	}
+}

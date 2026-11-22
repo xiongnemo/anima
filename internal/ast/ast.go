@@ -719,7 +719,7 @@ func (e *UnaryExpr) GetSpan() Span { return e.Span }
 
 type BinaryExpr struct {
 	Span  Span
-	Op    string // "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or", "implies"
+	Op    string // "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "==", "!=", "<", "<=", ">", ">=", "and", "or", "implies"
 	Left  Expr
 	Right Expr
 }

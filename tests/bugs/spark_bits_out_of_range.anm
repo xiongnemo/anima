@@ -1,0 +1,8 @@
+# `|` sets bits, it does not take any away: flags | 0x0F is not under 0x0F.
+def low_nibble(flags: int[0..255]) -> int[0..15]:
+    return flags | 0x0F
+
+def main() -> int:
+    xs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    print(xs[low_nibble(240)])
+    return 0

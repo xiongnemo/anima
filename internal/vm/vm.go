@@ -713,6 +713,31 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 		case OpNeg:
 			x := pop()
 			push(VInt(-x.Int))
+		case OpBitNot:
+			x := pop()
+			push(VInt(^x.Int))
+		case OpBitAnd:
+			r, l := pop(), pop()
+			push(VInt(l.Int & r.Int))
+		case OpBitOr:
+			r, l := pop(), pop()
+			push(VInt(l.Int | r.Int))
+		case OpBitXor:
+			r, l := pop(), pop()
+			push(VInt(l.Int ^ r.Int))
+		case OpShl, OpShr:
+			r, l := pop(), pop()
+			// The contract kernel proves the count: this is for what it
+			// does not read, as the check of a divisor is.
+			if r.Int < 0 || r.Int > 63 {
+				cleanupHandles(VVoid())
+				return VVoid(), false, locals, fmt.Errorf("runtime shift by %d bits at line %d", r.Int, lineAt(fp, pc-1))
+			}
+			if op == OpShl {
+				push(VInt(l.Int << uint(r.Int)))
+			} else {
+				push(VInt(l.Int >> uint(r.Int)))
+			}
 		case OpNot:
 			x := pop()
 			push(VBool(!x.IsTruthy()))

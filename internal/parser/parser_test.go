@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -189,6 +190,65 @@ def serve(conn: sock.TcpStream, own: int) -> int:
 		}
 		if id, ok := args[0].Value.(*ast.Ident); !ok || id.Name != "conn" {
 			t.Fatalf("own argument is not the variable conn: %+v", args[0].Value)
+		}
+	}
+}
+
+// shape writes an expression with every operator in its own brackets.
+func shape(e ast.Expr) string {
+	switch e := e.(type) {
+	case *ast.BinaryExpr:
+		return "(" + shape(e.Left) + " " + e.Op + " " + shape(e.Right) + ")"
+	case *ast.UnaryExpr:
+		return "(" + e.Op + shape(e.Expr) + ")"
+	case *ast.IntLit:
+		return fmt.Sprint(e.Value)
+	case *ast.Ident:
+		return e.Name
+	}
+	return fmt.Sprintf("%T", e)
+}
+
+// The operators on bits bind as in Python: |, then ^, then &, then the
+// shifts, each tighter than a comparison and looser than + and -.
+func TestParseBitOperatorPrecedence(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{"a | b ^ c & d << 1 + 2", "(a | (b ^ (c & (d << (1 + 2)))))"},
+		{"a << 1 & b ^ c | d", "((((a << 1) & b) ^ c) | d)"},
+		{"a | b | c", "((a | b) | c)"},
+		{"a ^ b ^ c", "((a ^ b) ^ c)"},
+		{"a & b & c", "((a & b) & c)"},
+		{"a << 1 >> 2 << 3", "(((a << 1) >> 2) << 3)"},
+		{"a - b >> c * d", "((a - b) >> (c * d))"},
+		{"a & 1 == 1", "((a & 1) == 1)"},
+		{"a < b << 1", "(a < (b << 1))"},
+		{"a >> 1 > b", "((a >> 1) > b)"},
+		{"a | b == c ^ d", "((a | b) == (c ^ d))"},
+		{"not a & b == 0", "(not((a & b) == 0))"},
+		{"a & b == 0 and c | d != 0", "(((a & b) == 0) and ((c | d) != 0))"},
+		{"~a << 2", "((~a) << 2)"},
+		{"-a << 2", "((-a) << 2)"},
+		{"~-a", "(~(-a))"},
+		{"-~a", "(-(~a))"},
+		{"~~a", "(~(~a))"},
+		{"a * ~b", "(a * (~b))"},
+		{"(a | b) & c", "((a | b) & c)"},
+		{"a & (b | c)", "(a & (b | c))"},
+	}
+	for _, c := range cases {
+		prog, err := Parse("bits.anm", "def f(a: int, b: int, c: int, d: int) -> int:\n    x = "+c.src+"\n    return 0\n")
+		if err != nil {
+			t.Errorf("%s: %v", c.src, err)
+			continue
+		}
+		got := shape(prog.Decls[0].(*ast.FuncDecl).Body[0].(*ast.LetAssignStmt).Value)
+		if got != c.want {
+			t.Errorf("%s: parsed as %s, want %s", c.src, got, c.want)
+		}
+	}
+	for _, src := range []string{"a &", "a | > b", "a <<< 1", "a >> > 1", "~", "a ^ ^ b", "a &= 1", "a <<= 1"} {
+		if _, err := Parse("bits.anm", "def f(a: int, b: int) -> int:\n    x = "+src+"\n    return 0\n"); err == nil {
+			t.Errorf("%s: expected a parse error", src)
 		}
 	}
 }

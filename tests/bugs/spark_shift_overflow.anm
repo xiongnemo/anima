@@ -1,0 +1,8 @@
+# The bits shifted out of an int64 are lost: a length of 2^23 words or more
+# does not come back as that many bytes.
+def bytes_of(words: int[0..4294967295]) -> int:
+    return words << 40
+
+def main() -> int:
+    print(bytes_of(16777216))
+    return 0
