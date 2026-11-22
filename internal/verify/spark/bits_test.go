@@ -75,6 +75,12 @@ def greatest() -> int[9223372036854775807..9223372036854775807]:
 
 def least_again(x: int[9223372036854775807..9223372036854775807]) -> int[-1..-1]:
     return ~x + 9223372036854775807
+
+entity Word:
+    bits: int[0..64]
+    v: int
+    invariant: bits < 64 implies v >> bits == 0
+    invariant: bits != 0 and v % bits == 0 or bits == 0
 `
 	if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
 		t.Fatalf("not proved:\n%s", strings.Join(failed, "\n"))
@@ -111,6 +117,12 @@ func TestBitOperatorsRefused(t *testing.T) {
 		{"the turned bits of 0", "def f(x: int[0..9]) -> int[-9..-1]:\n    return ~x\n", "def:f.return_range"},
 		{"a count in a monitor's guard", strings.Replace(monitorSrc, "GUARD", "1 >> (n - 1) == 0", 1), "monitor:Gate.shift_count"},
 		{"a divisor in a monitor's guard", strings.Replace(monitorSrc, "GUARD", "6 / (n - 1) == 0", 1), "monitor:Gate.div_nonzero"},
+		// json.decode runs an invariant on whatever fields the text holds.
+		{"a count in an invariant", "entity P:\n    d: int[0..64]\n    invariant: 1 >> d == 0\n", "entity:P.shift_count"},
+		{"a count of 64 in an invariant", "entity P:\n    d: int\n    invariant: d >> 64 == 0\n", "entity:P.shift_count"},
+		{"a count an earlier invariant does not bound", "entity P:\n    d: int\n    invariant: d >= 0\n    invariant: 1 << d > 0\n", "entity:P.shift_count"},
+		{"a divisor in an invariant", "entity P:\n    d: int[0..9]\n    invariant: (10 / d) * 0 == 0\n", "entity:P.div_nonzero"},
+		{"a modulus in an invariant", "entity P:\n    d: int[0..9]\n    invariant: d == 0 or 10 % (d - 1) < 10\n", "entity:P.div_nonzero"},
 	}
 	for _, c := range cases {
 		failed := strings.Join(failedVCs(verifySrc(t, c.body)), "\n")

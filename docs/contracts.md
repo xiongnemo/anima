@@ -76,6 +76,8 @@ A function may break an entity's `invariant` between two field updates, but the 
 
 That is what lets a function assume the invariants of its parameters, of list elements and of matched payloads.
 
+An invariant is also run: `json.decode[E]` evaluates each one, in the order they are written, on the fields a text holds. So where the entity is declared, the arithmetic of an invariant is proved from the field types and the invariants written before it alone: no `+`, `-`, `*` or `<<` overflows, no divisor is zero, and every shift count is in `0..63`. `invariant: total / per <= 100` with `per: int[0..10]` is refused (`div_nonzero`); write `per != 0 implies total / per <= 100`, or give `per` the type `int[1..10]`.
+
 Where an entity is made (`Account(balance=b, frozen=f)`), its invariants and the ranges of its fields are proved of the arguments, each field standing for the argument it is given. A variable of the function that happens to be named like a field is not that field, and an argument the kernel cannot follow (a call, a nested constructor) is an arbitrary value of its type.
 
 The room between two updates only exists for an entity that one variable alone can reach. Once it is shared, every field write has to leave the invariant true. An entity is shared when it is a loop variable, a matched payload, `r = rows[i]`, a second name `c = b`, or a variable that was put into a list, map, variant or entity.

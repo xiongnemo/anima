@@ -531,6 +531,8 @@ func (v *verifier) bindVarType(env *symEnv, name string, ty sema.Type) {
 
 // verifyEntityInvariantArith checks the arithmetic of each invariant under the field types
 // and the invariants before it, which is the order the runtime short-circuits them in.
+// json.decode runs an invariant on fields nothing else is known of, so a divisor or a
+// shift count in one is proved from the field types alone.
 func (v *verifier) verifyEntityInvariantArith(ent *ast.EntityDecl) {
 	et := v.info.Entities[ent.Name]
 	if et == nil {
@@ -543,6 +545,7 @@ func (v *verifier) verifyEntityInvariantArith(ent *ast.EntityDecl) {
 	}
 	for _, inv := range et.Invariants {
 		v.checkArith(inv, env, scope)
+		v.evalSideEffects(inv, env, scope)
 		env.assume(v.evalBool(inv, env, scope))
 	}
 }

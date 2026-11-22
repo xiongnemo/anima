@@ -1,0 +1,15 @@
+# json.decode runs an entity's invariant on the fields the text holds, and
+# all that is known of them there is their types: per is 0 in this text, and
+# both backends would stop on the division.
+import std.json as json
+
+entity Rate:
+    total: int[0..1000]
+    per: int[0..10]
+    invariant: total / per <= 100
+
+def main() -> int:
+    match json.decode[Rate]("{\"total\": 5, \"per\": 0}"):
+        Ok(r) -> print(r.total)
+        Err(e) -> print(e)
+    return 0
