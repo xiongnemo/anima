@@ -95,6 +95,9 @@ func TestBitOperatorsRefused(t *testing.T) {
 		{"a count that may be anything", "def f(x: int[0..9], n: int) -> int:\n    return x >> n\n", "def:f.shift_count"},
 		{"a negative count", "def f(x: int[0..9], n: int[-1..3]) -> int:\n    return x << n\n", "def:f.shift_count"},
 		{"a count of 64", "def f(x: int[0..9]) -> int:\n    return x >> 64\n", "def:f.shift_count"},
+		{"a constant negative count", "def f(x: int[0..9]) -> int:\n    return x >> (0 - 1)\n", "def:f.shift_count"},
+		{"a constant negative count of a shift left", "def f(x: int[0..9]) -> int:\n    return x << -1\n", "def:f.shift_count"},
+		{"a constant negative count before a divisor", "def f(x: int[0..9]) -> int:\n    y = x >> -1\n    return 10 / (x - x)\n", "def:f.div_nonzero"},
 		{"a count in a condition", "def f(x: int[0..9], n: int) -> int:\n    if x >> n == 0:\n        return 1\n    return 0\n", "def:f.shift_count"},
 		{"a count in a lambda", "def f(xs: list[int[0..9]], n: int) -> list[int]:\n    return xs |> map((q) => q >> n)\n", "shift_count"},
 		{"bits shifted out", "def f(x: int) -> int:\n    return x << 3\n", "def:f.int64_overflow"},
@@ -116,6 +119,7 @@ func TestBitOperatorsRefused(t *testing.T) {
 		{"a negative number shifted right", "def f(x: int) -> int[0..255]:\n    return x >> 56\n", "def:f.return_range"},
 		{"the turned bits of 0", "def f(x: int[0..9]) -> int[-9..-1]:\n    return ~x\n", "def:f.return_range"},
 		{"a count in a monitor's guard", strings.Replace(monitorSrc, "GUARD", "1 >> (n - 1) == 0", 1), "monitor:Gate.shift_count"},
+		{"a count in a control variable's first value", strings.NewReplacer("int[0..3] = 0", "int[0..3] = 1 >> 64", "GUARD", "n < 3").Replace(monitorSrc), "monitor:Gate.shift_count"},
 		{"a divisor in a monitor's guard", strings.Replace(monitorSrc, "GUARD", "6 / (n - 1) == 0", 1), "monitor:Gate.div_nonzero"},
 		// json.decode runs an invariant on whatever fields the text holds.
 		{"a count in an invariant", "entity P:\n    d: int[0..64]\n    invariant: 1 >> d == 0\n", "entity:P.shift_count"},
@@ -128,6 +132,27 @@ func TestBitOperatorsRefused(t *testing.T) {
 		failed := strings.Join(failedVCs(verifySrc(t, c.body)), "\n")
 		if !strings.Contains(failed, c.vc) {
 			t.Errorf("%s: want %s to fail, got:\n%s", c.name, c.vc, failed)
+		}
+	}
+}
+
+// A shift the kernel has no range for is not a failed proof with a made-up
+// counterexample: it says what is missing.
+func TestShiftWithNoRangeSaysWhy(t *testing.T) {
+	cases := []struct{ body, why string }{
+		{"def f(x: int) -> int:\n    return x << 63\n", "only 0 and -1 can be shifted by 63"},
+		{"def f(x: int, n: int[0..3]) -> int:\n    return x << n\n", "a count that is not a constant"},
+		{"def f(x: int[0..9], n: int[0..63]) -> int:\n    return x << n\n", "the operand ranges allow a shift beyond 64 bits"},
+	}
+	for _, c := range cases {
+		found := false
+		for _, vc := range verifySrc(t, c.body).VCs {
+			if vc.Name == "def:f.int64_overflow" && vc.Status == VCUnknown && strings.Contains(vc.Explain, c.why) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: want an unknown int64_overflow that says %q", c.body, c.why)
 		}
 	}
 }

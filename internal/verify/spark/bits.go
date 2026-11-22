@@ -32,11 +32,18 @@ func (v *verifier) shiftUnbounded(e *ast.BinaryExpr, env *symEnv, scope string) 
 	probe := env.clone()
 	l := v.evalInt(e.Left, probe, scope, false)
 	r := v.evalInt(e.Right, probe, scope, false)
-	if len(r.Coeffs) == 0 && !r.Overflow && r.Const >= 0 && r.Const <= 62 {
+	constant := len(r.Coeffs) == 0 && !r.Overflow
+	if constant && r.Const >= 0 && r.Const <= 62 {
 		return ""
 	}
 	il := v.termInterval(l, probe)
 	if !il.HasLo || !il.HasHi {
+		switch {
+		case constant && r.Const == 63:
+			return "only 0 and -1 can be shifted by 63; give the shifted operand that range"
+		case constant:
+			return "cannot bound a shift by a count outside 0..63"
+		}
 		return "cannot bound a shift by a count that is not a constant; give the shifted operand a bounded type or a requires range"
 	}
 	if _, ok := shlInterval(il, shiftCounts(v.termInterval(r, probe))); !ok {
