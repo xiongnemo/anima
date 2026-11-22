@@ -24,6 +24,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/crypto.h>
@@ -1465,6 +1466,136 @@ static bool http_tls_timed_out(SSL *ssl, int n) {
         (e == SSL_ERROR_SYSCALL && (errno == EAGAIN || errno == EWOULDBLOCK));
 }
 
+// What was wrong with the certificates of the handshake this thread is in:
+// the reason Go would give first, in Go's words.
+static __thread struct {
+    bool bad;
+    int rank;
+    char *why;
+    const char *host;
+} tls_seen;
+
+static void tls_why(const char *a, const char *b, const char *c, const char *d) {
+    AnimaBuf w = {0};
+    buf_put(&w, a); buf_put(&w, b); buf_put(&w, c); buf_put(&w, d);
+    free(tls_seen.why);
+    tls_seen.why = w.p;
+}
+
+// A time as Go writes it (RFC 3339): Z for UTC, +hh:mm otherwise.
+static void tls_time(const struct tm *tm, bool utc, char *out, size_t cap) {
+    char z[8] = "Z";
+    if (!utc) {
+        strftime(z, sizeof(z), "%z", tm);
+        if (!strcmp(z, "+0000")) strcpy(z, "Z");
+        else { z[6] = '\0'; z[5] = z[4]; z[4] = z[3]; z[3] = ':'; }
+    }
+    size_t n = strftime(out, cap, "%Y-%m-%dT%H:%M:%S", tm);
+    snprintf(out + n, cap - n, "%s", z);
+}
+
+// The names a certificate is valid for, as Go lists them to a host it is
+// not valid for: its addresses to an address, its DNS names to a name.
+static void tls_not_for(X509 *cert, const char *host) {
+    unsigned char raw[sizeof(struct in6_addr)];
+    bool is_ip = inet_pton(AF_INET, host, raw) == 1 || inet_pton(AF_INET6, host, raw) == 1;
+    GENERAL_NAMES *sans = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (!sans && X509_check_host(cert, host, 0, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS, NULL) == 1) {
+        tls_why("certificate relies on legacy Common Name field, use SANs instead", "", "", "");
+        return;
+    }
+    AnimaBuf valid = {0};
+    int ips = 0;
+    for (int i = 0; i < sk_GENERAL_NAME_num(sans); i++) {
+        GENERAL_NAME *g = sk_GENERAL_NAME_value(sans, i);
+        char one[INET6_ADDRSTRLEN + 1] = {0};
+        const char *name = NULL; size_t len = 0;
+        if (is_ip && g->type == GEN_IPADD) {
+            int n = ASN1_STRING_length(g->d.iPAddress);
+            const unsigned char *d = ASN1_STRING_get0_data(g->d.iPAddress);
+            if (n == 4) inet_ntop(AF_INET, d, one, sizeof(one));
+            else if (n == 16) inet_ntop(AF_INET6, d, one, sizeof(one));
+            else continue;
+            ips++;
+            name = one; len = strlen(one);
+        } else if (!is_ip && g->type == GEN_DNS) {
+            name = (const char *)ASN1_STRING_get0_data(g->d.dNSName);
+            len = (size_t)ASN1_STRING_length(g->d.dNSName);
+        } else continue;
+        if (valid.len > 0) buf_put(&valid, ", ");
+        // A name out of a certificate is not text yet: what cannot be
+        // printed in it is left out of the message.
+        for (size_t k = 0; k < len; k++) {
+            char ch[2] = { (name[k] >= 0x20 && name[k] < 0x7f) ? name[k] : '?', 0 };
+            buf_put(&valid, ch);
+        }
+    }
+    GENERAL_NAMES_free(sans);
+    if (is_ip && ips == 0)
+        tls_why("cannot validate certificate for ", host, " because it doesn't contain any IP SANs", "");
+    else if (valid.len == 0)
+        tls_why("certificate is not valid for any names, but wanted to match ", host, "", "");
+    else
+        tls_why("certificate is valid for ", valid.p, ", not ", host);
+    free(valid.p);
+}
+
+// Called for each thing wrong with a certificate. Go looks at the server's
+// own dates first, then at its names, then for an authority, and names the
+// first that fails; OpenSSL looks in another order, so every one is heard
+// and the one Go would name is kept. The handshake is refused by http_do.
+static int tls_refused(int ok, X509_STORE_CTX *sc) {
+    if (ok) return 1;
+    int err = X509_STORE_CTX_get_error(sc);
+    X509 *cert = X509_STORE_CTX_get_current_cert(sc);
+    bool own = X509_STORE_CTX_get_error_depth(sc) == 0;
+    bool dates = cert && (err == X509_V_ERR_CERT_HAS_EXPIRED || err == X509_V_ERR_CERT_NOT_YET_VALID);
+    bool names = cert && (err == X509_V_ERR_HOSTNAME_MISMATCH || err == X509_V_ERR_IP_ADDRESS_MISMATCH);
+    // An authority out of its dates is named before one that is not known.
+    int rank = dates ? (own ? 4 : 2) : names ? 3 : 1;
+    tls_seen.bad = true;
+    if (rank <= tls_seen.rank) return 1;
+    tls_seen.rank = rank;
+    if (dates) {
+        bool late = err == X509_V_ERR_CERT_HAS_EXPIRED;
+        struct tm edge = {0}, now = {0};
+        char at[40] = "", is[40] = "";
+        time_t t = time(NULL);
+        localtime_r(&t, &now);
+        tls_time(&now, false, is, sizeof(is));
+        if (ASN1_TIME_to_tm(late ? X509_get0_notAfter(cert) : X509_get0_notBefore(cert), &edge) == 1)
+            tls_time(&edge, true, at, sizeof(at));
+        tls_why("certificate has expired or is not yet valid: current time ", is,
+            late ? " is after " : " is before ", at);
+    } else if (names) {
+        tls_not_for(cert, tls_seen.host);
+    } else {
+        switch (err) {
+        case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+        case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+        case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
+        case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+        case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+        case X509_V_ERR_CERT_UNTRUSTED:
+        // A certificate that may not sign, or did not sign, is no authority.
+        case X509_V_ERR_INVALID_CA:
+        case X509_V_ERR_CERT_SIGNATURE_FAILURE:
+        case X509_V_ERR_AKID_SKID_MISMATCH:
+            tls_why("certificate signed by unknown authority", "", "", "");
+            break;
+        case X509_V_ERR_INVALID_PURPOSE:
+            tls_why("certificate specifies an incompatible key usage", "", "", "");
+            break;
+        case X509_V_ERR_PATH_LENGTH_EXCEEDED:
+            tls_why("too many intermediates for path length constraint", "", "", "");
+            break;
+        default:
+            tls_why(X509_verify_cert_error_string(err), "", "", "");
+        }
+    }
+    return 1;
+}
+
 static AnimaVal http_do(const char *method, const char *url, const char *body, int64_t timeout_ms) {
     // One time limit for the whole request, as http.Client.Timeout is.
     int64_t deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 5000);
@@ -1517,14 +1648,64 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     if (is_https) {
+        // The server is who the URL says only if its certificate says so
+        // and one of the system's authorities stands for it, as for Go:
+        // SSL_CERT_FILE and SSL_CERT_DIR name others to both.
         ctx = SSL_CTX_new(TLS_client_method());
+        SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+        // The TLS 1.2 suites Go offers: a key agreed on anew for each
+        // connection, with no export, RC4, 3DES or plain-RSA exchange.
+        SSL_CTX_set_cipher_list(ctx,
+            "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+            "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+            "ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:"
+            "ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA");
+        SSL_CTX_set_default_verify_paths(ctx);
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, tls_refused);
         ssl = SSL_new(ctx);
-        SSL_set_tlsext_host_name(ssl, host);
+        unsigned char ip[sizeof(struct in6_addr)];
+        bool named = inet_pton(AF_INET, host, ip) != 1 && inet_pton(AF_INET6, host, ip) != 1;
+        X509_VERIFY_PARAM *vp = SSL_get0_param(ssl);
+        // A name is matched as Go matches it: a * stands for the whole
+        // first label only, and the subject's common name is no name.
+        X509_VERIFY_PARAM_set_hostflags(vp,
+            X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT);
+        // Every certificate among the authorities stands for itself and
+        // for what it signed, whether or not another signed it.
+        X509_VERIFY_PARAM_set_flags(vp, X509_V_FLAG_PARTIAL_CHAIN);
+        // "a.test." is the name "a.test", to the certificate and the server.
+        char name[256];
+        snprintf(name, sizeof(name), "%s", host);
+        size_t nl = strlen(name);
+        if (named && nl > 1 && name[nl - 1] == '.') name[nl - 1] = '\0';
+        bool told = named ? X509_VERIFY_PARAM_set1_host(vp, name, 0) == 1
+                          : X509_VERIFY_PARAM_set1_ip_asc(vp, host) == 1;
+        // The name is told to the server as well; an address is not.
+        if (named) SSL_set_tlsext_host_name(ssl, name);
         SSL_set_fd(ssl, fd);
-        if (SSL_connect(ssl) <= 0) {
+        tls_seen.bad = false; tls_seen.rank = 0;
+        tls_seen.host = host;
+        bool shook = told && SSL_connect(ssl) > 0;
+        // tls_refused lets the handshake go on to hear every reason, so
+        // what it heard decides, not the handshake.
+        bool refuse = !shook || tls_seen.bad || SSL_get_verify_result(ssl) != X509_V_OK;
+        // The reason is this request's: no later one finds it, and a
+        // thread that ends after one request leaves nothing behind.
+        char *heard = tls_seen.why;
+        tls_seen.why = NULL; tls_seen.host = NULL;
+        if (refuse) {
             SSL_free(ssl); SSL_CTX_free(ctx); close(fd);
-            return http_err(method, url, "tls handshake failed", NULL);
+            if (!heard) return http_err(method, url, "tls handshake failed", NULL);
+            AnimaBuf why = {0};
+            buf_put(&why, "tls: failed to verify certificate: x509: ");
+            buf_put(&why, heard);
+            free(heard);
+            AnimaVal refused = http_err(method, url, why.p, NULL);
+            free(why.p);
+            return refused;
         }
+        free(heard);
     }
 
     // The request is as long as its path and body make it.
