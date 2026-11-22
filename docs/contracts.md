@@ -20,9 +20,23 @@ Contents: [Contracts](#contracts) · [Integers and overflow](#integers-and-overf
 `int` is a signed 64-bit integer at run time, in both backends, while proofs reason over unbounded integers.
 
 - Every `+`, `-`, `*`, unary `-`, `/`, `%`, `sum` and `fold` therefore gets an `int64_overflow` proof obligation, and `anima check` fails when one cannot be proved.
+- So does `abs(x)`: `x` is proved not to be the least int, whose negation is no int64. A `requires: x != -9223372036854775807 - 1` or any range type is enough.
 - A product of two non-constant operands needs bounds on both (a range type or a `requires`).
 - Only `fold(init, (a, x) => a + x)` is bounded as a sum.
+- A sum whose constant part alone is no int64 is refused whatever its value: `9223372036854775807 + (1 - b)` fails `int64_overflow` even for a `b` that is at least 1.
 - Every length, of a view, a list or a string, is known to fit an int64, so `n <= len(xs) - 4` is arithmetic the kernel can follow. (`n + 4 <= len(xs)` is not: `n + 4` may overflow.)
+
+### `abs`, `min` and `max`
+
+The kernel knows the value of each, not only its range:
+
+| Expression | What is known of it |
+|---|---|
+| `abs(x)` | it is `x` or `-x`, it is not below either, and it is not negative |
+| `min(a, b)` | it is `a` or `b`, and it is not above either |
+| `max(a, b)` | it is `a` or `b`, and it is not below either |
+
+So `min(max(x, 0), 255)` is an `int[0..255]` for any `x`, `xs[min(max(i, 0), len(xs) - 1)]` is in bounds for a list that is not empty, `max(a - b, 0)` is not negative (a `sleep_ms` argument, where `a` is at most a day), `min(a, b) + max(a, b) == a + b` is proved, and `abs(x)` written twice is one number. In a monitor's guard or assignment they are evaluated like any other arithmetic.
 
 ## Bit operators
 

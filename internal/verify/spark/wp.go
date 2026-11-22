@@ -1952,6 +1952,11 @@ func (v *verifier) checkArith(expr ast.Expr, env *symEnv, scope string) {
 		for _, a := range e.Args {
 			v.checkArith(a.Value, env, scope)
 		}
+		if builtinCall(e, "abs", 1) {
+			// abs of the least int is its negation, which is no int64.
+			x := v.evalInt(e.Args[0].Value, env, scope, false)
+			v.proveArith(e, env, scope, smt.FitsInt64(x.Scale(-1)))
+		}
 	case *ast.WithExpr:
 		v.checkArith(e.Base, env, scope)
 		for _, f := range e.Fields {
@@ -2576,6 +2581,14 @@ func (v *verifier) evalInt(expr ast.Expr, env *symEnv, scope string, emitVCs boo
 		// bv.len() is the length of the view.
 		if fe, ok := e.Callee.(*ast.FieldExpr); ok && fe.Field == "len" && len(e.Args) == 0 && isByteView(v.info.ExprTypes[fe.Object]) {
 			return v.viewLen(fe.Object, env)
+		}
+		switch {
+		case builtinCall(e, "abs", 1):
+			return v.absOf(v.evalInt(e.Args[0].Value, env, scope, emitVCs), env)
+		case builtinCall(e, "min", 2), builtinCall(e, "max", 2):
+			a := v.evalInt(e.Args[0].Value, env, scope, emitVCs)
+			b := v.evalInt(e.Args[1].Value, env, scope, emitVCs)
+			return v.leastOf(a, b, e.Callee.(*ast.Ident).Name == "max", env)
 		}
 		if id, ok := e.Callee.(*ast.Ident); ok && id.Name == "len" && len(e.Args) == 1 {
 			// The length of what a variable holds, or a field of one.

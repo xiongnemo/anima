@@ -613,6 +613,12 @@ static AnimaVal v_call_clos(AnimaVal cv, int argc, AnimaVal *argv) {
     return cv.u.clos->fn(cv.u.clos->upvals, argc, argv);
 }
 
+// abs of the least int is the least int, as on the VM; llabs of it is
+// undefined. No verified program asks for it.
+static int64_t anima_abs(int64_t x) {
+    return x < 0 ? (int64_t)(0 - (uint64_t)x) : x;
+}
+
 static int64_t anima_len(AnimaVal v) {
     if (v.kind == VAL_LIST && v.u.list) return (int64_t)v.u.list->len;
     if (v.kind == VAL_MAP && v.u.map) return (int64_t)v.u.map->len;

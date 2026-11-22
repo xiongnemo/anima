@@ -1,0 +1,13 @@
+# abs of the least int is no int64: `abs(x)` is proved to have an argument
+# that is not it. On `main` this passed all three kernels and printed 1 on
+# the VM (which gives the least int back) and 0 as a native program (which
+# called llabs, undefined there).
+def neg(x: int) -> int:
+    if abs(x) < 0:
+        return 1
+    return 0
+
+def main() -> int:
+    xs = [0 - 9223372036854775807 - 1]
+    print(neg(xs[0]))
+    return 0

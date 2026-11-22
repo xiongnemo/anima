@@ -1519,7 +1519,7 @@ func (g *cgen) emitPrelude(name string, e *ast.CallExpr) string {
 			g.line("char *%s_c = v_to_cstr(%s); AnimaVal %s = v_str(%s_c); free(%s_c);", tmp, args[0], tmp, tmp, tmp)
 			return tmp
 		case "abs":
-			return fmt.Sprintf("v_int(llabs((%s).u.i))", args[0])
+			return fmt.Sprintf("v_int(anima_abs((%s).u.i))", args[0])
 		case "min":
 			return fmt.Sprintf("(((%s).u.i < (%s).u.i) ? (%s) : (%s))", args[0], args[1], args[0], args[1])
 		case "max":

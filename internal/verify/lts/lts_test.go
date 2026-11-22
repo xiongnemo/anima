@@ -230,3 +230,85 @@ def bad_uaf() -> Result[int, str]:
 		t.Fatalf("expected use-after-close diagnostic, got: %v", repUAF.Errors())
 	}
 }
+
+// abs, min and max in a monitor are what they are in a function. The model
+// read each as 0: `abs(n - 3) == 2` was never true and `abs(n - 3) == 0`
+// always, so a transition the monitor takes was left out of the model and
+// one it never takes was in it.
+func TestAbsMinMaxInAMonitor(t *testing.T) {
+	// With n == 1, the car stops for good after one `go` exactly where
+	// the guard holds; where it does not, it goes on for ever.
+	const guarded = `
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    n: control int[0..3] = INIT
+
+    state S:
+        on go when GUARD -> T
+        on go when not (GUARD) -> S
+    state T:
+        on stop -> T
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+`
+	// The gate counts with ASSIGN while n < 3, and then lets no `go` by.
+	const counted = `
+machine Car:
+    state A:
+        on go -> A
+
+monitor Gate:
+    n: control int[0..3] = 0
+
+    state S:
+        on go when n < 3 -> S:
+            n = ASSIGN
+
+system Sys:
+    compose:
+        car: Car
+        gate: Gate
+    check:
+        deadlock_free
+`
+	for _, c := range []struct {
+		src, hole, expr string
+		stops           bool
+	}{
+		{guarded, "GUARD", "abs(n - 3) == 2", true},
+		{guarded, "GUARD", "abs(n - 3) == 0", false},
+		{guarded, "GUARD", "abs(n) == n and abs(0 - n) == n", true},
+		{guarded, "GUARD", "min(n, 5) == 1", true},
+		{guarded, "GUARD", "min(n, 0 - 5) == 1", false},
+		{guarded, "GUARD", "min(n, 0) == 0", true},
+		{guarded, "GUARD", "max(n, 2) == 2", true},
+		{guarded, "GUARD", "max(n, 0) == 0", false},
+		{guarded, "GUARD", "max(2, n) > min(2, n)", true},
+		{guarded, "GUARD", "min(max(n, 2), 3) - abs(n - 2) == 1", true},
+		{guarded, "INIT", "min(3, 5)", false},
+		{guarded, "INIT", "max(0, 1)", true},
+		{guarded, "INIT", "abs(0 - 1)", true},
+		{counted, "ASSIGN", "min(n + 1, 3)", true},
+		{counted, "ASSIGN", "max(n + 1, abs(0 - 3))", true},
+		{counted, "ASSIGN", "min(n, 2)", false},
+		{counted, "ASSIGN", "abs(n - 1) - 1", false},
+	} {
+		src := strings.Replace(c.src, c.hole, c.expr, -1)
+		src = strings.Replace(strings.Replace(src, "INIT", "1", 1), "GUARD", "n == 1", -1)
+		rep := verifyLTS(t, src)
+		if len(rep.Systems) != 1 {
+			t.Fatalf("%s: %d systems", c.expr, len(rep.Systems))
+		}
+		if stopped := !rep.OK(); stopped != c.stops {
+			t.Errorf("%s as %s: deadlock %v, want %v: %v", c.expr, c.hole, stopped, c.stops, rep.Errors())
+		}
+	}
+}
