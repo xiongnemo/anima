@@ -225,6 +225,147 @@ system Sys:
 	}
 }
 
+// What an action is done with is in the name the instance gives it, and not
+// in the name its machine is written with.
+func TestRelabelledActionIsDoneWithWhatItsNewNameNames(t *testing.T) {
+	const gate = `monitor Gate:
+    state S:
+        on go when False -> S
+
+`
+	for name, c := range map[string]struct{ src, want string }{
+		// Gate.go is go now, and no Gate is asked for.
+		"a monitor's action to a plain one, no monitor": {gate + `machine Car:
+    state A:
+        on Gate.go -> A
+
+system Sys:
+    compose:
+        car: Car / {Gate.go -> go}
+    check:
+        deadlock_free
+`, ""},
+		"a monitor's action to another plain one, the monitor there": {gate + `machine Car:
+    state A:
+        on Gate.go -> A
+
+system Sys:
+    compose:
+        car: Car / {Gate.go -> other}
+        gate: Gate
+    check:
+        deadlock_free
+`, ""},
+		"a monitor's action to the plain one the monitor has": {gate + `machine Car:
+    state A:
+        on Gate.go -> A
+
+system Sys:
+    compose:
+        car: Car / {Gate.go -> go}
+        gate: Gate
+    check:
+        deadlock_free
+`, "DEADLOCK at state 0 [car=A, gate=S]"},
+		"a part that is not there, to a plain one": {`machine Car:
+    state A:
+        on missing.go -> A
+
+system Sys:
+    compose:
+        car: Car / {missing.go -> go}
+    check:
+        deadlock_free
+`, ""},
+		// go is Gate.go now, and is done with the monitor.
+		"a plain action to a monitor's": {gate + `machine Car:
+    state A:
+        on go -> A
+
+system Sys:
+    compose:
+        car: Car / {go -> Gate.go}
+        gate: Gate / {go -> run}
+    check:
+        deadlock_free
+`, "DEADLOCK at state 0 [car=A, gate=S]"},
+		"a plain action to a monitor's, no monitor": {gate + `machine Car:
+    state A:
+        on go -> A
+
+system Sys:
+    compose:
+        car: Car / {go -> Gate.go}
+    check:
+        deadlock_free
+`, "car of system Sys does Gate.go with Gate, which is a monitor the system has no part of"},
+	} {
+		rep := verifyLTS(t, c.src)
+		got := strings.Join(rep.Errors(), "\n")
+		if c.want == "" && !rep.OK() {
+			t.Errorf("%s: %v", name, got)
+		}
+		if c.want != "" && !strings.Contains(got, c.want) {
+			t.Errorf("%s: want %q, got %q", name, c.want, got)
+		}
+	}
+}
+
+// A `sync Gate.go` of a workflow has the name Gate.go, and stays an action
+// done with a part: what a workflow does alone no other part holds back.
+func TestRelabelledWorkflow(t *testing.T) {
+	const src = `monitor Gate:
+    state S:
+        on go when False -> S
+        on run -> S
+
+workflow W() -> bool:
+    start -> a:
+        ok = True
+    fork a:
+        branch b1:
+            sync Gate.go
+        branch b2:
+            sync Gate.go
+    join j
+    step fin after j -> done:
+        return True
+
+workflow P() -> bool:
+    start -> fin:
+        ok = True
+    step fin -> done:
+        return True
+
+system Sys:
+    compose:
+        w: PART
+        gate: Gate
+    check:
+        deadlock_free
+`
+	for part, want := range map[string]string{
+		"W":                         "DEADLOCK at state 1 [w=a, gate=S]",
+		"W / {Gate.go -> Gate.run}": "",
+		"W / {go -> run}":           "w of system Sys relabels go, which is no action of W",
+		"W / {nope -> run}":         "w of system Sys relabels nope, which is no action of W",
+		"W / {Gate.go -> go}":       "w of system Sys relabels Gate.go to go: a workflow does with a part what it is written to do with one",
+		"W / {Gate.go -> Door.go}":  "w of system Sys does Door.go with Door, which is bound to no part of the system",
+		"P":                         "",
+		"P / {fin -> Gate.run}":     "",
+		"P / {fin -> Gate.go}":      "DEADLOCK",
+	} {
+		rep := verifyLTS(t, strings.Replace(src, "PART", part, 1))
+		got := strings.Join(rep.Errors(), "\n")
+		if want == "" && !rep.OK() {
+			t.Errorf("%s: %v", part, got)
+		}
+		if want != "" && !strings.Contains(got, want) {
+			t.Errorf("%s: want %q, got %q", part, want, got)
+		}
+	}
+}
+
 // What an action is done with is a part of the system. An action of a part
 // that is not there was done alone, as often as its doer liked.
 func TestSystemNamesOnlyItsParts(t *testing.T) {

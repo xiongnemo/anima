@@ -259,6 +259,7 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/lts_sync_with_absent_monitor.anm", "does Gate.go with Gate, which is a monitor the system has no part of"},
 		{"../tests/bugs/lts_bound_to_absent_part.anm", "p0 of system Sys is bound to f9, which is no other part of the system"},
 		{"../tests/bugs/lts_called_part_calls_a_part.anm", "f0 of system Sys does b.put, and other parts do their actions with it"},
+		{"../tests/bugs/lts_workflow_sync_relabelled_away.anm", "w of system Sys relabels Gate.go to go: a workflow does with a part what it is written to do with one"},
 		{"../tests/bugs/lts_part_named_in_action_runs_alone.anm", "DEADLOCK at state 4 [f0=Taken, f1=Taken, a=H, b=H]"},
 		{"../tests/bugs/sema_monitor_guard_calls_function.anm", "is not worked out in a model"},
 		{"../tests/bugs/sema_monitor_bool_control_variable.anm", "control variable open has type bool"},

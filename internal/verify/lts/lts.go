@@ -572,7 +572,7 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 				isBoundResource[rIdx] = true
 			}
 		}
-		for act := range im.comp.Alphabet {
+		for act := range writtenWith(im.comp) {
 			parts := strings.SplitN(relabelled(im.relabels, act), ".", 2)
 			if len(parts) != 2 {
 				continue
@@ -596,13 +596,26 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 				return nil, fmt.Errorf("%s: %s of system %s is bound to %s, which is no other part of the system", sys.Instances[i].Span, im.name, sys.Name, target)
 			}
 		}
-		with := map[string]string{}
-		for act := range im.comp.Alphabet {
-			if rep, ok := im.relabels[act]; ok {
-				act = rep
+		does := writtenWith(im.comp)
+		if im.comp.IsWorkflow {
+			for _, from := range sortedKeys(im.relabels) {
+				if !does[from] {
+					return nil, fmt.Errorf("%s: %s of system %s relabels %s, which is no action of %s", sys.Instances[i].Span, im.name, sys.Name, from, im.comp.Name)
+				}
+				// What a workflow does alone no other part holds back, so
+				// `Gate.go` under the name `go` would be held back by none.
+				if to := im.relabels[from]; strings.Contains(from, ".") && !strings.Contains(to, ".") {
+					return nil, fmt.Errorf("%s: %s of system %s relabels %s to %s: a workflow does with a part what it is written to do with one", sys.Instances[i].Span, im.name, sys.Name, from, to)
+				}
 			}
-			if parts := strings.SplitN(act, ".", 2); len(parts) == 2 {
-				with[parts[0]] = act
+		}
+		with := map[string]string{}
+		named := map[string]bool{}
+		for act := range does {
+			to := relabelled(im.relabels, act)
+			if parts := strings.SplitN(to, ".", 2); len(parts) == 2 {
+				with[parts[0]] = to
+				named[parts[0]] = named[parts[0]] || to != act
 			}
 		}
 		// A monitor, and a part other parts do their actions with, moves
@@ -618,15 +631,6 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 			}
 			continue
 		}
-		for _, edges := range im.comp.Edges {
-			for _, e := range edges {
-				if e.TargetMon != "" {
-					if _, seen := with[e.TargetMon]; !seen {
-						with[e.TargetMon] = e.TargetMon + "." + e.BaseAction
-					}
-				}
-			}
-		}
 		for _, name := range sortedKeys(with) {
 			_, bound := im.bindings[name]
 			rIdx, part := byName[name]
@@ -639,7 +643,8 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 			}
 			_, declared := info.Machines[name]
 			// A workflow calls methods of its values too: `xs.append(1)`.
-			if bound || part || len(monitorsByType[name]) > 0 || (im.comp.IsWorkflow && !declared) {
+			// The name a relabel gives an action is of no value of it.
+			if bound || part || len(monitorsByType[name]) > 0 || (im.comp.IsWorkflow && !declared && !named[name]) {
 				continue
 			}
 			what := "bound to no part of the system"
@@ -744,12 +749,15 @@ func Compose(sys *ast.SystemDecl, info *sema.ProgramInfo) (*SystemLTS, error) {
 			}
 			edges := im.comp.Edges[vec[i]]
 			for _, e := range edges {
-				act := e.Action
-				if rep, ok := im.relabels[act]; ok {
-					act = rep
-				}
+				act := doneAs(im.relabels, e)
 				base := baseAct(act)
-				targetMon := e.TargetMon
+				// What the action is done with is in the name the instance
+				// gives it: `Gate.go` relabelled to `go` is with no monitor,
+				// and `go` relabelled to `Gate.go` is with the monitor Gate.
+				targetMon := ""
+				if parts := strings.SplitN(act, ".", 2); len(parts) == 2 {
+					targetMon = parts[0]
+				}
 
 				// Check binding mapping e.g. left.get -> f0.get when left=f0
 				receiver := ""
@@ -983,6 +991,32 @@ func hasAction(comp *ComponentLTS, relabels map[string]string, target string) bo
 		}
 	}
 	return false
+}
+
+// doneAs is the name an instance does an edge under: a `sync Gate.go` of a
+// workflow is Gate.go, and a relabel gives an action another name.
+func doneAs(relabels map[string]string, e Edge) string {
+	act := e.Action
+	if e.TargetMon != "" && !strings.Contains(act, ".") {
+		act = e.TargetMon + "." + act
+	}
+	return relabelled(relabels, act)
+}
+
+// writtenWith is every action a part is written with, under the names its
+// machine gives them: the alphabet of a machine, and what the edges of a
+// workflow do.
+func writtenWith(comp *ComponentLTS) map[string]bool {
+	if !comp.IsWorkflow {
+		return comp.Alphabet
+	}
+	does := map[string]bool{}
+	for _, edges := range comp.Edges {
+		for _, e := range edges {
+			does[doneAs(nil, e)] = true
+		}
+	}
+	return does
 }
 
 func baseAct(a string) string {

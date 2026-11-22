@@ -64,6 +64,8 @@ The alphabet of a machine is every action it is written with: also one in a stat
 
 - A monitor, and a part that another is bound to or names, moves only with the part that calls it, and calls no part itself: `on b.put` in it is refused. The caller's action is matched to its action of the same name.
 - An instance written `B / {a -> b}` has `b` in its alphabet where its machine has `a`, and no longer `a`. It relabels only actions its machine has, each once.
+- What an action is done with is read from the name the instance gives it. `Car / {Gate.go -> go}` does `go` with every part that has `go` in its alphabet, and no longer with the monitor; `Car / {go -> Gate.go}` does it with the monitor.
+- A `sync Gate.go` of a workflow has the name `Gate.go`. A workflow does alone what it does with no part, so its `Gate.go` is relabelled only to an action done with a part of the system (`W / {Gate.go -> Gate.run}`): `W / {Gate.go -> go}` is refused.
 - A system in which `left` is bound to no part, `f0` is no part, or no part is a `monitor Gate`, is refused: the action would be done with nothing. So is one with two parts that are a `monitor Gate`, where a part does `Gate.go`.
 
 ## What a model is written with

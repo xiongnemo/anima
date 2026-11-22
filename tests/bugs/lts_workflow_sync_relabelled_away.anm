@@ -1,0 +1,28 @@
+# A workflow does alone what it does with no part of the system. Its
+# `sync Gate.go` under the name `go` would be held back by no one, though
+# the gate never offers go: the system is refused.
+monitor Gate:
+    state S:
+        on go when False -> S
+
+workflow W() -> bool:
+    start -> a:
+        ok = True
+    fork a:
+        branch b1:
+            sync Gate.go
+        branch b2:
+            sync Gate.go
+    join j
+    step fin after j -> done:
+        return True
+
+system Sys:
+    compose:
+        w: W / {Gate.go -> go}
+        gate: Gate
+    check:
+        deadlock_free
+
+def main() -> int:
+    return 0
