@@ -1,0 +1,13 @@
+# `p |> keep` is keep(p): what it gives may be p itself, so writing to it
+# writes to p. Taken for a value of its own, this divided by zero after
+# all three kernels had passed it.
+entity P:
+    d: int
+
+def main() -> int:
+    p = P(d=1)
+    keep = (q) => q
+    a = p |> keep
+    a.d = 0
+    print(10 / p.d)
+    return 0

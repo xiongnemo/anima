@@ -920,6 +920,31 @@ func evalConstInt(expr ast.Expr, env map[string]int64) int64 {
 		if e.Op == "~" {
 			return ^evalConstInt(e.Expr, env)
 		}
+	case *ast.CallExpr:
+		// The built-in functions of ints; the contract kernel has proved
+		// abs is not of the least int.
+		id, ok := e.Callee.(*ast.Ident)
+		if !ok {
+			break
+		}
+		var xs []int64
+		for _, a := range e.Args {
+			if a.Name != "" {
+				return 0
+			}
+			xs = append(xs, evalConstInt(a.Value, env))
+		}
+		switch {
+		case id.Name == "abs" && len(xs) == 1:
+			if xs[0] < 0 {
+				return -xs[0]
+			}
+			return xs[0]
+		case id.Name == "min" && len(xs) == 2:
+			return min(xs[0], xs[1])
+		case id.Name == "max" && len(xs) == 2:
+			return max(xs[0], xs[1])
+		}
 	case *ast.BinaryExpr:
 		l := evalConstInt(e.Left, env)
 		r := evalConstInt(e.Right, env)

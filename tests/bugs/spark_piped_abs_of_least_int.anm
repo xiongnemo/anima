@@ -1,0 +1,12 @@
+# `x |> abs()` is abs(x): of the least int it is the least int, on both
+# backends, so this printed 1 after all three kernels had passed it.
+def neg(x: int) -> int:
+    y = x |> abs()
+    if y < 0:
+        return 1
+    return 0
+
+def main() -> int:
+    xs = [0 - 9223372036854775807 - 1]
+    print(neg(xs[0]))
+    return 0

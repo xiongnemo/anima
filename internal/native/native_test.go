@@ -238,6 +238,93 @@ func TestNativeLeastIntDividedByMinusOneWraps(t *testing.T) {
 	}
 }
 
+// abs of the least int is no int64. The VM gives the least int back; the
+// native program called llabs, whose result there C leaves undefined, and
+// gcc took it for not negative: abs(x) < 0 was true on the VM and false in
+// the native program, in a program the kernel had proved all of. The kernel
+// now refuses it (TestAbsMinMaxRefused), and a program it was not asked
+// about prints the same on both.
+func TestNativeAbsOfTheLeastIntIsTheVMs(t *testing.T) {
+	src := `def neg(x: int) -> int:
+    if abs(x) < 0:
+        return 1
+    return 0
+
+def main() -> int:
+    xs = [0 - 9223372036854775807 - 1, 0 - 9223372036854775807, 9223372036854775807]
+    print(neg(xs[0]), abs(xs[0]), neg(xs[1]), abs(xs[1]), neg(xs[2]), abs(xs[2]))
+    print(min(xs[0], xs[2]), max(xs[0], xs[2]), min(xs[2], xs[0]), max(xs[2], xs[0]))
+    return 0
+`
+	const want = "1 -9223372036854775808 0 9223372036854775807 0 9223372036854775807\n" +
+		"-9223372036854775808 9223372036854775807 -9223372036854775808 9223372036854775807\n"
+	prog, err := parser.Parse("abs.anm", src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	info, err := sema.Check(prog)
+	if err != nil {
+		t.Fatalf("sema: %v", err)
+	}
+	if rep := spark.Verify(info); rep.OK() {
+		t.Fatal("the kernel proved a program that takes abs of the least int")
+	}
+	cp, err := vm.Compile(info, src, false)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var vmOut strings.Builder
+	if _, err := vm.NewVM(cp, vm.RunOptions{Stdout: &vmOut}).Run(); err != nil || vmOut.String() != want {
+		t.Fatalf("VM printed %q (%v), want %q", vmOut.String(), err, want)
+	}
+	bin := filepath.Join(t.TempDir(), "abs")
+	if err := BuildNative(info, bin, ""); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if out, err := exec.Command(bin).CombinedOutput(); err != nil || string(out) != want {
+		t.Errorf("native printed %q (%v), want %q", out, err, want)
+	}
+}
+
+// What the kernel proves of abs, min and max is what both backends compute.
+func TestAbsMinMaxParity(t *testing.T) {
+	src := `def clamp(x: int) -> int[0..255]:
+    return min(max(x, 0), 255)
+
+def gap(a: int[-1000..1000], b: int[-1000..1000]) -> int[0..2000]:
+    return abs(a - b)
+
+def far(x: int) -> int:
+    requires: x != -9223372036854775807 - 1
+    ensures: result >= 0
+    return abs(x)
+
+def main() -> int:
+    xs = [0 - 9223372036854775807, 0 - 300, 0 - 1, 0, 1, 255, 256, 9223372036854775807]
+    for x in xs:
+        if x != -9223372036854775807 - 1:
+            print(clamp(x), far(x), min(x, 0 - 1), max(x, 7), abs(min(x, 5)))
+    print(gap(0 - 1000, 1000), gap(3, 3), gap(7, 0 - 2), abs(0 - 5), min(2, 3), max(2, 3))
+    keep = (q) => q
+    print(0 - 5 |> abs(), 0 - 6 |> abs, 3 |> min(2) |> max(0 - 1), [1, 2] |> len, 4 |> keep |> str)
+    return 0
+`
+	const want = "0 9223372036854775807 -9223372036854775807 7 9223372036854775807\n" +
+		"0 300 -300 7 300\n" +
+		"0 1 -1 7 1\n" +
+		"0 0 -1 7 0\n" +
+		"1 1 -1 7 1\n" +
+		"255 255 -1 255 5\n" +
+		"255 256 -1 256 5\n" +
+		"255 9223372036854775807 -1 9223372036854775807 5\n" +
+		"2000 0 9 5 2 3\n" +
+		"5 6 2 2 4\n"
+	onVM, onNative := run(t, "absminmax", src)
+	if onVM != want || onNative != want {
+		t.Errorf("VM printed %q, native %q, want %q", onVM, onNative, want)
+	}
+}
+
 // A count the machine does not have is held to one it has by both runtimes,
 // the same one: no thread for each of 1 << 40 workers, no queue of 1 << 40
 // places, a semaphore of no permit has one. No verified program gets there
