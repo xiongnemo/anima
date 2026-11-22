@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -264,7 +265,8 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		if len(args) >= 1 && args[0].Int > 0 {
 			poolSize = int(args[0].Int)
 		}
-		tr := &http.Transport{MaxIdleConnsPerHost: poolSize, MaxIdleConns: poolSize * 2, DisableCompression: true, DisableKeepAlives: true}
+		tr := newTransport()
+		tr.MaxIdleConnsPerHost, tr.MaxIdleConns = poolSize, poolSize*2
 		cl := &http.Client{Transport: tr}
 		return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleSession, HTTPClient: cl}}, nil
 
@@ -739,12 +741,19 @@ func extractTimeoutMsFromMethod(cm CallMeta, args []Value, posIdx int, def int) 
 // a redirect is an answer like another, not followed. Each request has a
 // connection of its own, as it has there: on one used again, what a server
 // sent after an answer was read as the start of the next.
-var plainTransport = func() *http.Transport {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DisableCompression = true
-	tr.DisableKeepAlives = true
-	return tr
-}()
+var plainTransport = newTransport()
+
+// newTransport gives a transport that does what the native client does and
+// no more: it speaks HTTP/1.1 only, straight to the server and through no
+// proxy the environment names, and the one time limit is the request's.
+func newTransport() *http.Transport {
+	return &http.Transport{
+		DialContext:        (&net.Dialer{}).DialContext,
+		DisableCompression: true,
+		DisableKeepAlives:  true,
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}
+}
 
 // asAnswered hides from Go's client where a redirect leads, so that the
 // client follows none and has no word to say on where one leads.
@@ -756,6 +765,30 @@ func (a asAnswered) RoundTrip(r *http.Request) (*http.Response, error) {
 		resp.Header.Del("Location")
 	}
 	return resp, err
+}
+
+func escapeQuery(q string) string {
+	var b strings.Builder
+	for i := 0; i < len(q); i++ {
+		if c := q[i]; c == ' ' || c == '"' || c == '<' || c == '>' || c >= 0x80 {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func hostRefused(host string) string {
+	if strings.Contains(host, "%") {
+		return "invalid host"
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return "non-ASCII host name"
+		}
+	}
+	return ""
 }
 
 func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.Client) Value {
@@ -770,7 +803,29 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
+		// Why an address in [ ] is none is said in more words than the
+		// native client has for it.
+		var ue *neturl.Error
+		if errors.As(err, &ue) && strings.HasPrefix(ue.Err.Error(), "invalid host: ") {
+			ue.Err = errors.New("invalid host")
+		}
 		return VErr(err.Error())
+	}
+	// Two hosts Go takes are no host here, nor to the native client: an
+	// IPv6 address with a zone, and a name outside ASCII, which Go would
+	// rewrite before it asks for it.
+	if why := hostRefused(req.URL.Host); why != "" {
+		named, _, _ := strings.Cut(url, "#")
+		return VErr(fmt.Sprintf("parse %q: %s", named, why))
+	}
+	// Go sends a query as written. One with a space in it makes a first
+	// line that is none, so what may not stand in one is written %XX, here
+	// and by the native client.
+	req.URL.RawQuery = escapeQuery(req.URL.RawQuery)
+	// What is sent is what the native client sends.
+	req.Header.Set("User-Agent", "anima")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	var tr http.RoundTripper = plainTransport
 	if baseClient != nil {
@@ -782,6 +837,11 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	// written \x00.
 	resp, err := cl.Do(req)
 	if err != nil {
+		// Which resolver was asked is this machine's own business.
+		var de *net.DNSError
+		if errors.As(err, &de) {
+			de.Server = ""
+		}
 		var ue *neturl.Error
 		if ctx.Err() != nil && errors.As(err, &ue) {
 			ue.Err = errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
