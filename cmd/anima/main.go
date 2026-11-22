@@ -216,11 +216,15 @@ func cmdRun(args []string) int {
 	replayPath := fs.String("replay", "", "counterexample SequenceTrace JSON file to replay deterministically")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: anima run [--seed N] [--animate] [--replay trace.json] <file.anm>")
+		fmt.Fprintln(os.Stderr, "usage: anima run [--seed N] [--animate] [--replay trace.json] <file.anm> [-- args...]")
 		return 1
 	}
 	file := fs.Arg(0)
+	// What follows the file is the program's; a `--` that sets it apart is not.
 	progArgs := fs.Args()[1:]
+	if len(progArgs) > 0 && progArgs[0] == "--" {
+		progArgs = progArgs[1:]
+	}
 
 	var replayTrace *lts.SequenceTrace
 	if *replayPath != "" {
