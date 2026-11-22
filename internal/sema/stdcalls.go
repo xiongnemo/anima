@@ -24,6 +24,7 @@ const (
 	argFn0         // a function of no argument
 	argFn1         // a function of one argument
 	argElem        // what the handle keeps: the T of a Channel[T] or of a Mutex
+	argView        // a ByteView
 )
 
 type stdParam struct {
@@ -49,6 +50,7 @@ func (s stdSig) withTimeout() stdSig { s.timeout = true; return s }
 func intP(name string) stdParam    { return stdParam{name: name, kind: argInt} }
 func strP(name string) stdParam    { return stdParam{name: name, kind: argStr} }
 func anyP(name string) stdParam    { return stdParam{name: name, kind: argAny} }
+func viewP(name string) stdParam   { return stdParam{name: name, kind: argView} }
 func (p stdParam) maybe() stdParam { p.opt = true; return p }
 func (p stdParam) within(lo, hi int64) stdParam {
 	p.ranged, p.lo, p.hi = true, lo, hi
@@ -69,6 +71,8 @@ const (
 	MaxQueueCap = 1 << 16    // tasks waiting in a ThreadPool, values in a Channel
 	MaxPermits  = 1 << 16    // permits a Semaphore starts with
 	MaxSleepMs  = 86_400_000 // a day
+	MaxRandom   = 1 << 16    // bytes one bytes.random makes
+	MaxDatagram = 65535      // bytes one recv_from reads: no datagram holds more
 )
 
 // Within is v held to lo..hi.
@@ -78,6 +82,7 @@ func Within(v, lo, hi int64) int64 { return min(max(v, lo), hi) }
 var stdSigs = map[string]stdSig{
 	"std.socket.listen_tcp":  sig(strP("host"), portP()),
 	"std.socket.connect_tcp": sig(strP("host"), portP()),
+	"std.socket.bind_udp":    sig(strP("host"), portP()),
 
 	"std.requests.get":     sig(strP("url")).withTimeout(),
 	"std.requests.post":    sig(strP("url"), strP("body")).withTimeout(),
@@ -95,6 +100,10 @@ var stdSigs = map[string]stdSig{
 
 	"std.bytes.from_str": sig(strP("text")),
 	"std.bytes.from_hex": sig(strP("hex")),
+	"std.bytes.u8":       sig(intP("value").within(0, 0xFF)),
+	"std.bytes.u16_be":   sig(intP("value").within(0, 0xFFFF)),
+	"std.bytes.u32_be":   sig(intP("value").within(0, 0xFFFFFFFF)),
+	"std.bytes.random":   sig(intP("n").within(0, MaxRandom)),
 
 	"std.crypto.sha256":           sig(strP("text")),
 	"std.crypto.hmac_sha256":      sig(strP("key"), strP("text")),
@@ -117,6 +126,11 @@ var stdSigs = map[string]stdSig{
 	"sock.TcpStream.send_text": sig(strP("text")),
 	"sock.TcpStream.recv_text": sig(intP("max_bytes").within(1, MaxRecvText).maybe()),
 	"sock.TcpStream.close":     sig(),
+
+	"sock.UdpSocket.port":      sig(),
+	"sock.UdpSocket.send_to":   sig(viewP("data"), strP("host"), intP("port").within(1, 65535)),
+	"sock.UdpSocket.recv_from": sig(intP("max_bytes").within(1, MaxDatagram)).withTimeout(),
+	"sock.UdpSocket.close":     sig(),
 
 	"fs.File.read_text":  sig(),
 	"fs.File.write_text": sig(strP("text")),
@@ -148,6 +162,8 @@ var stdSigs = map[string]stdSig{
 	"bytes.ByteView.read_u16_be": sig(intP("offset")),
 	"bytes.ByteView.read_u32_be": sig(intP("offset")),
 	"bytes.ByteView.slice":       sig(intP("lo"), intP("hi")),
+	"bytes.ByteView.concat":      sig(viewP("other")),
+	"bytes.ByteView.to_hex":      sig(),
 }
 
 // gatherType is what req.gather(futures) gives: the results of the futures,
@@ -295,6 +311,10 @@ func (c *checker) checkStdArg(a ast.CallArg, at Type, p stdParam, what string, n
 		ft, ok := at.(*FuncType)
 		if (!ok && !unknown) || (ok && len(ft.Params) != arity) {
 			return bad("a function of " + plural(arity, "argument"))
+		}
+	case argView:
+		if ht, ok := at.(*HandleType); (!ok || ht.Name != "bytes.ByteView") && !unknown {
+			return bad("a ByteView")
 		}
 	case argElem:
 		if knownType(elem) && !c.kept(elem, at, a.Value) {

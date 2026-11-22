@@ -140,6 +140,18 @@ func defaultStdHandles() map[string]*TypestateSpec {
 				},
 			},
 		},
+		"sock.UdpSocket": {
+			InitState:    "Open",
+			AcceptStates: []string{"Closed"},
+			Transitions: map[string]map[string]string{
+				"Open": {
+					"send_to":   "Open",
+					"recv_from": "Open",
+					"port":      "Open",
+					"close":     "Closed",
+				},
+			},
+		},
 		"fs.File": {
 			InitState:    "Open",
 			AcceptStates: []string{"Closed"},
@@ -250,7 +262,30 @@ func (c *checker) registerBuiltins() {
 	c.info.Types["sock.TcpListener"] = &HandleType{Name: "sock.TcpListener", Protocol: c.info.StdHandles["sock.TcpListener"]}
 	c.info.Types["sock.TcpStream"] = &HandleType{Name: "sock.TcpStream", Protocol: c.info.StdHandles["sock.TcpStream"]}
 	c.info.Types["fs.File"] = &HandleType{Name: "fs.File", Protocol: c.info.StdHandles["fs.File"]}
+	c.info.Types["sock.UdpSocket"] = &HandleType{Name: "sock.UdpSocket", Protocol: c.info.StdHandles["sock.UdpSocket"]}
 	c.info.Types["bytes.ByteView"] = &HandleType{Name: "bytes.ByteView"}
+
+	// What recv_from gives: the bytes of a datagram, and where it came
+	// from, as a text and as the 4 or 16 bytes of the address.
+	view := c.info.Types["bytes.ByteView"]
+	datagram := &EntityType{
+		Name: "Datagram",
+		Fields: []EntityFieldInfo{
+			{Name: "data", Type: view},
+			{Name: "host", Type: StrType{}},
+			{Name: "port", Type: NewIntRange(0, 65535, "")},
+			{Name: "ip", Type: view},
+		},
+		FieldMap: map[string]Type{
+			"data": view,
+			"host": StrType{},
+			"port": NewIntRange(0, 65535, ""),
+			"ip":   view,
+		},
+	}
+	c.info.Entities["Datagram"] = datagram
+	c.info.Types["Datagram"] = datagram
+	c.info.Types["sock.Datagram"] = datagram
 }
 
 // once is the names declared so far in one place: the parameters of a
@@ -586,7 +621,7 @@ func (c *checker) checkProgram() error {
 				}
 				if p.Own {
 					if h, wrapped := LinearHandle(pt); h == nil || wrapped {
-						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, fs.File, conc.ThreadPool), got %s", p.Span, p.Name, pt)
+						return fmt.Errorf("%s: 'own' parameter %s must be a linear handle (sock.TcpStream, sock.TcpListener, sock.UdpSocket, fs.File, conc.ThreadPool), got %s", p.Span, p.Name, pt)
 					}
 				}
 				params = append(params, FuncParamInfo{Name: p.Name, Mut: p.Mut, Own: p.Own, Type: pt})
@@ -681,6 +716,8 @@ func (c *checker) registerImport(imp *ast.ImportDecl) error {
 		c.info.Types[imp.Alias+".IoErr"] = StrType{}
 		c.info.Types[imp.Alias+".TcpListener"] = c.info.Types["sock.TcpListener"]
 		c.info.Types[imp.Alias+".TcpStream"] = c.info.Types["sock.TcpStream"]
+		c.info.Types[imp.Alias+".UdpSocket"] = c.info.Types["sock.UdpSocket"]
+		c.info.Types[imp.Alias+".Datagram"] = c.info.Entities["Datagram"]
 	}
 	if canonical == "std.requests" {
 		c.info.Types[imp.Alias+".HttpResponse"] = c.info.Entities["HttpResponse"]
@@ -723,6 +760,10 @@ func (c *checker) resolveTypeExpr(te ast.TypeExpr) (Type, error) {
 					return c.info.Types["sock.TcpListener"], nil
 				case "std.socket.TcpStream":
 					return c.info.Types["sock.TcpStream"], nil
+				case "std.socket.UdpSocket":
+					return c.info.Types["sock.UdpSocket"], nil
+				case "std.socket.Datagram":
+					return c.info.Entities["Datagram"], nil
 				case "std.requests.HttpResponse":
 					return c.info.Entities["HttpResponse"], nil
 				case "std.requests.Session":
@@ -2378,8 +2419,8 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 				}
 			}
 		}
-		if ht, ok := objTy.(*HandleType); ok && (ht.Name == "req.Session" || ht.Name == "sock.TcpListener") {
-			if fe.Field == "get" || fe.Field == "post" || fe.Field == "get_async" || fe.Field == "accept" {
+		if ht, ok := objTy.(*HandleType); ok && (ht.Name == "req.Session" || ht.Name == "sock.TcpListener" || ht.Name == "sock.UdpSocket") {
+			if fe.Field == "get" || fe.Field == "post" || fe.Field == "get_async" || fe.Field == "accept" || fe.Field == "recv_from" {
 				if err := c.checkRequestsTimeout(e, fe.Field, sc); err != nil {
 					return nil, err
 				}
@@ -2622,7 +2663,7 @@ func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *sc
 	}
 	if timeoutExpr == nil {
 		// Check positional index for get(url, timeout_ms) or post(url, body, timeout_ms)
-		if (method == "get" || method == "get_async") && len(args) >= 2 && args[1].Name == "" {
+		if (method == "get" || method == "get_async" || method == "recv_from") && len(args) >= 2 && args[1].Name == "" {
 			timeoutExpr = args[1].Value
 		} else if method == "post" && len(args) >= 3 && args[2].Name == "" {
 			timeoutExpr = args[2].Value
@@ -3539,6 +3580,8 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 			return &FuncType{Return: c.instantiateADT("Result", []Type{c.info.Types["sock.TcpListener"], StrType{}})}, nil
 		case "connect_tcp":
 			return &FuncType{Return: c.instantiateADT("Result", []Type{c.info.Types["sock.TcpStream"], StrType{}})}, nil
+		case "bind_udp":
+			return &FuncType{Return: c.instantiateADT("Result", []Type{c.info.Types["sock.UdpSocket"], StrType{}})}, nil
 		}
 	case "std.requests":
 		switch member {
@@ -3558,7 +3601,7 @@ func (c *checker) lookupModuleMemberType(modPath, member string, span ast.Span) 
 		}
 	case "std.bytes":
 		switch member {
-		case "from_str", "from_hex":
+		case "from_str", "from_hex", "u8", "u16_be", "u32_be", "random":
 			return &FuncType{Return: c.info.Types["bytes.ByteView"]}, nil
 		}
 	case "std.crypto":
@@ -3605,6 +3648,17 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 		switch method {
 		case "accept":
 			return &FuncType{Return: c.instantiateADT("Result", []Type{c.info.Types["sock.TcpStream"], StrType{}})}, nil
+		case "port":
+			return &FuncType{Return: NewIntRange(1, 65535, "")}, nil
+		case "close":
+			return &FuncType{Return: VoidType{}}, nil
+		}
+	case "sock.UdpSocket":
+		switch method {
+		case "send_to":
+			return &FuncType{Return: c.instantiateADT("Result", []Type{NewUnboundedInt(), StrType{}})}, nil
+		case "recv_from":
+			return &FuncType{Return: c.instantiateADT("Result", []Type{c.info.Entities["Datagram"], StrType{}})}, nil
 		case "port":
 			return &FuncType{Return: NewIntRange(1, 65535, "")}, nil
 		case "close":
@@ -3683,8 +3737,10 @@ func (c *checker) lookupHandleMethod(ht *HandleType, method string, span ast.Spa
 			return &FuncType{Return: NewIntRange(0, 65535, "")}, nil
 		case "read_u32_be":
 			return &FuncType{Return: NewIntRange(0, math.MaxUint32, "")}, nil
-		case "slice":
+		case "slice", "concat":
 			return &FuncType{Return: ht}, nil
+		case "to_hex":
+			return &FuncType{Return: StrType{}}, nil
 		}
 	}
 	return nil, fmt.Errorf("%s: handle %s has no method %q", span, ht.Name, method)

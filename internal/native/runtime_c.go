@@ -26,6 +26,7 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <sys/random.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
@@ -117,7 +118,8 @@ typedef enum {
     HDL_SEMAPHORE,
     HDL_SESSION,
     HDL_FUTURE,
-    HDL_BYTEVIEW
+    HDL_BYTEVIEW,
+    HDL_UDP
 } HandleKind;
 
 typedef struct {
@@ -382,7 +384,13 @@ static bool v_eq_in(AnimaVal a, AnimaVal b, const EqOpen *up) {
         case VAL_STR: return strcmp(a.u.s ? a.u.s : "", b.u.s ? b.u.s : "") == 0;
         case VAL_ENTITY: return a.u.ent == b.u.ent;
         case VAL_CLOSURE: return a.u.clos == b.u.clos;
-        case VAL_HANDLE: return a.u.hdl == b.u.hdl;
+        case VAL_HANDLE:
+            // A byte view never changes: it is the bytes it holds.
+            if (a.u.hdl && b.u.hdl && a.u.hdl->kind == HDL_BYTEVIEW && b.u.hdl->kind == HDL_BYTEVIEW) {
+                size_t n = a.u.hdl->bytes_len;
+                return n == b.u.hdl->bytes_len && (n == 0 || memcmp(a.u.hdl->bytes, b.u.hdl->bytes, n) == 0);
+            }
+            return a.u.hdl == b.u.hdl;
         case VAL_LIST: here.a = a.u.list; here.b = b.u.list; break;
         case VAL_MAP: here.a = a.u.map; here.b = b.u.map; break;
         case VAL_VARIANT: here.a = a.u.var; here.b = b.u.var; break;
@@ -838,6 +846,62 @@ static AnimaVal bytes_slice(AnimaVal hv, int64_t lo, int64_t hi) {
     h->bytes = hv.u.hdl->bytes + lo;
     h->bytes_len = (size_t)(hi - lo);
     return v;
+}
+
+// A view of n bytes of its own, copied from p when there is one.
+static AnimaVal bytes_view(const uint8_t *p, size_t n) {
+    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
+    h->kind = HDL_BYTEVIEW;
+    h->bytes_len = n;
+    h->bytes = calloc(n + 1, 1);
+    if (p && n > 0) memcpy(h->bytes, p, n);
+    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h; return v;
+}
+
+static bool is_view(AnimaVal v) {
+    return v.kind == VAL_HANDLE && v.u.hdl && v.u.hdl->kind == HDL_BYTEVIEW;
+}
+
+// The low width bytes of a number, the first the highest: the kernel
+// proves that it has no others.
+static AnimaVal bytes_be(int64_t x, int width) {
+    uint8_t b[4];
+    for (int i = 0; i < width; i++) b[i] = (uint8_t)((uint64_t)x >> (8 * (width - 1 - i)));
+    return bytes_view(b, (size_t)width);
+}
+
+#define BYTES_MAX_RANDOM (1 << 16)
+
+// n bytes from the system's source of random bytes.
+static AnimaVal bytes_random(int64_t n) {
+    if (n < 0) n = 0;
+    if (n > BYTES_MAX_RANDOM) n = BYTES_MAX_RANDOM;
+    AnimaVal v = bytes_view(NULL, (size_t)n);
+    size_t got = 0;
+    while (got < (size_t)n) {
+        ssize_t r = getrandom(v.u.hdl->bytes + got, (size_t)n - got, 0);
+        if (r > 0) got += (size_t)r;
+        else if (r < 0 && errno != EINTR) { fprintf(stderr, "anima panic: no random bytes\n"); exit(1); }
+    }
+    return v;
+}
+
+static AnimaVal bytes_concat(AnimaVal a, AnimaVal b) {
+    size_t na = is_view(a) ? a.u.hdl->bytes_len : 0, nb = is_view(b) ? b.u.hdl->bytes_len : 0;
+    AnimaVal v = bytes_view(NULL, na + nb);
+    if (na > 0) memcpy(v.u.hdl->bytes, a.u.hdl->bytes, na);
+    if (nb > 0) memcpy(v.u.hdl->bytes + na, b.u.hdl->bytes, nb);
+    return v;
+}
+
+static AnimaVal bytes_to_hex(AnimaVal a) {
+    size_t n = is_view(a) ? a.u.hdl->bytes_len : 0;
+    char *t = malloc(2 * n + 1);
+    for (size_t i = 0; i < n; i++) snprintf(t + 2 * i, 3, "%02x", a.u.hdl->bytes[i]);
+    t[2 * n] = '\0';
+    AnimaVal r = v_str(t);
+    free(t);
+    return r;
 }
 
 static AnimaVal crypto_sha256(const char *s) {
@@ -2258,9 +2322,11 @@ static int sock_backlog(void) {
 #define SOCK_IO_MS 5000
 #define SOCK_MAX_RECV_TEXT (1 << 20)
 
-// The one address a host is bound at: its own, or of those its name is
-// looked up to be the first IPv4 one, or the first if it has none.
-static bool sock_local(const char *op, const char *host, int64_t port, HttpPeer *at, AnimaVal *unmet) {
+// The one address of a host: its own, or of those its name is looked up to
+// be the first of the family (AF_INET or AF_INET6), which is then the only
+// one taken. With no family (0) it is the first IPv4 one, or the first: the
+// address a host is bound at.
+static bool sock_at(const char *op, const char *host, int64_t port, int family, HttpPeer *at, AnimaVal *unmet) {
     if (port < 0 || port > 65535) { *unmet = sock_bad_port(op, port); return false; }
     const char *refused = sock_host_refused(host);
     if (refused) { *unmet = sock_unmet(op, host, refused); return false; }
@@ -2269,10 +2335,16 @@ static bool sock_local(const char *op, const char *host, int64_t port, HttpPeer 
     // A name that is not found in the time a dial has is one no host has.
     size_t n = host_peers(host, (int)port, mono_ms() + SOCK_DIAL_MS, &peers, &late);
     if (n == 0) { *unmet = sock_no_host(op, host); return false; }
+    bool of = family == 0;
     *at = peers[0];
-    for (size_t i = 0; i < n; i++) if (peers[i].family == AF_INET) { *at = peers[i]; break; }
+    for (size_t i = 0; i < n; i++) if (peers[i].family == (family ? family : AF_INET)) { *at = peers[i]; of = true; break; }
     free(peers);
+    if (!of) { *unmet = sock_no_host(op, host); return false; }
     return true;
+}
+
+static bool sock_local(const char *op, const char *host, int64_t port, HttpPeer *at, AnimaVal *unmet) {
+    return sock_at(op, host, port, 0, at, unmet);
 }
 
 static AnimaVal sock_listen_tcp(const char *host, int64_t port) {
@@ -2402,6 +2474,133 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
         if (n == 0) { free(buf); return v_err("EOF"); }
         if (errno == EINTR) continue;
         if (errno != EAGAIN && errno != EWOULDBLOCK) { int e = errno; free(buf); return sock_err("read", h->where, "read", e); }
+        if (!sock_wait(h->fd, POLLIN, deadline)) { free(buf); return sock_err("read", h->where, NULL, 0); }
+    }
+}
+
+// ─── UDP ───
+// A UDP socket is of the family of the address it is bound at, and sends to
+// and hears from that family alone.
+
+#define SOCK_MAX_DATAGRAM 65535
+
+static AnimaVal sock_bind_udp(const char *host, int64_t port) {
+    HttpPeer at;
+    AnimaVal unmet;
+    if (!sock_local("listen udp", host, port, &at, &unmet)) return unmet;
+    const char *net = at.family == AF_INET ? "udp4" : "udp6";
+    char where[128];
+    snprintf(where, sizeof(where), "%s %s", net, at.text);
+    // The VM's sockets would bind the address of a group at every address,
+    // and join it.
+    bool group = at.family == AF_INET
+        ? IN_MULTICAST(ntohl(((struct sockaddr_in *)&at.sa)->sin_addr.s_addr))
+        : IN6_IS_ADDR_MULTICAST(&((struct sockaddr_in6 *)&at.sa)->sin6_addr);
+    if (group) {
+        AnimaBuf b = {0};
+        buf_put(&b, "listen ");
+        buf_put(&b, where);
+        buf_put(&b, ": multicast address");
+        AnimaVal r = v_err(b.p);
+        free(b.p);
+        return r;
+    }
+    int fd = socket(at.family, SOCK_DGRAM, 0);
+    if (fd < 0) return sock_err("listen", where, "socket", errno);
+    sock_unblocked(fd);
+    int yes = 1;
+    if (at.family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &yes, sizeof(yes));
+    // As the VM's sockets are: one may send to all the hosts of a network.
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    if (bind(fd, (struct sockaddr *)&at.sa, at.len) < 0) { int e = errno; close(fd); return sock_err("listen", where, "bind", e); }
+    return v_ok(sock_handle(HDL_UDP, fd, net, false));
+}
+
+// The bytes are sent as one datagram, or it is an Err.
+static AnimaVal hdl_udp_send_to(AnimaVal hv, AnimaVal data, const char *host, int64_t port) {
+    const char *op = "write udp";
+    AnimaHandle *h = hv.u.hdl;
+    if (!h || h->closed) return v_err("socket closed");
+    if (port < 1 || port > 65535) return sock_bad_port(op, port);
+    bool v6 = strncmp(h->where, "udp6", 4) == 0;
+    // An address of the other family is none this socket sends to.
+    int kind = strchr(host, '%') ? 0 : url_addr(host);
+    if (kind != 0) {
+        struct in6_addr a6;
+        bool is4 = kind == 4 || (inet_pton(AF_INET6, host, &a6) == 1 && IN6_IS_ADDR_V4MAPPED(&a6));
+        if (is4 == v6) {
+            AnimaBuf b = {0};
+            buf_put(&b, "write ");
+            buf_put(&b, h->where);
+            buf_put(&b, ": address ");
+            buf_put(&b, host);
+            buf_put(&b, v6 ? ": non-IPv6 address" : ": non-IPv4 address");
+            AnimaVal r = v_err(b.p);
+            free(b.p);
+            return r;
+        }
+    }
+    HttpPeer to;
+    AnimaVal unmet;
+    if (!sock_at(op, host, port, v6 ? AF_INET6 : AF_INET, &to, &unmet)) return unmet;
+    const uint8_t *p = is_view(data) ? data.u.hdl->bytes : NULL;
+    size_t len = is_view(data) ? data.u.hdl->bytes_len : 0;
+    char where[320];
+    snprintf(where, sizeof(where), "%s->%s", h->where, to.text);
+    int64_t deadline = mono_ms() + SOCK_IO_MS;
+    for (;;) {
+        ssize_t n = sendto(h->fd, p ? p : (const uint8_t *)"", len, MSG_NOSIGNAL, (struct sockaddr *)&to.sa, to.len);
+        if (n >= 0) return v_ok(v_int((int64_t)n));
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return sock_err("write", where, "sendto", errno);
+        if (!sock_wait(h->fd, POLLOUT, deadline)) return sock_err("write", where, NULL, 0);
+    }
+}
+
+// One datagram is waited for: what of it is past max_b is lost.
+static AnimaVal hdl_udp_recv_from(AnimaVal hv, int64_t max_b, int64_t timeout_ms) {
+    AnimaHandle *h = hv.u.hdl;
+    if (!h || h->closed) return v_err("socket closed");
+    if (max_b < 1) max_b = 1;
+    if (max_b > SOCK_MAX_DATAGRAM) max_b = SOCK_MAX_DATAGRAM;
+    int64_t deadline = mono_ms() + timeout_ms;
+    uint8_t *buf = malloc((size_t)max_b);
+    for (;;) {
+        // A time that is up is up, whatever waits to be read.
+        if (mono_ms() >= deadline) { free(buf); return sock_err("read", h->where, NULL, 0); }
+        struct sockaddr_storage ss = {0};
+        socklen_t sl = sizeof(ss);
+        ssize_t n = recvfrom(h->fd, buf, (size_t)max_b, 0, (struct sockaddr *)&ss, &sl);
+        if (n >= 0) {
+            AnimaVal ent = v_entity_new("Datagram");
+            v_entity_set(ent, "data", bytes_view(buf, (size_t)n));
+            free(buf);
+            char host[INET6_ADDRSTRLEN + IF_NAMESIZE + 16] = {0};
+            if (ss.ss_family == AF_INET) {
+                struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
+                inet_ntop(AF_INET, &sa->sin_addr, host, sizeof(host));
+                v_entity_set(ent, "host", v_str(host));
+                v_entity_set(ent, "port", v_int(ntohs(sa->sin_port)));
+                v_entity_set(ent, "ip", bytes_view((const uint8_t *)&sa->sin_addr, 4));
+            } else {
+                struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&ss;
+                // The text of the address is that of the socket's, less
+                // its port and the [ ] it may stand in.
+                char text[128];
+                sock_text(&ss, text, sizeof(text));
+                char *end = strrchr(text, ':');
+                if (end) *end = '\0';
+                size_t tl = strlen(text);
+                if (tl >= 2 && text[0] == '[' && text[tl - 1] == ']') { text[tl - 1] = '\0'; snprintf(host, sizeof(host), "%s", text + 1); }
+                else snprintf(host, sizeof(host), "%s", text);
+                v_entity_set(ent, "host", v_str(host));
+                v_entity_set(ent, "port", v_int(ntohs(sa->sin6_port)));
+                v_entity_set(ent, "ip", bytes_view(sa->sin6_addr.s6_addr, 16));
+            }
+            return v_ok(ent);
+        }
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) { int e = errno; free(buf); return sock_err("read", h->where, "recvfrom", e); }
         if (!sock_wait(h->fd, POLLIN, deadline)) { free(buf); return sock_err("read", h->where, NULL, 0); }
     }
 }
@@ -3192,6 +3391,7 @@ static void hdl_close(AnimaVal hv) {
     switch (h->kind) {
         case HDL_LISTENER:
         case HDL_STREAM:
+        case HDL_UDP:
             h->closed = true;
             if (h->fd >= 0) close(h->fd);
             break;

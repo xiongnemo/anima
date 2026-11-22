@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -235,6 +236,9 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 	case "std.socket.connect_tcp":
 		return sockConnectTCP(args[0].Str, args[1].Int), nil
 
+	case "std.socket.bind_udp":
+		return sockBindUDP(args[0].Str, args[1].Int), nil
+
 	// ─── std.requests ───
 	case "std.requests.get":
 		url := args[0].Str
@@ -390,6 +394,20 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 	case "std.crypto.constant_time_eq":
 		eq := subtle.ConstantTimeCompare([]byte(args[0].Str), []byte(args[1].Str)) == 1
 		return VBool(eq), nil
+
+	// The low bytes of a number, the first the highest: the kernel proves
+	// that it has no others.
+	case "std.bytes.u8":
+		return viewOf([]byte{byte(args[0].Int)}), nil
+	case "std.bytes.u16_be":
+		return viewOf(binary.BigEndian.AppendUint16(nil, uint16(args[0].Int))), nil
+	case "std.bytes.u32_be":
+		return viewOf(binary.BigEndian.AppendUint32(nil, uint32(args[0].Int))), nil
+	case "std.bytes.random":
+		b := make([]byte, sema.Within(args[0].Int, 0, sema.MaxRandom))
+		// The system's source of random bytes does not fail.
+		_, _ = rand.Read(b)
+		return viewOf(b), nil
 
 	// ─── std.fs & std.cli & std.time ───
 	case "std.fs.open":
@@ -627,8 +645,30 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 			h.Sem.release()
 			return VVoid(), nil
 		}
+	case HandleUDP:
+		switch cm.CalleeName {
+		case "port":
+			return VInt(int64(h.UDP.LocalAddr().(*net.UDPAddr).Port)), nil
+		case "send_to":
+			return sockSendTo(h, args[0], args[1].Str, args[2].Int), nil
+		case "recv_from":
+			return sockRecvFrom(h, args[0].Int, extractTimeoutMsFromMethod(cm, args, 1, 5000)), nil
+		case "close":
+			h.Close()
+			return VVoid(), nil
+		}
 	case HandleByteView:
 		switch cm.CalleeName {
+		case "concat":
+			var other []byte
+			if o := args[0].Handle; args[0].Kind == ValHandle && o != nil && o.Kind == HandleByteView {
+				other = o.Bytes
+			}
+			// A slice shares the bytes of its view: the two are copied.
+			joined := make([]byte, 0, len(h.Bytes)+len(other))
+			return viewOf(append(append(joined, h.Bytes...), other...)), nil
+		case "to_hex":
+			return VStr(hex.EncodeToString(h.Bytes)), nil
 		case "len":
 			return VInt(int64(len(h.Bytes))), nil
 		case "read_u8":
@@ -1157,4 +1197,8 @@ func (vm *VM) fpFold(args []Value) (Value, error) {
 		}
 	}
 	return acc, nil
+}
+
+func viewOf(b []byte) Value {
+	return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleByteView, Bytes: b}}
 }

@@ -24,8 +24,15 @@ func (v *verifier) viewLen(e ast.Expr, env *symEnv) smt.LinearTerm {
 	if path, ok := mutArgPath(e); ok && isByteView(v.info.ExprTypes[e]) {
 		return env.lenOf(path)
 	}
+	if lt, ok := v.newViewLen(e, env, ""); ok {
+		return lt
+	}
 	return env.freshLen("bytes")
 }
+
+// viewMade is the number of bytes of the view that bytes.u8, u16_be and
+// u32_be make.
+var viewMade = map[string]int64{"u8": 1, "u16_be": 2, "u32_be": 4}
 
 // isHexLit reports whether from_hex decodes s: both backends give an empty
 // view for anything else.
@@ -44,8 +51,9 @@ func isHexLit(s string) bool {
 
 // newViewLen is the length of the view that rhs makes, when rhs says it:
 // from_str and from_hex of a literal, from_str of a string whose length is
-// known, a slice (proved inside its view where it is called), or another
-// name for a view.
+// known, the bytes of a number, random(n) (n proved in its range where it is
+// called), a slice (proved inside its view where it is called), two views
+// joined, or another name for a view.
 func (v *verifier) newViewLen(rhs ast.Expr, env *symEnv, scope string) (smt.LinearTerm, bool) {
 	if !isByteView(v.info.ExprTypes[rhs]) {
 		return smt.LinearTerm{}, false
@@ -73,8 +81,16 @@ func (v *verifier) newViewLen(rhs ast.Expr, env *symEnv, scope string) (smt.Line
 			}
 		case "from_str":
 			return v.lenOfValue(arg, env)
+		case "random":
+			return v.evalInt(arg, env, scope, false), true
+		}
+		if n, ok := viewMade[fe.Field]; ok {
+			return smt.Const(n), true
 		}
 		return smt.LinearTerm{}, false
+	}
+	if fe.Field == "concat" && len(call.Args) == 1 && isByteView(v.info.ExprTypes[fe.Object]) && isByteView(v.info.ExprTypes[call.Args[0].Value]) {
+		return v.viewLen(fe.Object, env).Add(v.viewLen(call.Args[0].Value, env)), true
 	}
 	if fe.Field == "slice" && len(call.Args) == 2 && isByteView(v.info.ExprTypes[fe.Object]) {
 		lo := v.evalInt(call.Args[0].Value, env, scope, false)
