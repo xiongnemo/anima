@@ -292,6 +292,29 @@ func TestSemaNamedLambdaTakesTheTypesOfItsFirstUse(t *testing.T) {
     print(xs |> map(g))`, same},
 		{"too many arguments", `    g = (v) => v
     print(g(1, 2))`, "takes 1 argument, got 2"},
+		// A use where another lambda is written, of a parameter that has
+		// no type yet, is not its first: `[v]` there is a list of anything.
+		{"used in another lambda with a list of its parameter", `    g = (v) => v
+    k = (v) => g([v])
+    a = g([0])
+    b = g(["s"])
+    print(a, b)`, "g takes list[int] where it is first used, got list[str]: " + same},
+		{"used in another lambda with an Option of its parameter", `    g = (v) => v
+    k = (v) => g(Some(v))
+    a = g(Some(0))
+    b = g(Some("s"))
+    print(a, b)`, "g takes Option[int] where it is first used, got Option[str]: " + same},
+		{"given to a stage in another lambda over lists of its parameter", `    g = (v) => v
+    k = (v) => (v |> map((q) => [q]) |> map(g))
+    a = g([0])
+    b = g(["s"])
+    print(a, b)`, same},
+		{"its body is checked after a use in another lambda", `    g = (v) => (v |> map((q) => q.nope()))
+    k = (v) => g([v])
+    print(g([5]))`, "nope"},
+		{"both are used", `    g = (v) => (v |> map((q) => q > 1))
+    k = (v) => g([v])
+    print(k(1), g([2, 3]))`, ""},
 		// The types of the first use are those of every later one, so it
 		// has to say them whole: None would let Some(0) in afterwards.
 		{"first used with None", `    g = (v) => v

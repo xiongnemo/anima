@@ -3,6 +3,8 @@ package sema
 import (
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -351,6 +353,11 @@ func (c *checker) checkNames() error {
 					err = seen.add(f.Name, f.Span)
 				}
 			}
+			for _, rel := range node.Relations {
+				if err == nil {
+					err = seen.add(rel.Name, rel.Span)
+				}
+			}
 		case *ast.TypeDecl:
 			err = declare(types, node.Name, "a type", node.Span)
 			for _, v := range node.Variants {
@@ -540,10 +547,26 @@ func (c *checker) checkProgram() error {
 				et.Fields = append(et.Fields, EntityFieldInfo{Name: f.Name, Type: ft})
 				et.FieldMap[f.Name] = ft
 			}
+			// A relation is a field that holds the entities it names: one,
+			// one or none, or a list of them.
 			for _, rel := range node.Relations {
-				if _, ok := c.info.Entities[rel.Target]; !ok {
+				target, ok := c.info.Entities[rel.Target]
+				if !ok {
 					return fmt.Errorf("%s: relation %s targets unknown entity %q", rel.Span, rel.Name, rel.Target)
 				}
+				lo, hi, err := relationBounds(rel)
+				if err != nil {
+					return err
+				}
+				var ft Type = &ListType{Elem: target}
+				switch {
+				case lo == 1 && hi == 1:
+					ft = target
+				case lo == 0 && hi == 1:
+					ft = c.instantiateADT("Option", []Type{target})
+				}
+				et.Fields = append(et.Fields, EntityFieldInfo{Name: rel.Name, Type: ft})
+				et.FieldMap[rel.Name] = ft
 			}
 		case *ast.FuncDecl:
 			var params []FuncParamInfo
@@ -1689,19 +1712,38 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The result is typed as the base, so the base is an entity: both
+		// backends give an object of the fields alone for anything else.
+		et, ok := baseTy.(*EntityType)
+		if !ok && generic(baseTy) {
+			// A parameter of a named lambda has no type where the lambda is
+			// written: the body is checked again with those of its first use.
+			for _, f := range e.Fields {
+				if _, err := c.checkExpr(f.Value, sc); err != nil {
+					return nil, err
+				}
+			}
+			return baseTy, nil
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: 'with' copies an entity with some fields replaced, got %s", e.Span, baseTy)
+		}
+		given := map[string]bool{}
 		for _, f := range e.Fields {
 			vt, err := c.checkExpr(f.Value, sc)
 			if err != nil {
 				return nil, err
 			}
-			if et, ok := baseTy.(*EntityType); ok {
-				ft, exists := et.FieldMap[f.Name]
-				if !exists {
-					return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
-				}
-				if !c.assignable(ft, vt, f.Value) {
-					return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
-				}
+			ft, exists := et.FieldMap[f.Name]
+			if !exists {
+				return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
+			}
+			if given[f.Name] {
+				return nil, fmt.Errorf("%s: field %s.%s is given twice", e.Span, et.Name, f.Name)
+			}
+			given[f.Name] = true
+			if !c.assignable(ft, vt, f.Value) {
+				return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
 			}
 		}
 		return baseTy, nil
@@ -1746,14 +1788,6 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if et, ok := objTy.(*EntityType); ok {
 			if ft, exists := et.FieldMap[e.Field]; exists {
 				return ft, nil
-			}
-			for _, rel := range et.Relations {
-				if rel.Name == e.Field {
-					if rel.Multiplicity == "1" || rel.Multiplicity == "0..1" {
-						return c.info.Entities[rel.Target], nil
-					}
-					return &ListType{Elem: c.info.Entities[rel.Target]}, nil
-				}
 			}
 			return nil, fmt.Errorf("%s: entity %s has no field %q", e.Span, et.Name, e.Field)
 		}
@@ -2221,29 +2255,40 @@ func (c *checker) checkCallExpr(e *ast.CallExpr, sc *scope) (Type, error) {
 			return c.instantiateADT("Result", []Type{UnknownType{Empty: true}, widenInt(et)}), nil
 		}
 
-		// Entity constructor: Account(balance=10, frozen=0)
+		// Entity constructor: Account(balance=10, frozen=0). Both backends
+		// give a field the argument that names it, else the one at its
+		// position, and a field that is given none holds no value at all.
 		if et, ok := c.info.Entities[id.Name]; ok {
-			for _, a := range e.Args {
+			given := make([]bool, len(et.Fields))
+			for i, a := range e.Args {
 				at, err := c.checkExpr(a.Value, sc)
 				if err != nil {
 					return nil, err
 				}
+				if a.Mut || a.Own {
+					return nil, fmt.Errorf("%s: a field of %s is given a value: 'mut' and 'own' are for the parameters of a function", a.Span, et.Name)
+				}
+				fi := i
 				if a.Name != "" {
-					ft, exists := et.FieldMap[a.Name]
-					if !exists {
-						isRel := false
-						for _, rel := range et.Relations {
-							if rel.Name == a.Name {
-								isRel = true
-								break
-							}
-						}
-						if !isRel {
-							return nil, fmt.Errorf("%s: entity %s has no field %q", a.Span, et.Name, a.Name)
-						}
-					} else if !c.assignable(ft, at, a.Value) {
-						return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", a.Span, et.Name, a.Name, ft, at)
+					fi = slices.IndexFunc(et.Fields, func(f EntityFieldInfo) bool { return f.Name == a.Name })
+					if fi < 0 {
+						return nil, fmt.Errorf("%s: entity %s has no field %q", a.Span, et.Name, a.Name)
 					}
+				} else if i >= len(et.Fields) {
+					return nil, fmt.Errorf("%s: entity %s has %s, got %d arguments", e.Span, et.Name, plural(len(et.Fields), "field"), len(e.Args))
+				}
+				f := et.Fields[fi]
+				if given[fi] {
+					return nil, fmt.Errorf("%s: field %s.%s is given twice", a.Span, et.Name, f.Name)
+				}
+				given[fi] = true
+				if !c.assignable(f.Type, at, a.Value) {
+					return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", a.Span, et.Name, f.Name, f.Type, at)
+				}
+			}
+			for fi, f := range et.Fields {
+				if !given[fi] {
+					return nil, fmt.Errorf("%s: field %s.%s is not given: an entity is made with a value for each of its fields", e.Span, et.Name, f.Name)
 				}
 			}
 			return et, nil
@@ -2582,6 +2627,36 @@ func (c *checker) checkRequestsTimeout(call *ast.CallExpr, method string, sc *sc
 		return fmt.Errorf("%s: timeout_ms must be int[1..300_000], got %s", timeoutExpr.GetSpan(), ty)
 	}
 	return nil
+}
+
+// relationBounds reads the multiplicity of a relation: how many entities
+// it holds at least and at most, -1 standing for any number.
+func relationBounds(rel ast.RelationDecl) (lo, hi int64, err error) {
+	bad := func() (int64, int64, error) {
+		return 0, 0, fmt.Errorf("%s: relation %s holds %s entities: a multiplicity is 1, 0..1, *, or a count n or n..m or n..* with n <= m and m >= 1", rel.Span, rel.Name, rel.Multiplicity)
+	}
+	if rel.Multiplicity == "*" {
+		return 0, -1, nil
+	}
+	first, second, ranged := strings.Cut(rel.Multiplicity, "..")
+	lo, err = strconv.ParseInt(first, 10, 64)
+	if err != nil {
+		return bad()
+	}
+	switch {
+	case !ranged:
+		hi = lo
+	case second == "*":
+		hi = -1
+	default:
+		if hi, err = strconv.ParseInt(second, 10, 64); err != nil {
+			return bad()
+		}
+	}
+	if hi == 0 || hi > 0 && lo > hi {
+		return bad()
+	}
+	return lo, hi, nil
 }
 
 // boundParam returns the index of the parameter that argument i of a call
@@ -3084,8 +3159,11 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 	if len(args) != len(nl.expr.Params) {
 		return nil, fmt.Errorf("%s: this function takes %s, got %d", span, plural(len(nl.expr.Params), "argument"), len(args))
 	}
+	// An argument made where another named lambda is written, of a
+	// parameter that has no type yet, says nothing of this one: `[x]` there
+	// would fix it as taking a list of anything, for every later use.
 	for _, a := range args {
-		if generic(a) {
+		if holdsGeneric(a) {
 			return UnknownType{Generic: true}, nil
 		}
 	}
@@ -3113,6 +3191,27 @@ func (c *checker) useLambda(nl *namedLambda, name string, args []Type, span ast.
 		}
 	}
 	return nl.ret, nil
+}
+
+// holdsGeneric reports whether t is, or has as a part, the type of a
+// parameter of a named lambda where the lambda is written.
+func holdsGeneric(t Type) bool {
+	switch x := t.(type) {
+	case UnknownType:
+		return x.Generic
+	case *ListType:
+		return holdsGeneric(x.Elem)
+	case *MapType:
+		return holdsGeneric(x.Key) || holdsGeneric(x.Val)
+	case *ADTType:
+		return slices.ContainsFunc(x.TypeArgs, holdsGeneric)
+	case *HandleType:
+		return x.Elem != nil && holdsGeneric(x.Elem)
+	case *FuncType:
+		return x.Return != nil && holdsGeneric(x.Return) ||
+			slices.ContainsFunc(x.Params, func(p FuncParamInfo) bool { return holdsGeneric(p.Type) })
+	}
+	return false
 }
 
 // hasGap reports whether t has a part no value has given a type: the

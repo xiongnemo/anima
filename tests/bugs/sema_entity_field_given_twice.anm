@@ -1,0 +1,9 @@
+# BUG (sema): a field could be given twice, and the entity held the last.
+entity P:
+    d: int
+    e: int[1..9]
+
+def main() -> int:
+    p = P(d=5, e=1, d=0)
+    print(p)
+    return 0

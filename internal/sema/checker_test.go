@@ -1406,3 +1406,118 @@ func TestSemaWorkflowHasOneStart(t *testing.T) {
 		t.Errorf("expected an error about a second start, got %v", err)
 	}
 }
+
+// An entity is made with one value of the right type for each of its
+// fields, and a relation is a field: both backends give a field the
+// argument that names it or the one at its position, and nothing else.
+func TestSemaEntityIsMadeWithEveryField(t *testing.T) {
+	decls := `entity A:
+    b: int[1..9]
+
+entity P:
+    d: int
+    e: int[1..9]
+    s: str
+
+entity O:
+    amount: int
+    rel buyer -> 1 A
+    rel backup -> 0..1 A
+    rel others -> 0..* A
+
+`
+	cases := []struct{ body, want string }{
+		{"p = P(d=5, e=1, s=\"a\")", ""},
+		{"p = P(s=\"a\", e=1, d=5)", ""},
+		{"p = P(5, 1, \"a\")", ""},
+		{"p = P(5, s=\"a\", e=1)", ""},
+		{"p = P(d=5, s=\"a\")", "field P.e is not given"},
+		{"p = P()", "field P.d is not given"},
+		{"p = P(5, 1)", "field P.s is not given"},
+		{"p = P(d=5, e=1, s=\"a\", d=0)", "field P.d is given twice"},
+		{"p = P(e=1, 2, \"a\")", "field P.e is given twice"},
+		{"p = P(5, 1, \"a\", 4)", "entity P has 3 fields, got 4 arguments"},
+		{"p = P(5, 1, 2)", "field P.s expects str, got int"},
+		{"p = P(\"a\", 1, \"a\")", "field P.d expects int, got str"},
+		{"p = P(d=5, e=1, s=\"a\", t=2)", "entity P has no field \"t\""},
+		{"x = 5\n    p = P(mut x, 1, \"a\")", "'mut' and 'own' are for the parameters of a function"},
+		// A relation is a field of the entities it names.
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=[])", ""},
+		{"a = A(b=1)\n    o = O(1, a, Some(a), [a, a])", ""},
+		{"a = A(b=1)\n    o = O(amount=1, backup=None, others=[])", "field O.buyer is not given"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, others=[])", "field O.backup is not given"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=7, backup=None, others=[])", "field O.buyer expects A, got int"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=a, others=[])", "field O.backup expects Option[A], got A"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=a)", "field O.others expects list[A], got A"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=[])\n    o.buyer = 5", "expects A"},
+		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=[])\n    n = o.buyer.b + len(o.others)", ""},
+		// `with` copies an entity, each field it names replaced once.
+		{"p = P(5, 1, \"a\")\n    q = p with {d: 3, s: \"b\"}", ""},
+		{"a = A(b=1)\n    o = O(1, a, None, [])\n    q = o with {backup: Some(a), others: [a]}", ""},
+		{"p = P(5, 1, \"a\")\n    q = p with {d: 3, e: 2, d: 4}", "field P.d is given twice"},
+		{"p = P(5, 1, \"a\")\n    q = p with {t: 3}", "entity P has no field \"t\""},
+		{"p = P(5, 1, \"a\")\n    q = p with {s: 3}", "field P.s expects str, got int"},
+		{"a = A(b=1)\n    o = O(1, a, None, [])\n    q = o with {buyer: 7}", "field O.buyer expects A, got int"},
+		{"x = 5\n    q = x with {d: 0}", "'with' copies an entity with some fields replaced, got int"},
+		{"xs = [P(5, 1, \"a\")]\n    q = xs with {d: 0}", "'with' copies an entity with some fields replaced, got list[P]"},
+		{"o = Some(P(5, 1, \"a\"))\n    q = o with {d: 0}", "'with' copies an entity with some fields replaced, got Option[P]"},
+		// A named lambda is checked with the types of its first use.
+		{"cp = (p) => p with {d: 3}\n    q = cp(P(5, 1, \"a\"))\n    n = q.d", ""},
+		{"cp = (p) => p with {d: 3}", ""},
+		{"qs = [P(5, 1, \"a\")] |> map((p) => p with {d: 3})", ""},
+		{"cp = (p) => p with {d: 3}\n    q = cp(5)", "'with' copies an entity with some fields replaced, got int"},
+		{"cp = (p) => p with {t: 3}\n    q = cp(P(5, 1, \"a\"))", "entity P has no field \"t\""},
+		{"cp = (p) => p with {d: 3, d: 4}\n    q = cp(P(5, 1, \"a\"))", "field P.d is given twice"},
+		{"cp = (p) => p with {d: nope}", "undefined identifier \"nope\""},
+		{"cp = (ps) => (ps |> map((p) => p with {d: 3}))\n    g = (x) => cp([x])\n    qs = cp([5])", "'with' copies an entity with some fields replaced, got int"},
+		{"cp = (ps) => (ps |> map((p) => p with {d: 3}))\n    g = (x) => cp([x])\n    qs = cp([P(5, 1, \"a\")])\n    rs = g(P(5, 1, \"a\"))", ""},
+	}
+	for _, tc := range cases {
+		src := decls + "def main() -> int:\n    " + tc.body + "\n    return 0\n"
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.body, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.body, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.body, tc.want, err)
+		}
+	}
+
+	// What a relation holds is counted with numbers.
+	for _, tc := range []struct{ mult, want string }{
+		{"1", ""}, {"0..1", ""}, {"*", ""}, {"0..*", ""}, {"1..*", ""}, {"3", ""}, {"2..5", ""},
+		{"N", "a multiplicity is"}, {"1..N", "a multiplicity is"}, {"0", "a multiplicity is"},
+		{"0..0", "a multiplicity is"}, {"5..2", "a multiplicity is"},
+	} {
+		src := "entity A:\n    b: int\n\nentity O:\n    rel r -> " + tc.mult + " A\n\ndef main() -> int:\n    return 0\n"
+		prog, err := parser.Parse("t.anm", src)
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", tc.mult, err)
+		}
+		_, err = Check(prog)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%q: rejected: %v", tc.mult, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%q: want an error with %q, got %v", tc.mult, tc.want, err)
+		}
+	}
+
+	// A relation and a field are not named alike.
+	for _, src := range []string{
+		"entity A:\n    b: int\n\nentity O:\n    r: int\n    rel r -> 1 A\n",
+		"entity A:\n    b: int\n\nentity O:\n    rel r -> 1 A\n    rel r -> * A\n",
+	} {
+		prog, err := parser.Parse("t.anm", src+"\ndef main() -> int:\n    return 0\n")
+		if err != nil {
+			t.Fatalf("%q: parse failed: %v", src, err)
+		}
+		if _, err = Check(prog); err == nil || !strings.Contains(err.Error(), "O has two fields named r") {
+			t.Errorf("%q: want two fields named r, got %v", src, err)
+		}
+	}
+}

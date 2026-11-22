@@ -241,6 +241,15 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/sema_two_workflow_parameters_one_name.anm", "W has two parameters named n"},
 		{"../tests/bugs/sema_two_steps_one_name.anm", "W has two nodes named a"},
 		{"../tests/bugs/lts_two_states_one_name.anm", "OpenOnce has two states named Opened"},
+		{"../tests/bugs/sema_entity_field_not_given.anm", "field P.e is not given"},
+		{"../tests/bugs/sema_entity_field_given_twice.anm", "field P.d is given twice"},
+		{"../tests/bugs/sema_entity_field_by_position.anm", "field P.s expects str, got int"},
+		{"../tests/bugs/spark_entity_list_field_by_position.anm", "def:main.list_elem_bounds"},
+		{"../tests/bugs/sema_relation_not_given.anm", "field O.buyer is not given"},
+		{"../tests/bugs/sema_relation_given_an_int.anm", "field O.buyer expects A, got int"},
+		{"../tests/bugs/spark_entity_invariant_callers_variable.anm", "def:mk.construct_P_inv_1"},
+		{"../tests/bugs/sema_with_of_no_entity.anm", "'with' copies an entity with some fields replaced, got int"},
+		{"../tests/bugs/sema_lambda_fixed_by_untyped_use.anm", "w takes Option[int] where it is first used, got Option[str]"},
 	}
 
 	for _, tc := range cases {
@@ -2681,3 +2690,59 @@ def main() -> int:
     print(run_workflow A(1), run_workflow B(1), c, pick(1), pick(0), 12 / (c - 1))
     return 0
 `
+
+// An entity is made with a value for each field, by name or by position,
+// and a relation is a field: one entity, one or none, or a list of them.
+func TestEntityFieldsAndRelationsOnBothBackends(t *testing.T) {
+	runOnBothBackends(t, "entity_relations", `import std.json as json
+
+entity A:
+    b: int[1..9]
+
+entity O:
+    amount: int
+    rel buyer -> 1 A
+    rel backup -> 0..1 A
+    rel others -> * A
+
+def main() -> int:
+    a = A(b=2)
+    c = A(5)
+    o = O(amount=1, buyer=a, backup=None, others=[])
+    p = O(3, c, Some(a), [a, c])
+    print(o)
+    print(p)
+    print(10 / p.buyer.b)
+    match p.backup:
+        Some(x) -> print(10 / x.b)
+        None -> print("none")
+    for x in p.others:
+        print(10 / x.b)
+    o.buyer = c
+    o.others = [c]
+    print(o.buyer.b + len(o.others))
+    s = json.encode(p)
+    print(s)
+    match json.decode[O](s):
+        Ok(q) -> print(q)
+        Err(e) -> print(e)
+    match json.decode[O]("{\"amount\":1,\"others\":[]}"):
+        Ok(q) -> print(q)
+        Err(e) -> print(e)
+    match json.decode[O]("{\"amount\":1,\"buyer\":{\"b\":0},\"others\":[]}"):
+        Ok(q) -> print(q)
+        Err(e) -> print(e)
+    return 0
+`, `O(amount=1, backup=None, buyer=A(b=2), others=[])
+O(amount=3, backup=Some(A(b=2)), buyer=A(b=5), others=[A(b=2), A(b=5)])
+2
+5
+5
+2
+6
+{"amount":3,"backup":{"b":2},"buyer":{"b":5},"others":[{"b":2},{"b":5}]}
+O(amount=3, backup=Some(A(b=2)), buyer=A(b=5), others=[A(b=2), A(b=5)])
+schema error: missing field O.buyer
+schema violation: O.buyer.b=0 below minimum 1
+`)
+}

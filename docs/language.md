@@ -2,7 +2,7 @@
 
 Before any kernel runs, the semantic checker gives every value a type and refuses what the two backends could not run as written. The reason behind most rules here is the same: an operation on a value of the wrong sort does not fail when the program runs, it gives `()` or `None` or runs on whatever the value is, and the kernels would go on reasoning about the type the source declared.
 
-Contents: [Names](#names) · [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [A value may hold itself](#a-value-may-hold-itself) · [Returns](#returns) · [Matches](#matches)
+Contents: [Names](#names) · [Variables](#variables) · [Comparisons and operators](#comparisons-and-operators) · [Calls](#calls) · [Entities](#entities) · [Lambdas](#lambdas) · [Values of unknown type](#values-of-unknown-type) · [Open parts of a type](#open-parts-of-a-type) · [Handles hold one type](#handles-hold-one-type) · [A value may hold itself](#a-value-may-hold-itself) · [Returns](#returns) · [Matches](#matches)
 
 ## Names
 
@@ -82,12 +82,24 @@ A call may change what it receives as `mut`. What the caller knows afterwards is
 
 The modules are listed in [stdlib.md](stdlib.md).
 
+## Entities
+
+An entity is made by a call of its name, with one value for each of its fields: `Account(balance=10, frozen=False)` or `Account(10, False)`.
+
+- An argument is bound to the field it names, else to the one at its position, as both backends do. A field given twice, a field given no value, an argument past the last field and a name that is no field are errors: a field that is given nothing would hold no value at all, whatever its type says.
+- Each argument has to be of the type of its field, given by name or by position. The range of an `int[lo..hi]` field and the `invariant`s of the entity are proved of the arguments by the contract kernel ([contracts.md](contracts.md#entity-invariants)).
+- `mut` and `own` are for the parameters of a function, not for a field.
+- `p with {d: 3, s: "b"}` is a copy of the entity `p` with those fields replaced. Its base is an entity, and it names a field once, with a value of the field's type.
+- **A relation is a field.** `rel buyer -> 1 Customer` is a field of type `Customer`, `rel backup -> 0..1 Customer` one of type `Option[Customer]`, and any other multiplicity (`*`, `0..*`, `1..*`, `3`, `2..5`) one of type `list[Customer]`. It is given where the entity is made, read and assigned like any field, written and read by `json`, and may not be named like another field.
+- A multiplicity is `1`, `0..1`, `*`, or a count `n`, `n..m` or `n..*` with `n <= m` and `m >= 1`. How many entities a `list` relation holds is not checked yet: `1..*` and `2..5` say what the diagram shows, and nothing is assumed from them.
+
 ## Lambdas
 
 A lambda with parameters that is given a name (`g = (v) => v > 1`) has no declared parameter types.
 
 - It takes the types of its **first use**, a call or a stage, and its body is checked with them.
 - Every later use gives it those types.
+- A use in the body of another named lambda, with a parameter of that one or something that holds it (`k = (v) => g([v])`), is not its first: it is checked when `k` is first used.
 - So the first use has to say them whole: `g(None)` or `g([])` first is refused. Use it first with a value of a declared type.
 - The name is only called or given to a stage (`xs |> filter(g)`), not stored, passed or assigned again.
 

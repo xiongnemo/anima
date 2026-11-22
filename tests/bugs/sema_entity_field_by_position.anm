@@ -1,0 +1,11 @@
+# BUG (sema soundness): an argument given by position was not checked
+# against its field at all. p.s was a str to sema and held the int 2: this
+# printed `2a` on both backends.
+entity P:
+    d: int
+    s: str
+
+def main() -> int:
+    p = P(1, 2)
+    print(p.s + "a")
+    return 0

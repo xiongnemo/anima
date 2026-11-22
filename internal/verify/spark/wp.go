@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -1354,6 +1355,115 @@ func (v *verifier) assignValue(name string, rhs ast.Expr, env *symEnv, scope str
 	}
 }
 
+// paramBinds gives what the body of a function knows of its parameters
+// params where it is called with the arguments args, argParam naming the
+// parameter of each: the steps that bind them in a copy of env. It proves
+// that an argument is in the range of its parameter, as the obligation
+// rangeVC names. The fields of an entity are bound the same way where the
+// entity is made.
+func (v *verifier) paramBinds(params []sema.FuncParamInfo, args []ast.CallArg, argParam []int, env *symEnv, scope string, rangeVC func(param string) string) []func(*symEnv) {
+	// Arguments are evaluated in the caller's env before it is cloned, so the call env
+	// inherits their assumptions and never reuses one of their fresh names.
+	var binds []func(*symEnv)
+	for _, p := range params {
+		binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
+	}
+	// The string variables given for string parameters: a key the
+	// caller looked up by one is the key the callee names by the other.
+	strParams := map[string][]string{}
+	for i, a := range args {
+		if argParam[i] < 0 {
+			continue
+		}
+		p := params[argParam[i]]
+		if _, isStr := p.Type.(sema.StrType); !isStr {
+			continue
+		}
+		if id, ok := a.Value.(*ast.Ident); ok {
+			strParams[id.Name] = append(strParams[id.Name], p.Name)
+		}
+	}
+	for i, a := range args {
+		if argParam[i] < 0 {
+			continue
+		}
+		p := params[argParam[i]]
+		switch pt := p.Type.(type) {
+		case *sema.MapType:
+			if path, ok := mutArgPath(a.Value); ok {
+				binds = append(binds, keyBinds(env, path, p.Name, strParams)...)
+			}
+		case *sema.IntType:
+			valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
+			if pt.IsBounded {
+				v.checkIntRange(valT, a.Value, env, pt, rangeVC(p.Name), scope, a.Span)
+			}
+			binds = append(binds, func(c *symEnv) { c.intTerms[p.Name] = valT })
+		case sema.BoolType:
+			valB := v.evalBool(a.Value, env, scope)
+			binds = append(binds, func(c *symEnv) { c.boolTerms[p.Name] = valB })
+		case sema.StrType:
+			lt, known := v.lenOfValue(a.Value, env)
+			if !known {
+				lt = env.freshLen("arg")
+			}
+			binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+		case *sema.HandleType:
+			// A byte view is as long as the caller knows it to be.
+			if isByteView(pt) {
+				lt, known := v.newViewLen(a.Value, env, scope)
+				if !known {
+					lt = env.freshLen("arg")
+				}
+				binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+			}
+		case *sema.ListType:
+			argID, _ := a.Value.(*ast.Ident)
+			lt, known := v.lenOfValue(a.Value, env)
+			if !known {
+				lt = smt.Var(env.freshVar("arglen"))
+			}
+			binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
+			if argID != nil {
+				if iv, ok := env.listElems[argID.Name]; ok {
+					binds = append(binds, func(c *symEnv) { c.listElems[p.Name] = iv })
+				}
+			}
+		case *sema.EntityType:
+			argID, _ := a.Value.(*ast.Ident)
+			for _, f := range pt.Fields {
+				// The lists, strings and byte views in the fields are as
+				// long as the caller knows.
+				switch f.Type.(type) {
+				case *sema.ListType, sema.StrType, *sema.HandleType:
+					if argID != nil && (isByteView(f.Type) || f.Type.Kind() != sema.KindHandle) {
+						lt := env.lenOf(argID.Name + "." + f.Name)
+						path := p.Name + "." + f.Name
+						binds = append(binds, func(c *symEnv) { c.listLens[path] = lt })
+					}
+				case *sema.MapType:
+					if argID != nil {
+						binds = append(binds, keyBinds(env, argID.Name+"."+f.Name, p.Name+"."+f.Name, strParams)...)
+					}
+				}
+				if _, isInt := f.Type.(*sema.IntType); !isInt {
+					continue
+				}
+				t, known := smt.LinearTerm{}, false
+				if argID != nil {
+					t, known = env.intTerms[argID.Name+"."+f.Name]
+				}
+				if !known {
+					t = smt.Var(env.freshVar("argfield"))
+				}
+				path := p.Name + "." + f.Name
+				binds = append(binds, func(c *symEnv) { c.intTerms[path] = t })
+			}
+		}
+	}
+	return binds
+}
+
 func (v *verifier) propagatePipeMeta(targetVar string, pe *ast.PipeExpr, env *symEnv, scope string) {
 	// Collect chain left-to-right: base |> step1 |> step2 ...
 	var chain []ast.Expr
@@ -1576,19 +1686,31 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		// Check entity constructor bounds & invariants
 		if id, ok := e.Callee.(*ast.Ident); ok {
 			if et, isEnt := v.info.Entities[id.Name]; isEnt {
+				// The invariants are about the fields, and each field is the
+				// argument it is given: a variable of the function that is
+				// named like a field is not that field.
+				fields := make([]sema.FuncParamInfo, len(et.Fields))
+				for i, f := range et.Fields {
+					fields[i] = sema.FuncParamInfo{Name: f.Name, Type: f.Type}
+				}
+				argField, problem := argParams(fields, e.Args)
+				for i, f := range fields {
+					if problem == "" && !slices.Contains(argField, i) {
+						problem = fmt.Sprintf("parameter %q is not given", f.Name)
+					}
+				}
+				if problem != "" {
+					v.record(fmt.Sprintf("%s.construct_%s_fields", scope, et.Name), scope, e.Span, "each field is given once", VCFailed,
+						fmt.Sprintf("in the making of %s, %s", et.Name, strings.Replace(problem, "parameter", "field", 1)), nil)
+				}
+				// The arguments are evaluated before env is cloned, as for a
+				// call: what that learns of them is known of the fields.
+				binds := v.paramBinds(fields, e.Args, argField, env, scope, func(f string) string {
+					return fmt.Sprintf("%s.construct_%s.%s", scope, et.Name, f)
+				})
 				entEnv := env.clone()
-				for i, a := range e.Args {
-					fname := a.Name
-					if fname == "" && i < len(et.Fields) {
-						fname = et.Fields[i].Name
-					}
-					if ft, ok := et.FieldMap[fname]; ok {
-						if it, ok := ft.(*sema.IntType); ok && it.IsBounded {
-							valT := v.evalInt(a.Value, env, scope, true)
-							v.checkIntRange(valT, a.Value, env, it, fmt.Sprintf("%s.construct_%s.%s", scope, et.Name, fname), scope, a.Span)
-							entEnv.intTerms[fname] = valT
-						}
-					}
+				for _, bind := range binds {
+					bind(entEnv)
 				}
 				for idx, inv := range et.Invariants {
 					v.prove(fmt.Sprintf("%s.construct_%s_inv_%d", scope, et.Name, idx+1), scope, e.Span, entEnv, v.evalBool(inv, entEnv, scope))
@@ -1596,110 +1718,14 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 			}
 			// Check user callee requires & parameter range bounds
 			if fi, isFn := v.info.Funcs[id.Name]; isFn {
-				// Arguments are evaluated in the caller's env before it is cloned, so the call env
-				// inherits their assumptions and never reuses one of their fresh names.
-				var binds []func(*symEnv)
 				argParam, problem := argParams(fi.Type.Params, e.Args)
 				if problem != "" {
 					v.record(fmt.Sprintf("%s.call_%s_args", scope, id.Name), scope, e.Span, "each parameter is given once", VCFailed,
 						fmt.Sprintf("in the call of %s, %s", id.Name, problem), nil)
 				}
-				for _, p := range fi.Type.Params {
-					binds = append(binds, func(c *symEnv) { c.unbind(p.Name) })
-				}
-				// The string variables given for string parameters: a key the
-				// caller looked up by one is the key the callee names by the other.
-				strParams := map[string][]string{}
-				for i, a := range e.Args {
-					if argParam[i] < 0 {
-						continue
-					}
-					p := fi.Type.Params[argParam[i]]
-					if _, isStr := p.Type.(sema.StrType); !isStr {
-						continue
-					}
-					if id, ok := a.Value.(*ast.Ident); ok {
-						strParams[id.Name] = append(strParams[id.Name], p.Name)
-					}
-				}
-				for i, a := range e.Args {
-					if argParam[i] < 0 {
-						continue
-					}
-					p := fi.Type.Params[argParam[i]]
-					switch pt := p.Type.(type) {
-					case *sema.MapType:
-						if path, ok := mutArgPath(a.Value); ok {
-							binds = append(binds, keyBinds(env, path, p.Name, strParams)...)
-						}
-					case *sema.IntType:
-						valT := v.evalInt(a.Value, env, scope, pt.IsBounded)
-						if pt.IsBounded {
-							v.checkIntRange(valT, a.Value, env, pt, fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p.Name), scope, a.Span)
-						}
-						binds = append(binds, func(c *symEnv) { c.intTerms[p.Name] = valT })
-					case sema.BoolType:
-						valB := v.evalBool(a.Value, env, scope)
-						binds = append(binds, func(c *symEnv) { c.boolTerms[p.Name] = valB })
-					case sema.StrType:
-						lt, known := v.lenOfValue(a.Value, env)
-						if !known {
-							lt = env.freshLen("arg")
-						}
-						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
-					case *sema.HandleType:
-						// A byte view is as long as the caller knows it to be.
-						if isByteView(pt) {
-							lt, known := v.newViewLen(a.Value, env, scope)
-							if !known {
-								lt = env.freshLen("arg")
-							}
-							binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
-						}
-					case *sema.ListType:
-						argID, _ := a.Value.(*ast.Ident)
-						lt, known := v.lenOfValue(a.Value, env)
-						if !known {
-							lt = smt.Var(env.freshVar("arglen"))
-						}
-						binds = append(binds, func(c *symEnv) { c.listLens[p.Name] = lt })
-						if argID != nil {
-							if iv, ok := env.listElems[argID.Name]; ok {
-								binds = append(binds, func(c *symEnv) { c.listElems[p.Name] = iv })
-							}
-						}
-					case *sema.EntityType:
-						argID, _ := a.Value.(*ast.Ident)
-						for _, f := range pt.Fields {
-							// The lists, strings and byte views in the fields are as
-							// long as the caller knows.
-							switch f.Type.(type) {
-							case *sema.ListType, sema.StrType, *sema.HandleType:
-								if argID != nil && (isByteView(f.Type) || f.Type.Kind() != sema.KindHandle) {
-									lt := env.lenOf(argID.Name + "." + f.Name)
-									path := p.Name + "." + f.Name
-									binds = append(binds, func(c *symEnv) { c.listLens[path] = lt })
-								}
-							case *sema.MapType:
-								if argID != nil {
-									binds = append(binds, keyBinds(env, argID.Name+"."+f.Name, p.Name+"."+f.Name, strParams)...)
-								}
-							}
-							if _, isInt := f.Type.(*sema.IntType); !isInt {
-								continue
-							}
-							t, known := smt.LinearTerm{}, false
-							if argID != nil {
-								t, known = env.intTerms[argID.Name+"."+f.Name]
-							}
-							if !known {
-								t = smt.Var(env.freshVar("argfield"))
-							}
-							path := p.Name + "." + f.Name
-							binds = append(binds, func(c *symEnv) { c.intTerms[path] = t })
-						}
-					}
-				}
+				binds := v.paramBinds(fi.Type.Params, e.Args, argParam, env, scope, func(p string) string {
+					return fmt.Sprintf("%s.call_%s_arg_%s", scope, id.Name, p)
+				})
 				callEnv := env.clone()
 				for _, bind := range binds {
 					bind(callEnv)
