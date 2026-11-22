@@ -1451,6 +1451,16 @@ entity O:
 		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=a)", "field O.others expects list[A], got A"},
 		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=[])\n    o.buyer = 5", "expects A"},
 		{"a = A(b=1)\n    o = O(amount=1, buyer=a, backup=None, others=[])\n    n = o.buyer.b + len(o.others)", ""},
+		// `with` copies an entity, each field it names replaced once.
+		{"p = P(5, 1, \"a\")\n    q = p with {d: 3, s: \"b\"}", ""},
+		{"a = A(b=1)\n    o = O(1, a, None, [])\n    q = o with {backup: Some(a), others: [a]}", ""},
+		{"p = P(5, 1, \"a\")\n    q = p with {d: 3, e: 2, d: 4}", "field P.d is given twice"},
+		{"p = P(5, 1, \"a\")\n    q = p with {t: 3}", "entity P has no field \"t\""},
+		{"p = P(5, 1, \"a\")\n    q = p with {s: 3}", "field P.s expects str, got int"},
+		{"a = A(b=1)\n    o = O(1, a, None, [])\n    q = o with {buyer: 7}", "field O.buyer expects A, got int"},
+		{"x = 5\n    q = x with {d: 0}", "'with' copies an entity with some fields replaced, got int"},
+		{"xs = [P(5, 1, \"a\")]\n    q = xs with {d: 0}", "'with' copies an entity with some fields replaced, got list[P]"},
+		{"o = Some(P(5, 1, \"a\"))\n    q = o with {d: 0}", "'with' copies an entity with some fields replaced, got Option[P]"},
 	}
 	for _, tc := range cases {
 		src := decls + "def main() -> int:\n    " + tc.body + "\n    return 0\n"

@@ -1712,19 +1712,28 @@ func (c *checker) checkExprInner(expr ast.Expr, sc *scope) (Type, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The result is typed as the base, so the base is an entity: both
+		// backends give an object of the fields alone for anything else.
+		et, ok := baseTy.(*EntityType)
+		if !ok {
+			return nil, fmt.Errorf("%s: 'with' copies an entity with some fields replaced, got %s", e.Span, baseTy)
+		}
+		given := map[string]bool{}
 		for _, f := range e.Fields {
 			vt, err := c.checkExpr(f.Value, sc)
 			if err != nil {
 				return nil, err
 			}
-			if et, ok := baseTy.(*EntityType); ok {
-				ft, exists := et.FieldMap[f.Name]
-				if !exists {
-					return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
-				}
-				if !c.assignable(ft, vt, f.Value) {
-					return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
-				}
+			ft, exists := et.FieldMap[f.Name]
+			if !exists {
+				return nil, fmt.Errorf("%s: entity %s has no field %q in with-update", e.Span, et.Name, f.Name)
+			}
+			if given[f.Name] {
+				return nil, fmt.Errorf("%s: field %s.%s is given twice", e.Span, et.Name, f.Name)
+			}
+			given[f.Name] = true
+			if !c.assignable(ft, vt, f.Value) {
+				return nil, fmt.Errorf("%s: field %s.%s expects %s, got %s", e.Span, et.Name, f.Name, ft, vt)
 			}
 		}
 		return baseTy, nil

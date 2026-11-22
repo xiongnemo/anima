@@ -1,0 +1,10 @@
+# BUG (sema soundness): `with` was typed as its base, whatever the base
+# was. Of an int, both backends give an object that holds the fields alone:
+# q was an int to sema and the kernel, the VM divided by zero and the
+# native program printed 0.
+def main() -> int:
+    x = 5
+    q = x with {d: 0}
+    if q != 0:
+        print(10 / q)
+    return 0
