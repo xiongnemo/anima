@@ -1,16 +1,20 @@
 package vm
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -260,7 +264,7 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		if len(args) >= 1 && args[0].Int > 0 {
 			poolSize = int(args[0].Int)
 		}
-		tr := &http.Transport{MaxIdleConnsPerHost: poolSize, MaxIdleConns: poolSize * 2}
+		tr := &http.Transport{MaxIdleConnsPerHost: poolSize, MaxIdleConns: poolSize * 2, DisableCompression: true, DisableKeepAlives: true}
 		cl := &http.Client{Transport: tr}
 		return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleSession, HTTPClient: cl}}, nil
 
@@ -426,7 +430,7 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		if err != nil {
 			return VErr(err.Error()), nil
 		}
-		return VOk(VStr(string(b))), nil
+		return textRead(b), nil
 
 	case "std.fs.write_atomic":
 		path := args[0].Str
@@ -535,7 +539,7 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 			if err != nil && n == 0 {
 				return VErr(err.Error()), nil
 			}
-			return VOk(VStr(string(buf[:n]))), nil
+			return textRead(buf[:n]), nil
 		case "close":
 			h.Close()
 			return VVoid(), nil
@@ -547,7 +551,7 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 			if err != nil {
 				return VErr(err.Error()), nil
 			}
-			return VOk(VStr(string(b))), nil
+			return textRead(b), nil
 		case "write_text":
 			n, err := h.File.WriteString(args[0].Str)
 			if err != nil {
@@ -730,27 +734,70 @@ func extractTimeoutMsFromMethod(cm CallMeta, args []Value, posIdx int, def int) 
 	return def
 }
 
+// The answer of a server is given as the server gave it, as the native
+// client gives it: a body is not asked for compressed nor decompressed, and
+// a redirect is an answer like another, not followed. Each request has a
+// connection of its own, as it has there: on one used again, what a server
+// sent after an answer was read as the start of the next.
+var plainTransport = func() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableCompression = true
+	tr.DisableKeepAlives = true
+	return tr
+}()
+
+// asAnswered hides from Go's client where a redirect leads, so that the
+// client follows none and has no word to say on where one leads.
+type asAnswered struct{ rt http.RoundTripper }
+
+func (a asAnswered) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := a.rt.RoundTrip(r)
+	if resp != nil {
+		resp.Header.Del("Location")
+	}
+	return resp, err
+}
+
 func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.Client) Value {
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
-	req, err := http.NewRequest(method, url, bodyReader)
+	// One time limit for the whole request. It is kept here and not by
+	// http.Client.Timeout: that ends a request in two ways at once, and
+	// which of the two is first decides the words of the error.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return VErr(err.Error())
 	}
-	cl := &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}
+	var tr http.RoundTripper = plainTransport
 	if baseClient != nil {
-		cl.Transport = baseClient.Transport
+		tr = baseClient.Transport
 	}
+	cl := &http.Client{Transport: asAnswered{tr}}
+	// No str holds a NUL, the message of an Err no more than another: Go
+	// gives some of a malformed answer as it came, and a NUL in that is
+	// written \x00.
 	resp, err := cl.Do(req)
 	if err != nil {
-		return VErr(err.Error())
+		var ue *neturl.Error
+		if ctx.Err() != nil && errors.As(err, &ue) {
+			ue.Err = errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
+		}
+		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return VErr(err.Error())
+		if ctx.Err() != nil {
+			return VErr("context deadline exceeded (Client.Timeout or context cancellation while reading body)")
+		}
+		return VErr(strings.ReplaceAll(err.Error(), "\x00", `\x00`))
+	}
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return VErr(errTextNUL)
 	}
 	ent := &EntityInstance{
 		TypeName: "HttpResponse",
@@ -761,6 +808,17 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 		},
 	}
 	return VOk(Value{Kind: ValEntity, Entity: ent})
+}
+
+// A str holds no NUL: the native backend's strings end at one. What is read
+// from outside the program and holds one is refused, on both backends.
+const errTextNUL = "text holds a NUL"
+
+func textRead(b []byte) Value {
+	if bytes.IndexByte(b, 0) >= 0 {
+		return VErr(errTextNUL)
+	}
+	return VOk(VStr(string(b)))
 }
 
 // jsonDecodeSchema is json.decode. With no type it gives the value of the

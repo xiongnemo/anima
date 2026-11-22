@@ -906,6 +906,20 @@ static AnimaVal hdl_stream_send(AnimaVal hv, const char *txt) {
     return v_ok(v_int((int64_t)n));
 }
 
+// A str holds no NUL: it ends at one. The n bytes read from outside the
+// program are Ok(str) when none of them is a NUL and an Err when one is, as
+// on the VM.
+#define ERR_TEXT_NUL "text holds a NUL"
+static AnimaVal text_read(const char *p, size_t n) {
+    if (n > 0 && memchr(p, '\0', n)) return v_err(ERR_TEXT_NUL);
+    char *t = malloc(n + 1);
+    if (n > 0) memcpy(t, p, n);
+    t[n] = '\0';
+    AnimaVal r = v_ok(v_str(t));
+    free(t);
+    return r;
+}
+
 static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
     if (!hv.u.hdl || hv.u.hdl->closed) return v_err("socket closed");
     if (max_b <= 0) max_b = 4096;
@@ -913,8 +927,7 @@ static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
     ssize_t n = recv(hv.u.hdl->fd, buf, (size_t)max_b, 0);
     if (n < 0) { int e = errno; free(buf); return v_err(strerror(e)); }
     if (n == 0) { free(buf); return v_err("EOF"); }
-    buf[n] = '\0';
-    AnimaVal r = v_ok(v_str(buf));
+    AnimaVal r = text_read(buf, (size_t)n);
     free(buf);
     return r;
 }
@@ -926,92 +939,506 @@ static int64_t mono_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-// How the head of an answer says its body ends.
-enum { HTTP_UNTIL_CLOSE, HTTP_LENGTH, HTTP_CHUNKED, HTTP_NO_BODY };
-typedef struct {
-    size_t head_len; int status; int mode; size_t want;
-    size_t chunk_at;  // in a chunked body: where the first chunk not all there yet starts
-} HttpHead;
+// ─── The answer of an HTTP server ───
+// It is read as Go's net/http reads it, which is what the VM runs: what Go
+// takes, what it refuses and the words it refuses with are followed step by
+// step, and the tests run both backends on the same answers. An answer is
+// read from the bytes that have arrived so far, and again from where it
+// stopped when more have: a server may keep the connection open after an
+// answer that says where it ends. A NUL in it is a byte like any other;
+// only a body that holds one is no str.
+static int utf8_seq_len(const unsigned char *s);
 
-// Reads the head of the answer in raw, once all of it is there. Chunked
-// wins over a Content-Length, and 204 and 304 have no body, as in Go.
-static bool http_head(const char *raw, HttpHead *h) {
-    const char *head_end = strstr(raw, "\r\n\r\n");
-    if (!head_end) return false;
-    h->head_len = (size_t)(head_end - raw) + 4;
-    const char *sp = strchr(raw, ' ');
-    h->status = sp && sp < head_end ? atoi(sp + 1) : 200;
-    h->mode = HTTP_UNTIL_CLOSE;
-    h->want = 0;
-    h->chunk_at = 0;
-    bool chunked = false;
-    for (const char *line = strstr(raw, "\r\n"); line && line < head_end; line = strstr(line + 2, "\r\n")) {
-        const char *f = line + 2;
-        const char *eol = strstr(f, "\r\n");
-        if (strncasecmp(f, "Content-Length:", 15) == 0) {
-            long long want = atoll(f + 15);
-            if (want >= 0) { h->mode = HTTP_LENGTH; h->want = (size_t)want; }
-        } else if (strncasecmp(f, "Transfer-Encoding:", 18) == 0) {
-            for (const char *p = f + 18; p + 7 <= eol; p++) {
-                if (strncasecmp(p, "chunked", 7) == 0) chunked = true;
-            }
-        }
+typedef struct { char **v; size_t n; } HttpVals;
+
+static void http_vals_add(HttpVals *vs, const char *s, size_t len) {
+    vs->v = realloc(vs->v, (vs->n + 1) * sizeof(char *));
+    char *c = malloc(len + 1);
+    if (len > 0) memcpy(c, s, len);
+    c[len] = '\0';
+    vs->v[vs->n++] = c;
+}
+
+static void http_vals_free(HttpVals *vs) {
+    for (size_t k = 0; k < vs->n; k++) free(vs->v[k]);
+    free(vs->v);
+    vs->v = NULL; vs->n = 0;
+}
+
+enum { HTTP_MORE, HTTP_DONE, HTTP_BAD, HTTP_FIELD, HTTP_END, HTTP_EOF };
+enum { HTTP_FIRST_LINE, HTTP_FIELDS, HTTP_CHUNK, HTTP_TRAILER, HTTP_LENGTH, HTTP_TO_CLOSE };
+// The size of the buffer Go reads a connection through: no line of a
+// chunked body is longer.
+#define HTTP_GO_BUF 4096
+
+typedef struct {
+    const char *p; size_t n; bool eof;  // what has arrived, and whether no more will
+    size_t at;                          // it is read up to here
+    int stage;
+    bool first_field;                   // no field of this head is read yet
+    bool after_1xx;                     // a 1xx answer came first and was passed over
+    bool in_body;                       // the head is read: what fails now is the body
+    int status, major, minor;
+    HttpVals lengths, encodings, trailers, connections;
+    bool upgrade;                       // the first Upgrade field has a value
+    bool seen_upgrade;
+    uint64_t want;                      // the length of a body that has one
+    int64_t excess;                     // Go's count of the framing of a chunked body
+    AnimaBuf chunks;                    // a chunked body without its framing
+    const char *body; size_t body_len;
+    char *bad;                          // why the answer is refused
+} HttpAnswer;
+
+static void http_answer_free(HttpAnswer *a) {
+    http_vals_free(&a->lengths); http_vals_free(&a->encodings);
+    http_vals_free(&a->trailers); http_vals_free(&a->connections);
+    free(a->chunks.p); free(a->bad);
+}
+
+static int http_fail(HttpAnswer *a, char *why) { a->bad = why; return HTTP_BAD; }
+
+// The line that starts at i, as Go's bufio gives it: without the LF or
+// CR LF that ends it, and *next where the one after starts. 0 when its end
+// has not arrived. Once the server has said all, what is left is a line as
+// it is; -1 when nothing is.
+static int http_line_at(const HttpAnswer *a, size_t i, const char **line, size_t *len, size_t *next) {
+    const char *nl = i < a->n ? memchr(a->p + i, '\n', a->n - i) : NULL;
+    if (nl) {
+        size_t e = (size_t)(nl - a->p);
+        *line = a->p + i;
+        *len = e - i;
+        if (*len > 0 && a->p[e - 1] == '\r') (*len)--;
+        *next = e + 1;
+        return 1;
     }
-    if (chunked) h->mode = HTTP_CHUNKED;
-    if (h->status == 204 || h->status == 304) h->mode = HTTP_NO_BODY;
+    if (!a->eof) return 0;
+    if (i >= a->n) return -1;
+    *line = a->p + i; *len = a->n - i; *next = a->n;
+    return 1;
+}
+
+static void http_trim(const char **s, size_t *len) {
+    while (*len > 0 && ((*s)[0] == ' ' || (*s)[0] == '\t')) { (*s)++; (*len)--; }
+    while (*len > 0 && ((*s)[*len - 1] == ' ' || (*s)[*len - 1] == '\t')) (*len)--;
+}
+
+// Whether Go prints a character outside ASCII as itself. Go asks its
+// Unicode tables; this knows the spaces, the controls, the format marks
+// and the private areas, and takes the rest to be printed.
+static bool go_prints(uint32_t r) {
+    if (r <= 0xa0 || r == 0xad || r == 0x1680 || r == 0x3000 || r == 0xfeff) return false;
+    if ((r >= 0x2000 && r <= 0x200f) || (r >= 0x2028 && r <= 0x202f) || (r >= 0x205f && r <= 0x206f)) return false;
+    if ((r >= 0xe000 && r <= 0xf8ff) || (r >= 0xfff0 && r <= 0xfffb) || (r & 0xfffe) == 0xfffe || r >= 0xe0000) return false;
     return true;
 }
 
-// The chunks in p[0..n): 1 when they are all there, up to the last line of
-// the trailer; 0 when more is to come; -1 for a length that is not hex, -2
-// for a chunk that does not end in CRLF and -3 for a length of more than 16
-// digits, the most Go takes. The bytes of the chunks, without
-// their framing, are added to out when one is given. With at, reading
-// starts at *at and *at is left at the first chunk that is not all there:
-// a body in many chunks is then read once, not once for each read of the
-// socket.
-static int http_chunks(const char *p, size_t n, AnimaBuf *out, size_t *at) {
-    size_t i = at ? *at : 0;
+// Adds s[0..len) to b as Go's %q writes it.
+static void go_quote(AnimaBuf *b, const char *s, size_t len) {
+    buf_put(b, "\"");
+    for (size_t k = 0; k < len; k++) {
+        unsigned char c = (unsigned char)s[k];
+        char esc[16];
+        if (c >= 0x80) {
+            int n = utf8_seq_len((const unsigned char *)s + k);
+            if (n == 0 || (size_t)n > len - k) { snprintf(esc, sizeof(esc), "\\x%02x", c); buf_put(b, esc); continue; }
+            uint32_t r = n == 2 ? (c & 0x1fu) : n == 3 ? (c & 0x0fu) : (c & 0x07u);
+            for (int m = 1; m < n; m++) r = (r << 6) | ((unsigned char)s[k + (size_t)m] & 0x3fu);
+            if (go_prints(r)) buf_putn(b, s + k, (size_t)n);
+            else { snprintf(esc, sizeof(esc), r < 0x10000 ? "\\u%04x" : "\\U%08x", (unsigned)r); buf_put(b, esc); }
+            k += (size_t)n - 1;
+            continue;
+        }
+        if (c == '"' || c == '\\') { esc[0] = '\\'; esc[1] = (char)c; esc[2] = 0; }
+        else if (c == '\a') strcpy(esc, "\\a");
+        else if (c == '\b') strcpy(esc, "\\b");
+        else if (c == '\f') strcpy(esc, "\\f");
+        else if (c == '\n') strcpy(esc, "\\n");
+        else if (c == '\r') strcpy(esc, "\\r");
+        else if (c == '\t') strcpy(esc, "\\t");
+        else if (c == '\v') strcpy(esc, "\\v");
+        else if (c < 0x20 || c == 0x7f) snprintf(esc, sizeof(esc), "\\x%02x", c);
+        else { esc[0] = (char)c; esc[1] = 0; }
+        buf_put(b, esc);
+    }
+    buf_put(b, "\"");
+}
+
+// what, then s[0..len): quoted as Go's %q quotes it, or as it is. No str
+// holds a NUL: one in a line given as it is is written \x00, as the VM
+// writes it.
+static char *http_msg(const char *what, const char *s, size_t len, bool quoted) {
+    AnimaBuf b = {0};
+    buf_put(&b, what);
+    if (quoted) { go_quote(&b, s, len); return b.p; }
+    for (size_t k = 0; k < len; k++) {
+        if (s[k] == '\0') buf_put(&b, "\\x00");
+        else buf_putn(&b, s + k, 1);
+    }
+    return b.p;
+}
+
+// what, then the values as Go's %q writes a list of them: ["a" "b"].
+static char *http_msg_vals(const char *what, const HttpVals *vs) {
+    AnimaBuf b = {0};
+    buf_put(&b, what); buf_put(&b, "[");
+    for (size_t k = 0; k < vs->n; k++) {
+        if (k > 0) buf_put(&b, " ");
+        go_quote(&b, vs->v[k], strlen(vs->v[k]));
+    }
+    buf_put(&b, "]");
+    return b.p;
+}
+
+static bool http_name_byte(unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c != 0 && strchr("!#$%&'*+-.^_\x60|~", c) != NULL);
+}
+
+static bool http_value_byte(unsigned char c) {
+    return c >= 0x80 || c == '\t' || (c >= 0x20 && c < 0x7f);
+}
+
+// The field that starts at a->at, with the lines that go on with it, as
+// Go's textproto takes it: a line that starts with a space or a tab goes on
+// with the one before, a field has a colon, a name of token bytes and a
+// value without control bytes. HTTP_FIELD with the field in kv, HTTP_END
+// at the empty line that ends the fields, HTTP_EOF when the server stopped
+// before one, HTTP_BAD for a field Go refuses, HTTP_MORE when the field
+// has not all arrived.
+static int http_field(HttpAnswer *a, AnimaBuf *kv) {
+    const char *line = NULL;
+    size_t len = 0, next = 0, i = a->at;
+    if (a->first_field && i < a->n && (a->p[i] == ' ' || a->p[i] == '\t')) {
+        if (http_line_at(a, i, &line, &len, &next) == 0) {
+            if (a->n - i < HTTP_GO_BUF) return HTTP_MORE;
+            len = HTTP_GO_BUF;
+        }
+        // Go quotes no more than 80 bytes of such a line.
+        if (len > 80) return http_fail(a, strdup("message too large"));
+        return http_fail(a, http_msg("malformed MIME header initial line: ", line, len, false));
+    }
+    int r = http_line_at(a, i, &line, &len, &next);
+    if (r == 0) return HTTP_MORE;
+    if (r < 0) return HTTP_EOF;
+    if (len == 0) { a->at = next; return HTTP_END; }
+    if (!memchr(line, ':', len)) return http_fail(a, http_msg("malformed MIME header: missing colon: ", line, len, true));
+    http_trim(&line, &len);
+    kv->len = 0;
+    buf_putn(kv, line, len);
+    size_t j = next;
     for (;;) {
-        if (at) *at = i;
-        size_t j = i, size = 0;
-        int digits = 0;
-        while (j < n && isxdigit((unsigned char)p[j])) {
-            int c = tolower((unsigned char)p[j]);
-            if (++digits > 16) return -3;
-            size = size * 16 + (size_t)(c <= '9' ? c - '0' : c - 'a' + 10);
-            j++;
-        }
-        if (j >= n) return 0;
-        if (digits == 0 || (p[j] != '\r' && p[j] != ';' && p[j] != ' ' && p[j] != '\t')) return -1;
-        while (j + 1 < n && !(p[j] == '\r' && p[j + 1] == '\n')) j++;
-        if (j + 1 >= n) return 0;
-        i = j + 2;
-        if (size == 0) {
-            // The trailer: lines up to an empty one.
-            for (;;) {
-                j = i;
-                while (j + 1 < n && !(p[j] == '\r' && p[j + 1] == '\n')) j++;
-                if (j + 1 >= n) return 0;
-                if (j == i) return 1;
-                i = j + 2;
-            }
-        }
-        if (size > n - i || n - i - size < 2) return 0;
-        if (p[i + size] != '\r' || p[i + size + 1] != '\n') return -2;
-        if (out) buf_putn(out, p + i, size);
-        i += size + 2;
+        size_t k = j;
+        while (k < a->n && (a->p[k] == ' ' || a->p[k] == '\t')) k++;
+        // Whether the next line goes on with this one shows at its first
+        // byte that is no space.
+        if (k >= a->n && !a->eof) return HTTP_MORE;
+        if (k == j) break;
+        buf_putn(kv, " ", 1);
+        r = http_line_at(a, k, &line, &len, &next);
+        if (r == 0) return HTTP_MORE;
+        j = k;
+        if (r < 0) break;
+        http_trim(&line, &len);
+        buf_putn(kv, line, len);
+        j = next;
+    }
+    size_t name_len = (size_t)((const char *)memchr(kv->p, ':', kv->len) - kv->p);
+    bool ok = name_len > 0;
+    bool spaced = false;
+    for (size_t k = 0; ok && k < name_len; k++) {
+        if (kv->p[k] == ' ') spaced = true;
+        else ok = http_name_byte((unsigned char)kv->p[k]);
+    }
+    // Go writes a name its way, Content-Length, where the field is: a field
+    // refused for its value is given with its name so written.
+    bool upper = true;
+    for (size_t k = 0; ok && !spaced && k < name_len; k++) {
+        kv->p[k] = (char)(upper ? toupper((unsigned char)kv->p[k]) : tolower((unsigned char)kv->p[k]));
+        upper = kv->p[k] == '-';
+    }
+    for (size_t k = name_len + 1; ok && k < kv->len; k++) ok = http_value_byte((unsigned char)kv->p[k]);
+    if (!ok) return http_fail(a, http_msg("malformed MIME header line: ", kv->p, kv->len, false));
+    a->at = j;
+    a->first_field = false;
+    return HTTP_FIELD;
+}
+
+// The first line of an answer, "HTTP/1.1 200 OK", read as Go reads it.
+static int http_first_line(HttpAnswer *a, const char *line, size_t len) {
+    const char *sp = memchr(line, ' ', len);
+    if (!sp) return http_fail(a, http_msg("malformed HTTP response ", line, len, true));
+    size_t proto_len = (size_t)(sp - line);
+    const char *code = sp + 1;
+    size_t rest = len - proto_len - 1;
+    while (rest > 0 && code[0] == ' ') { code++; rest--; }
+    const char *end = memchr(code, ' ', rest);
+    size_t code_len = end ? (size_t)(end - code) : rest;
+    // Three characters that Go's Atoi takes and that are not below zero.
+    bool ok = code_len == 3;
+    int n = 0;
+    for (size_t k = 0; ok && k < 3; k++) {
+        if (k == 0 && (code[0] == '+' || code[0] == '-')) continue;
+        ok = code[k] >= '0' && code[k] <= '9';
+        if (ok) n = n * 10 + (code[k] - '0');
+    }
+    if (ok && code[0] == '-' && n != 0) ok = false;
+    if (!ok) return http_fail(a, http_msg("malformed HTTP status code ", code, code_len, true));
+    ok = proto_len == 8 && memcmp(line, "HTTP/", 5) == 0 && line[5] >= '0' && line[5] <= '9' &&
+        line[6] == '.' && line[7] >= '0' && line[7] <= '9';
+    if (!ok) return http_fail(a, http_msg("malformed HTTP version ", line, proto_len, true));
+    a->status = n;
+    a->major = line[5] - '0';
+    a->minor = line[7] - '0';
+    return HTTP_DONE;
+}
+
+static bool http_name_is(const AnimaBuf *kv, size_t name_len, const char *name) {
+    return name_len == strlen(name) && strncasecmp(kv->p, name, name_len) == 0;
+}
+
+// Whether a list of values separated by commas has the token.
+static bool http_has_token(const char *v, const char *token) {
+    for (;;) {
+        const char *comma = strchr(v, ',');
+        const char *s = v;
+        size_t len = comma ? (size_t)(comma - v) : strlen(v);
+        http_trim(&s, &len);
+        if (len == strlen(token) && strncasecmp(s, token, len) == 0) return true;
+        if (!comma) return false;
+        v = comma + 1;
     }
 }
 
-// Whether the answer in raw[0..total) needs no more reading.
-static bool http_complete(const char *raw, size_t total, HttpHead *h) {
-    switch (h->mode) {
-    case HTTP_NO_BODY: return true;
-    case HTTP_LENGTH: return total - h->head_len >= h->want;
-    case HTTP_CHUNKED: return http_chunks(raw + h->head_len, total - h->head_len, NULL, &h->chunk_at) != 0;
+// The name a Trailer field may not give, if it gives one.
+static const char *http_bad_trailer(const HttpVals *vs) {
+    static const char *const names[] = {"Transfer-Encoding", "Trailer", "Content-Length"};
+    for (size_t k = 0; k < vs->n; k++) {
+        const char *v = vs->v[k];
+        for (;;) {
+            const char *comma = strchr(v, ',');
+            const char *s = v;
+            size_t len = comma ? (size_t)(comma - v) : strlen(v);
+            http_trim(&s, &len);
+            for (size_t m = 0; m < 3; m++) {
+                if (len == strlen(names[m]) && strncasecmp(s, names[m], len) == 0) return names[m];
+            }
+            if (!comma) break;
+            v = comma + 1;
+        }
     }
-    return false;
+    return NULL;
+}
+
+// The head is read: what it says of the body, in the order Go looks at it.
+// HTTP_MORE to go on reading, HTTP_DONE for an answer with no body.
+static int http_head_end(HttpAnswer *a) {
+    bool chunked = false;
+    // A Transfer-Encoding counts from HTTP/1.1 on, and only "chunked" does.
+    if (a->encodings.n > 0 && (a->major > 1 || (a->major == 1 && a->minor >= 1))) {
+        if (a->encodings.n != 1) return http_fail(a, http_msg_vals("too many transfer encodings: ", &a->encodings));
+        const char *te = a->encodings.v[0];
+        if (strcasecmp(te, "chunked") != 0) return http_fail(a, http_msg("unsupported transfer encoding: ", te, strlen(te), true));
+        chunked = true;
+    }
+    bool has_length = a->lengths.n > 0;
+    uint64_t length = 0;
+    if (has_length) {
+        const char *first = a->lengths.v[0];
+        size_t first_len = strlen(first);
+        http_trim(&first, &first_len);
+        for (size_t k = 1; k < a->lengths.n; k++) {
+            const char *other = a->lengths.v[k];
+            size_t other_len = strlen(other);
+            http_trim(&other, &other_len);
+            if (other_len != first_len || memcmp(other, first, first_len) != 0) {
+                return http_fail(a, http_msg_vals("http: message cannot contain multiple Content-Length headers; got ", &a->lengths));
+            }
+        }
+        if (first_len == 0) return http_fail(a, strdup("invalid empty Content-Length \"\""));
+        bool ok = true;
+        for (size_t k = 0; ok && k < first_len; k++) {
+            ok = first[k] >= '0' && first[k] <= '9' && length <= (INT64_MAX - (uint64_t)(first[k] - '0')) / 10;
+            if (ok) length = length * 10 + (uint64_t)(first[k] - '0');
+        }
+        if (!ok) return http_fail(a, http_msg("bad Content-Length ", first, first_len, true));
+    }
+    if (chunked) {
+        const char *name = http_bad_trailer(&a->trailers);
+        if (name) return http_fail(a, http_msg("bad trailer key ", name, strlen(name), true));
+    }
+    bool is_1xx = a->status >= 100 && a->status <= 199;
+    if (is_1xx && a->status != 101) {
+        // Not the answer yet: the next one is.
+        http_vals_free(&a->lengths); http_vals_free(&a->encodings);
+        http_vals_free(&a->trailers); http_vals_free(&a->connections);
+        a->upgrade = a->seen_upgrade = false;
+        a->after_1xx = true;
+        a->stage = HTTP_FIRST_LINE;
+        return HTTP_MORE;
+    }
+    a->in_body = true;
+    a->body = a->p + a->at;
+    a->body_len = 0;
+    bool switched = false;
+    if (a->status == 101 && a->upgrade) {
+        for (size_t k = 0; k < a->connections.n && !switched; k++) switched = http_has_token(a->connections.v[k], "Upgrade");
+    }
+    bool no_body = is_1xx || a->status == 204 || a->status == 304;
+    if (switched) a->stage = HTTP_TO_CLOSE;
+    else if (no_body) return HTTP_DONE;
+    else if (chunked) { a->stage = HTTP_CHUNK; buf_putn(&a->chunks, "", 0); }
+    else if (!has_length) a->stage = HTTP_TO_CLOSE;
+    else if (length == 0) return HTTP_DONE;
+    else { a->stage = HTTP_LENGTH; a->want = length; }
+    return HTTP_MORE;
+}
+
+// The chunk that starts at a->at, read as Go's chunked reader reads it.
+// HTTP_MORE when it is read and another follows or when it has not all
+// arrived; a->at only moves past a chunk that is whole.
+static int http_chunk(HttpAnswer *a) {
+    size_t avail = a->n - a->at;
+    const char *line = a->p + a->at;
+    const char *nl = avail > 0 ? memchr(line, '\n', avail < HTTP_GO_BUF ? avail : HTTP_GO_BUF) : NULL;
+    if (!nl) {
+        if (avail >= HTTP_GO_BUF) return http_fail(a, strdup("header line too long"));
+        if (a->eof) return http_fail(a, strdup("unexpected EOF"));
+        return HTTP_MORE;
+    }
+    size_t len = (size_t)(nl - line) + 1;
+    const char *cr = memchr(line, '\r', len);
+    if (!cr) return http_fail(a, strdup("chunked line ends with bare LF"));
+    if ((size_t)(cr - line) != len - 2) return http_fail(a, strdup("invalid CR in chunked line"));
+    len -= 2;
+    int64_t excess = (int64_t)((uint64_t)a->excess + len + 2);
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) len--;
+    const char *semi = memchr(line, ';', len);
+    if (semi) len = (size_t)(semi - line);
+    if (len == 0) return http_fail(a, strdup("empty hex number for chunk length"));
+    uint64_t size = 0;
+    for (size_t k = 0; k < len; k++) {
+        unsigned char c = (unsigned char)line[k];
+        if (!isxdigit(c)) return http_fail(a, strdup("invalid byte in chunk length"));
+        if (k == 16) return http_fail(a, strdup("http chunk length too large"));
+        size = (size << 4) | (uint64_t)(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+    }
+    // Go counts the bytes that are framing and not data, in 64 bits that
+    // wrap, and refuses a body that is mostly framing.
+    excess = (int64_t)((uint64_t)excess - (16 + 2 * size));
+    if (excess < 0) excess = 0;
+    size_t data = (size_t)(nl - a->p) + 1;
+    if (size == 0) {
+        a->at = data;
+        a->stage = HTTP_TRAILER;
+        return HTTP_MORE;
+    }
+    if (excess > 16 * 1024) return http_fail(a, strdup("chunked encoding contains too much non-data"));
+    uint64_t have = a->n - data;
+    if (have < size || have - size < 2) {
+        if (a->eof) return http_fail(a, strdup("unexpected EOF"));
+        return HTTP_MORE;
+    }
+    if (a->p[data + size] != '\r' || a->p[data + size + 1] != '\n') return http_fail(a, strdup("malformed chunked encoding"));
+    buf_putn(&a->chunks, a->p + data, (size_t)size);
+    a->excess = excess;
+    a->at = data + (size_t)size + 2;
+    return HTTP_MORE;
+}
+
+// What follows the last chunk: an empty line, or fields up to one.
+static int http_trailer(HttpAnswer *a, AnimaBuf *kv) {
+    size_t avail = a->n - a->at;
+    const char *p = a->p + a->at;
+    if (avail >= 2 && p[0] == '\r' && p[1] == '\n') return HTTP_DONE;
+    if (avail < 2) {
+        if (a->eof) return http_fail(a, strdup("http: unexpected EOF reading trailer"));
+        return HTTP_MORE;
+    }
+    // Go reads fields only when it sees their end in its buffer.
+    bool ends = false;
+    size_t look = avail < HTTP_GO_BUF ? avail : HTTP_GO_BUF;
+    for (size_t k = 4; k <= look && !ends; k++) ends = memcmp(p + k - 4, "\r\n\r\n", 4) == 0;
+    if (!ends) {
+        if (avail >= HTTP_GO_BUF || a->eof) return http_fail(a, strdup("http: suspiciously long trailer after chunked body"));
+        return HTTP_MORE;
+    }
+    a->first_field = true;
+    for (;;) {
+        int r = http_field(a, kv);
+        if (r == HTTP_FIELD) continue;
+        if (r == HTTP_END) return HTTP_DONE;
+        if (r == HTTP_EOF) return http_fail(a, strdup("http: unexpected EOF reading trailer"));
+        return r;
+    }
+}
+
+// Reads on in the answer, of which p[0..n) has arrived, and all of it if
+// eof. HTTP_DONE with the status and the body, HTTP_BAD with why Go
+// refuses it, HTTP_MORE when more has to arrive first.
+static int http_answer(HttpAnswer *a, const char *p, size_t n, bool eof) {
+    a->p = p; a->n = n; a->eof = eof;
+    if (a->bad) return HTTP_BAD;
+    AnimaBuf kv = {0};
+    int r = HTTP_MORE;
+    for (bool go = true; go;) {
+        size_t was = a->at;
+        int stage = a->stage;
+        switch (a->stage) {
+        case HTTP_FIRST_LINE: {
+            const char *line = NULL;
+            size_t len = 0, next = 0;
+            int got = http_line_at(a, a->at, &line, &len, &next);
+            if (got == 0) { r = HTTP_MORE; break; }
+            if (got < 0) { r = http_fail(a, strdup("unexpected EOF")); break; }
+            r = http_first_line(a, line, len);
+            if (r == HTTP_BAD) break;
+            a->at = next;
+            a->stage = HTTP_FIELDS;
+            a->first_field = true;
+            r = HTTP_MORE;
+            break;
+        }
+        case HTTP_FIELDS: {
+            r = http_field(a, &kv);
+            if (r == HTTP_EOF) { r = http_fail(a, strdup("unexpected EOF")); break; }
+            if (r == HTTP_END) { r = http_head_end(a); break; }
+            if (r != HTTP_FIELD) break;
+            size_t name_len = (size_t)((const char *)memchr(kv.p, ':', kv.len) - kv.p);
+            const char *val = kv.p + name_len + 1;
+            size_t val_len = kv.len - name_len - 1;
+            while (val_len > 0 && (val[0] == ' ' || val[0] == '\t')) { val++; val_len--; }
+            // A field that is well formed holds no NUL.
+            if (http_name_is(&kv, name_len, "Content-Length")) http_vals_add(&a->lengths, val, val_len);
+            else if (http_name_is(&kv, name_len, "Transfer-Encoding")) http_vals_add(&a->encodings, val, val_len);
+            else if (http_name_is(&kv, name_len, "Trailer")) http_vals_add(&a->trailers, val, val_len);
+            else if (http_name_is(&kv, name_len, "Connection")) http_vals_add(&a->connections, val, val_len);
+            else if (http_name_is(&kv, name_len, "Upgrade") && !a->seen_upgrade) { a->seen_upgrade = true; a->upgrade = val_len > 0; }
+            r = HTTP_MORE;
+            break;
+        }
+        case HTTP_CHUNK:
+            r = http_chunk(a);
+            break;
+        case HTTP_TRAILER:
+            r = http_trailer(a, &kv);
+            if (r == HTTP_DONE) { a->body = a->chunks.p; a->body_len = a->chunks.len; }
+            break;
+        case HTTP_LENGTH:
+            a->body = a->p + a->at;
+            if (a->n - a->at >= a->want) { a->body_len = (size_t)a->want; r = HTTP_DONE; }
+            else r = a->eof ? http_fail(a, strdup("unexpected EOF")) : HTTP_MORE;
+            break;
+        case HTTP_TO_CLOSE:
+            a->body = a->p + a->at;
+            a->body_len = a->n - a->at;
+            r = a->eof ? HTTP_DONE : HTTP_MORE;
+            break;
+        }
+        // On it goes while something was read.
+        go = r == HTTP_MORE && (a->at != was || a->stage != stage);
+    }
+    free(kv.p);
+    return r;
 }
 
 // A request that fails reads as on the VM: Get "url": why.
@@ -1133,12 +1560,10 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
 
     size_t cap = 8192, total = 0;
     char *raw = malloc(cap);
-    raw[0] = '\0';
-    HttpHead head = {0};
-    bool have_head = false;
+    HttpAnswer ans = {0};
+    int got = HTTP_MORE;
     while (!timed_out) {
-        // Room for one more read and the terminator after it.
-        if (total + 2048 + 1 > cap) { cap *= 2; raw = realloc(raw, cap); }
+        if (total + 2048 > cap) { cap *= 2; raw = realloc(raw, cap); }
         int64_t left = deadline - mono_ms();
         if (left <= 0) { timed_out = true; break; }
         set_fd_timeout(fd, left);
@@ -1147,14 +1572,15 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
         if (n <= 0) {
             if (ssl) timed_out = n < 0 && http_tls_timed_out(ssl, (int)n);
             else timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+            // The server has said all it will.
+            if (!timed_out) got = http_answer(&ans, raw, total, true);
             break;
         }
         total += (size_t)n;
-        raw[total] = '\0';
         // An answer that says where it ends is read no further: the server
         // may keep the connection open after it.
-        if (!have_head) have_head = http_head(raw, &head);
-        if (have_head && http_complete(raw, total, &head)) break;
+        got = http_answer(&ans, raw, total, false);
+        if (got != HTTP_MORE) break;
     }
     if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
     close(fd);
@@ -1162,45 +1588,37 @@ static AnimaVal http_do(const char *method, const char *url, const char *body, i
     // No answer is an error, as on the VM: not a response with status 200.
     // What goes wrong once the head is read is the error of reading the
     // body, which the VM gives without the request in front.
+    AnimaVal answer;
     if (timed_out) {
-        free(raw);
-        if (have_head) return v_err("context deadline exceeded (Client.Timeout or context cancellation while reading body)");
-        return http_err(method, url, "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
+        if (ans.in_body) answer = v_err("context deadline exceeded (Client.Timeout or context cancellation while reading body)");
+        else answer = http_err(method, url, "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", NULL);
+    } else if (total == 0) {
+        answer = http_err(method, url, "EOF", NULL);
+    } else if (got == HTTP_BAD && !ans.in_body) {
+        AnimaBuf why = {0};
+        buf_put(&why, "net/http: HTTP/1.x transport connection broken: ");
+        buf_put(&why, ans.bad);
+        answer = http_err(method, url, why.p, NULL);
+        free(why.p);
+    } else if (got == HTTP_BAD) {
+        answer = v_err(ans.bad);
+    } else {
+        // The body is ans.body[0..ans.body_len): a NUL in it does not end
+        // it, and makes it no str.
+        AnimaVal text = text_read(ans.body, ans.body_len);
+        if (v_is_variant(text, "Err")) {
+            answer = text;
+        } else {
+            AnimaVal ent = v_entity_new("HttpResponse");
+            v_entity_set(ent, "status", v_int(ans.status));
+            v_entity_set(ent, "body", text.u.var->fields[0]);
+            v_entity_set(ent, "ok", v_bool(ans.status >= 200 && ans.status < 300));
+            answer = v_ok(ent);
+        }
     }
-    if (total == 0) { free(raw); return http_err(method, url, "EOF", NULL); }
-    if (strncmp(raw, "HTTP/", 5) != 0) { free(raw); return http_err(method, url, "malformed HTTP response", NULL); }
-    if (!have_head) { free(raw); return http_err(method, url, "unexpected EOF", NULL); }
-
-    const char *rbody = raw + head.head_len;
-    AnimaBuf dechunked = {0};
-    const char *bad = NULL;
-    switch (head.mode) {
-    case HTTP_NO_BODY:
-        rbody = "";
-        break;
-    case HTTP_LENGTH:
-        if (total - head.head_len < head.want) bad = "unexpected EOF";
-        else raw[head.head_len + head.want] = '\0';
-        break;
-    case HTTP_CHUNKED: {
-        buf_put(&dechunked, "");
-        int r = http_chunks(rbody, total - head.head_len, &dechunked, NULL);
-        if (r == 0) bad = "unexpected EOF";
-        else if (r == -1) bad = "invalid byte in chunk length";
-        else if (r == -2) bad = "malformed chunked encoding";
-        else if (r == -3) bad = "http chunk length too large";
-        else { dechunked.p[dechunked.len] = '\0'; rbody = dechunked.p; }
-        break;
-    }
-    }
-    if (bad) { free(raw); free(dechunked.p); return v_err(bad); }
-    AnimaVal ent = v_entity_new("HttpResponse");
-    v_entity_set(ent, "status", v_int(head.status));
-    v_entity_set(ent, "body", v_str(rbody));
-    v_entity_set(ent, "ok", v_bool(head.status >= 200 && head.status < 300));
+    http_answer_free(&ans);
     free(raw);
-    free(dechunked.p);
-    return v_ok(ent);
+    return answer;
 }
 
 typedef struct {
@@ -1514,7 +1932,7 @@ static AnimaVal fs_read_rest(int fd, const char *path) {
         if (n == 0) break;
         buf_putn(&b, chunk, (size_t)n);
     }
-    AnimaVal r = v_ok(v_str(b.p ? b.p : ""));
+    AnimaVal r = text_read(b.p, b.len);
     free(b.p);
     return r;
 }

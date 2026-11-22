@@ -189,6 +189,12 @@ func (t Token) String() string {
 
 // Lex tokenizes an Anima source string into indentation-aware tokens.
 func Lex(file, src string) ([]Token, error) {
+	// A str holds no NUL, so no string literal does; nor does anything else.
+	if at := strings.IndexByte(src, 0); at >= 0 {
+		line := strings.Count(src[:at], "\n") + 1
+		col := at - strings.LastIndexByte(src[:at], '\n')
+		return nil, fmt.Errorf("%s:%d:%d: NUL byte in source", file, line, col)
+	}
 	src = strings.ReplaceAll(src, "\r\n", "\n")
 	lines := strings.Split(src, "\n")
 

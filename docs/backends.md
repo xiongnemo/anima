@@ -18,7 +18,8 @@ A verified program does the same on both backends. Tests run one source on both 
 
 - Every standard function and handle method does the same as on the VM, down to the text of an error of the file system or of a request that got no answer (`open /p: no such file or directory`).
 - A division or modulo by zero, which no verified program reaches, stops a native program with the VM's message and exit code 1 rather than a signal.
-- The HTTP client frames an answer as Go's does: a chunked body is decoded, a body is exactly as long as its `Content-Length` (`unexpected EOF` when the server stops short), 204 and 304 have none, and `timeout_ms` is for the whole request, not for each read.
+- The HTTP client reads an answer as Go's `net/http` does, well formed or not: the same status and body, or an `Err` with the same words. A chunked body is decoded, a body is exactly as long as its `Content-Length` (`unexpected EOF` when the server stops short), 204 and 304 have none, a 1xx answer is passed over, and `timeout_ms` is for the whole request, not for each read. Neither follows a redirect, decompresses a body or uses a connection twice: [stdlib.md](stdlib.md#stdrequests). A test gives both the same answers, listed and changed at random, whole and in pieces (`TestE2EHTTPAnswerParity`).
+- No `str` holds a NUL byte, and a text read from outside that holds one is refused the same way: [stdlib.md](stdlib.md#a-str-holds-no-nul).
 - A request is sent whole, whatever the length of its body.
 - A send to a peer that has gone is an `Err`, not a `SIGPIPE` that ends the program. Only standard output keeps that signal, as in Go.
 - A `?` that returns early closes nothing on either backend.
@@ -30,10 +31,10 @@ A verified program does the same on both backends. Tests run one source on both 
 
 Known differences, none of which a kernel relies on:
 
-- The text of some errors: a malformed response header, a failed DNS lookup, and `write_atomic` (the name of its temporary file).
+- The text of some errors: a failed DNS lookup, a failed TLS handshake, and `write_atomic` (the name of its temporary file).
+- The request itself: the VM sends Go's (`User-Agent: Go-http-client/1.1`, the URL escaped and without its fragment), the native client its own (no `User-Agent`, `Content-Type: application/json` with a body, the URL as written). The VM uses a proxy named in the environment and may speak HTTP/2 to an HTTPS server; the native client does neither.
 - Connecting, the TLS handshake and DNS are not under `timeout_ms`.
 - A server that answers and closes before it has read the whole request: the VM gives an `Err` or the answer, depending on timing; the native client gives the answer.
-- A text with a NUL byte in it, as `fs.read_text` gives of a file that holds one, ends at that byte on the native backend, for `json.decode` as for everything else.
 - `+`, `-` and `*` are proved not to overflow, so what each backend would do on overflow is never reached; the two have not been compared there.
 
 ## The studio
