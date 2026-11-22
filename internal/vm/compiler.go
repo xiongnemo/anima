@@ -102,12 +102,12 @@ func Compile(info *sema.ProgramInfo, rawSource string, verified bool) (*Compiled
 			c.machines[m.Name] = m
 		}
 	}
-	// Also register built-in HttpResponse entity schema
-	if hr, ok := info.Entities["HttpResponse"]; ok && c.mod.EntityIndex["HttpResponse"] == 0 && len(c.mod.Entities) == 0 {
-		_ = c.registerBuiltinEntity(hr)
-	} else if hr, ok := info.Entities["HttpResponse"]; ok {
-		if _, exists := c.mod.EntityIndex["HttpResponse"]; !exists {
-			_ = c.registerBuiltinEntity(hr)
+	// What the standard library gives has its schema too.
+	for _, name := range []string{"HttpResponse", "Datagram"} {
+		if et, ok := info.Entities[name]; ok {
+			if _, exists := c.mod.EntityIndex[name]; !exists {
+				_ = c.registerBuiltinEntity(et)
+			}
 		}
 	}
 

@@ -20,8 +20,8 @@ var Modules = []ModuleSpec{
 	},
 	{
 		Path:                  "std.socket",
-		Description:           "TCP listener and stream sockets (listen_tcp, connect_tcp, accept, send_text, recv_text, close)",
-		VerificationGuarantee: "Ownership and typestate checking: every socket has one owner that closes it on every path; no use after close or move, no sharing of a stream between threads",
+		Description:           "TCP listener and stream sockets (listen_tcp, connect_tcp, accept, send_text, recv_text, close) and UDP sockets (bind_udp, send_to, recv_from, close)",
+		VerificationGuarantee: "Ownership and typestate checking: every socket has one owner that closes it on every path; no use after close or move, no sharing of a stream or a UDP socket between threads; ports, receive sizes and waits proved in range",
 	},
 	{
 		Path:                  "std.requests",
@@ -35,8 +35,8 @@ var Modules = []ModuleSpec{
 	},
 	{
 		Path:                  "std.bytes",
-		Description:           "Safe binary protocol cursor ByteView (from_str, from_hex, len, read_u8, read_u16_be, read_u32_be, slice)",
-		VerificationGuarantee: "AoRTE static bounds proofs via AnimaSMT eliminating out-of-bounds buffer reads",
+		Description:           "Immutable byte views for binary protocols: read (len, read_u8, read_u16_be, read_u32_be, slice) and build (from_str, from_hex, u8, u16_be, u32_be, random, concat, to_hex)",
+		VerificationGuarantee: "AoRTE static bounds proofs via AnimaSMT eliminating out-of-bounds buffer reads; the length of every view that is built is known, and every number written is proved to fit its bytes",
 	},
 	{
 		Path:                  "std.crypto",

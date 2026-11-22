@@ -47,6 +47,13 @@ func sockNoHost(op, host string) string {
 // sockLocal is the one address a host is bound at: its own, or of those its
 // name is looked up to be the first IPv4 one, or the first if it has none.
 func sockLocal(op, host string, port int64) (netip.AddrPort, string) {
+	return sockAt(op, host, port, 0)
+}
+
+// sockAt is the one address of a host: its own, or of those its name is
+// looked up to be the first of the family (4 or 6), which is then the only
+// one taken. With no family it is the first IPv4 one, or the first.
+func sockAt(op, host string, port int64, family int) (netip.AddrPort, string) {
 	if port < 0 || port > 65535 {
 		return netip.AddrPort{}, sockBadPort(op, port)
 	}
@@ -65,12 +72,15 @@ func sockLocal(op, host string, port int64) (netip.AddrPort, string) {
 	if err != nil || len(found) == 0 {
 		return netip.AddrPort{}, sockNoHost(op, host)
 	}
-	at := found[0].Unmap()
+	at, of := found[0].Unmap(), family == 0
 	for _, a := range found {
-		if a = a.Unmap(); a.Is4() {
-			at = a
+		if a = a.Unmap(); a.Is4() == (family != 6) {
+			at, of = a, true
 			break
 		}
+	}
+	if !of {
+		return netip.AddrPort{}, sockNoHost(op, host)
 	}
 	return netip.AddrPortFrom(at.WithZone(""), uint16(port)), ""
 }
@@ -173,4 +183,98 @@ func sockRecv(h *HandleValue, maxBytes int64) Value {
 		return VErr(err.Error())
 	}
 	return textRead(buf[:n])
+}
+
+// A UDP socket is of the family of the address it is bound at, and sends
+// to and hears from that family alone.
+
+func sockBindUDP(host string, port int64) Value {
+	at, why := sockLocal("listen udp", host, port)
+	if why != "" {
+		return VErr(why)
+	}
+	network := "udp4"
+	if at.Addr().Is6() {
+		network = "udp6"
+	}
+	// Go would bind the address of a group at every address, and join it.
+	if at.Addr().IsMulticast() {
+		return VErr("listen " + network + " " + at.String() + ": multicast address")
+	}
+	conn, err := net.ListenUDP(network, net.UDPAddrFromAddrPort(at))
+	if err != nil {
+		return VErr(err.Error())
+	}
+	return VOk(Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleUDP, UDP: conn}})
+}
+
+// udpWhere is "udp4 127.0.0.1:80", and whether the socket is an IPv6 one.
+func udpWhere(h *HandleValue) (string, bool) {
+	local := h.UDP.LocalAddr().(*net.UDPAddr).AddrPort()
+	if local.Addr().Unmap().Is4() {
+		return "udp4 " + netip.AddrPortFrom(local.Addr().Unmap(), local.Port()).String(), false
+	}
+	return "udp6 " + local.String(), true
+}
+
+// sockSendTo sends the bytes as one datagram, or it is an Err.
+func sockSendTo(h *HandleValue, data Value, host string, port int64) Value {
+	const op = "write udp"
+	if h.Closed {
+		return VErr("socket closed")
+	}
+	if port < 1 || port > 65535 {
+		return VErr(sockBadPort(op, port))
+	}
+	where, v6 := udpWhere(h)
+	family, other := 4, "non-IPv4 address"
+	if v6 {
+		family, other = 6, "non-IPv6 address"
+	}
+	if a, err := netip.ParseAddr(host); err == nil && !strings.Contains(host, "%") && a.Unmap().Is4() == v6 {
+		return VErr("write " + where + ": address " + host + ": " + other)
+	}
+	to, why := sockAt(op, host, port, family)
+	if why != "" {
+		return VErr(why)
+	}
+	var b []byte
+	if d := data.Handle; data.Kind == ValHandle && d != nil && d.Kind == HandleByteView {
+		b = d.Bytes
+	}
+	_ = h.UDP.SetWriteDeadline(time.Now().Add(sockIOTime))
+	n, err := h.UDP.WriteToUDPAddrPort(b, to)
+	if err != nil {
+		return VErr(err.Error())
+	}
+	return VOk(VInt(int64(n)))
+}
+
+// sockRecvFrom waits for one datagram: what of it is past maxBytes is lost.
+func sockRecvFrom(h *HandleValue, maxBytes int64, timeoutMs int) Value {
+	if h.Closed {
+		return VErr("socket closed")
+	}
+	buf := make([]byte, sema.Within(maxBytes, 1, sema.MaxDatagram))
+	_ = h.UDP.SetReadDeadline(time.Now().Add(time.Duration(timeoutMs) * time.Millisecond))
+	n, from, err := h.UDP.ReadFromUDPAddrPort(buf)
+	if err != nil {
+		return VErr(err.Error())
+	}
+	// Where it came from is an address and no more: the zone of an IPv6
+	// one is not said, as no socket is given a host with one.
+	_, v6 := udpWhere(h)
+	addr := from.Addr().WithZone("")
+	if !v6 {
+		addr = addr.Unmap()
+	}
+	return VOk(Value{Kind: ValEntity, Entity: &EntityInstance{
+		TypeName: "Datagram",
+		Fields: map[string]Value{
+			"data": viewOf(append([]byte(nil), buf[:n]...)),
+			"host": VStr(addr.Unmap().String()),
+			"port": VInt(int64(from.Port())),
+			"ip":   viewOf(addr.AsSlice()),
+		},
+	}})
 }

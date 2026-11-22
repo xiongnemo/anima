@@ -2736,6 +2736,105 @@ def f(` + params + `) -> int:
 	}
 }
 
+// A number written as bytes is proved to fit them, random bytes are a count
+// the machine has, and a UDP socket is given a port there is, room for a
+// datagram there can be, and a wait that ends.
+func TestSPARKBytesAndUDPArgumentRanges(t *testing.T) {
+	prog := func(params, body string) string {
+		return `
+import std.socket as sock
+import std.bytes as bytes
+
+def f(s: sock.UdpSocket, bv: bytes.ByteView, ` + params + `) -> int:
+` + body + `
+    return 0
+`
+	}
+	made := func(params, call string) string { return prog(params, "    v = "+call) }
+	sent := func(params, port string) string {
+		return prog(params, `    match s.send_to(bv, "127.0.0.1", `+port+`):
+        Ok(k) -> print(k)
+        Err(e) -> print(e)`)
+	}
+	heard := func(params, args string) string {
+		return prog(params, `    match s.recv_from(`+args+`):
+        Ok(d) -> print(d.port)
+        Err(e) -> print(e)`)
+	}
+	bound := func(params, port string) string {
+		return prog(params, `    match sock.bind_udp("127.0.0.1", `+port+`):
+        Ok(u) -> u.close()
+        Err(e) -> print(e)`)
+	}
+	answer := func(guard string) string {
+		return prog("n: int", `    match s.recv_from(1500, timeout_ms=100):
+        Ok(d) ->
+            if `+guard+`:
+                match s.send_to(d.data, d.host, d.port):
+                    Ok(k) -> print(k)
+                    Err(e) -> print(e)
+        Err(e) -> print(e)`)
+	}
+	rejected := map[string][2]string{
+		"u8, unbounded":          {made("n: int", "bytes.u8(n)"), "value_bounds"},
+		"u8, 256":                {made("n: int", "bytes.u8(256)"), "value_bounds"},
+		"u8, below zero":         {made("n: int", "bytes.u8(0 - 1)"), "value_bounds"},
+		"u8, a wider range":      {made("n: int[0..256]", "bytes.u8(n)"), "value_bounds"},
+		"u8, piped":              {made("n: int", "n |> bytes.u8()"), "value_bounds"},
+		"u16, 65536":             {made("n: int", "bytes.u16_be(65536)"), "value_bounds"},
+		"u16, below zero":        {made("n: int[0..9]", "bytes.u16_be(n - 1)"), "value_bounds"},
+		"u32, one past":          {made("n: int", "bytes.u32_be(4294967296)"), "value_bounds"},
+		"u32, below zero":        {made("n: int", "bytes.u32_be(0 - 1)"), "value_bounds"},
+		"u32, any int":           {made("n: int", "bytes.u32_be(n)"), "value_bounds"},
+		"random, unbounded":      {made("n: int", "bytes.random(n)"), "n_bounds"},
+		"random, below zero":     {made("n: int", "bytes.random(0 - 1)"), "n_bounds"},
+		"random, one too many":   {made("n: int", "bytes.random(65537)"), "n_bounds"},
+		"random, a huge count":   {made("n: int", "bytes.random(1 << 40)"), "n_bounds"},
+		"random, joined":         {made("n: int", "bv.concat(bytes.random(n))"), "n_bounds"},
+		"send, unbounded":        {sent("p: int", "p"), "port_bounds"},
+		"send, port 0":           {sent("p: int", "0"), "port_bounds"},
+		"send, any port":         {sent("p: int[0..65535]", "p"), "port_bounds"},
+		"send, too high":         {sent("p: int", "65536"), "port_bounds"},
+		"send, where it came":    {answer("n == 0"), "port_bounds"},
+		"hear, unbounded":        {heard("n: int", "n, timeout_ms=100"), "max_bytes_bounds"},
+		"hear, no room":          {heard("n: int", "0, timeout_ms=100"), "max_bytes_bounds"},
+		"hear, one too many":     {heard("n: int", "65536, timeout_ms=100"), "max_bytes_bounds"},
+		"hear, a huge count":     {heard("n: int", "1 << 40, timeout_ms=100"), "max_bytes_bounds"},
+		"hear, no wait":          {heard("n: int", "1500, timeout_ms=n - n"), "timeout_bounds"},
+		"hear, an unbounded one": {heard("n: int", "1500, timeout_ms=n"), "timeout_bounds"},
+		"hear, too long a wait":  {heard("n: int", "1500, 300000 + (n & 1)"), "timeout_bounds"},
+		"bind, unbounded":        {bound("p: int", "p"), "port_bounds"},
+		"bind, too high":         {bound("p: int", "65536"), "port_bounds"},
+		"bind, below zero":       {bound("p: int", "0 - 1"), "port_bounds"},
+	}
+	for name, c := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, c[0])), "\n")
+		if !strings.Contains(failed, c[1]) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, c[1], failed)
+		}
+	}
+	proved := map[string]string{
+		"u8, the ends":         made("n: int[0..255]", "bytes.u8(n).concat(bytes.u8(0)).concat(bytes.u8(255))"),
+		"u8, a masked int":     made("n: int", "bytes.u8(n & 255)"),
+		"u16, the ends":        made("n: int[0..65535]", "bytes.u16_be(n).concat(bytes.u16_be(65535))"),
+		"u16, a byte pair":     made("hi: int[0..255], lo: int[0..255]", "bytes.u16_be(hi << 8 | lo)"),
+		"u32, the ends":        made("n: int[0..4294967295]", "bytes.u32_be(n).concat(bytes.u32_be(4294967295))"),
+		"random, the ends":     made("n: int[0..65536]", "bytes.random(n).concat(bytes.random(0)).concat(bytes.random(65536))"),
+		"send, any port but 0": sent("p: int[1..65535]", "p"),
+		"send, the socket's":   sent("p: int", "s.port()"),
+		"send, where it came":  answer("d.port > 0"),
+		"hear, the least":      heard("n: int[1..65535]", "n, timeout_ms=1"),
+		"hear, the most":       heard("n: int", "65535, 300000"),
+		"bind, any port":       bound("p: int[0..65535]", "p"),
+		"bind, the system":     bound("p: int", "0"),
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
 // What a program asks of the machine in one call is a count the machine
 // has: the threads and the queue of a pool, the values a channel holds, the
 // permits of a semaphore, the connections of a session, the time asleep.
@@ -3965,6 +4064,33 @@ func TestSPARKByteViewLengths(t *testing.T) {
         if w.len() > 0:
             t = w.read_u8(0)
     return t`,
+		"a slice read where it is made": `
+    v = bytes.from_str("ABCDEF")
+    return v.slice(0, 2).read_u8(1)`,
+		"the bytes of a number": `
+    a = bytes.u8(255)
+    b = bytes.u16_be(65535)
+    d = bytes.u32_be(4294967295)
+    return a.read_u8(0) + b.read_u16_be(0) + d.read_u32_be(0) + bytes.u32_be(0).read_u16_be(2)`,
+		"random bytes are as many as asked": `
+    if n >= 4 and n <= 65536:
+        v = bytes.random(n)
+        return v.read_u32_be(n - 4)
+    return bytes.random(0).len()`,
+		"two views joined": `
+    v = bytes.u16_be(1).concat(bytes.u16_be(0)).concat(bytes.u32_be(554869826)).concat(bytes.random(12))
+    h = head(v)
+    w = v.concat(bv)
+    return v.read_u32_be(16) + w.read_u32_be(16) + w.slice(4, 20).read_u8(15)`,
+		"joined to a view of known length": `
+    if bv.len() == 3:
+        v = bv.concat(bytes.u8(0))
+        return head(v)
+    return 0`,
+		"a view joined to itself": `
+    v = bytes.u16_be(1)
+    v = v.concat(v)
+    return v.read_u32_be(0)`,
 		"after an if, what both branches give": `
     v = bytes.from_str("ABCDEF")
     w = v.slice(0, 2)
@@ -3987,7 +4113,19 @@ func TestSPARKByteViewLengths(t *testing.T) {
 		"a slice of unknown ends":      "\n    w = bv.slice(0, n)\n    return 0",
 		"a piped slice past the end":   "\n    v = bytes.from_str(\"ABCD\")\n    w = 2 |> v.slice(9)\n    return 0",
 		"a read past a slice":          "\n    v = bytes.from_str(\"ABCDEF\")\n    w = v.slice(0, 2)\n    return w.read_u8(5)",
-		"a read of a slice unnamed":    "\n    v = bytes.from_str(\"ABCDEF\")\n    return v.slice(0, 2).read_u8(0)",
+		"a read past a slice unnamed":  "\n    v = bytes.from_str(\"ABCDEF\")\n    return v.slice(0, 2).read_u8(2)",
+		"a number has its bytes only":  "\n    v = bytes.u8(7)\n    return v.read_u16_be(0)",
+		"two bytes are not four":       "\n    return bytes.u16_be(7).read_u32_be(0)",
+		"four bytes read at one":       "\n    v = bytes.u32_be(7)\n    return v.read_u32_be(1)",
+		"random bytes, maybe none":     "\n    if n >= 0 and n <= 16:\n        v = bytes.random(n)\n        return v.read_u8(0)\n    return 0",
+		"random bytes, one short":      "\n    if n >= 1 and n <= 16:\n        v = bytes.random(n)\n        return v.read_u8(n)\n    return 0",
+		"joined to a view unknown":     "\n    v = bytes.u8(1).concat(bv)\n    return v.read_u8(1)",
+		"joined, read past both":       "\n    v = bytes.u16_be(1).concat(bytes.u32_be(2))\n    return v.read_u8(6)",
+		"joined to nothing":            "\n    v = bytes.u8(1).concat(bytes.from_hex(\"zz\"))\n    return v.read_u8(1)",
+		"joined, then the part named":  "\n    v = bytes.u8(1)\n    w = v.concat(v)\n    return v.read_u8(1) + w.read_u8(1)",
+		"joined in a loop":             "\n    v = bytes.u8(0)\n    for w in vs:\n        v = v.concat(w)\n    return v.read_u8(1)",
+		"joined in a branch":           "\n    v = bytes.u8(0)\n    if c:\n        v = v.concat(v)\n    return v.read_u8(1)",
+		"a join sliced past its end":   "\n    v = bytes.u8(0).concat(bytes.u8(1)).slice(1, 3)\n    return 0",
 		"from_hex of what is not hex":  "\n    v = bytes.from_hex(\"zzzz\")\n    return v.read_u8(1)",
 		"from_hex of an odd literal":   "\n    v = bytes.from_hex(\"abc\")\n    return v.read_u8(0)",
 		"a piped offset":               "\n    v = bytes.from_str(\"A\")\n    return 5 |> v.read_u8()",

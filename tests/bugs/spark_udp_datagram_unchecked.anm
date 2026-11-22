@@ -1,0 +1,16 @@
+# A datagram is as long as its sender made it, which may be no byte at all:
+# what is read of it is read under a check of its length.
+import std.socket as sock
+
+def kind(s: sock.UdpSocket) -> int:
+    match s.recv_from(1500, timeout_ms=100):
+        Ok(d) -> return d.data.read_u16_be(0)
+        Err(e) -> return 0
+
+def main() -> int:
+    match sock.bind_udp("127.0.0.1", 0):
+        Ok(s) ->
+            print(kind(s))
+            s.close()
+        Err(e) -> print(e)
+    return 0

@@ -1,0 +1,9 @@
+import std.socket as sock
+import std.bytes as bytes
+
+# If send_to fails, `?` returns with the socket still open.
+def ping() -> Result[int, str]:
+    s = sock.bind_udp("127.0.0.1", 0)?
+    n = s.send_to(bytes.u8(1), "127.0.0.1", 9)?
+    s.close()
+    return Ok(n)

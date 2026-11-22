@@ -1596,6 +1596,8 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("sock_listen_tcp((%s).u.s, (%s).u.i)", args[0], args[1])
 	case "std.socket.connect_tcp":
 		return fmt.Sprintf("sock_connect_tcp((%s).u.s, (%s).u.i)", args[0], args[1])
+	case "std.socket.bind_udp":
+		return fmt.Sprintf("sock_bind_udp((%s).u.s, (%s).u.i)", args[0], args[1])
 	case "std.requests.get":
 		return fmt.Sprintf("http_do(\"GET\", (%s).u.s, \"\", (%s).u.i)", args[0], timeoutArg)
 	case "std.requests.post":
@@ -1640,6 +1642,14 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		return fmt.Sprintf("bytes_from_str((%s).u.s)", args[0])
 	case "std.bytes.from_hex":
 		return fmt.Sprintf("bytes_from_hex((%s).u.s)", args[0])
+	case "std.bytes.u8":
+		return fmt.Sprintf("bytes_be((%s).u.i, 1)", args[0])
+	case "std.bytes.u16_be":
+		return fmt.Sprintf("bytes_be((%s).u.i, 2)", args[0])
+	case "std.bytes.u32_be":
+		return fmt.Sprintf("bytes_be((%s).u.i, 4)", args[0])
+	case "std.bytes.random":
+		return fmt.Sprintf("bytes_random((%s).u.i)", args[0])
 	case "std.crypto.sha256":
 		return fmt.Sprintf("crypto_sha256((%s).u.s)", args[0])
 	case "std.crypto.hmac_sha256":
@@ -1687,7 +1697,7 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 	if timeoutArg == "" && len(args) >= 1 && method == "accept" {
 		timeoutArg = args[0]
 	}
-	if timeoutArg == "" && len(args) >= 2 && (method == "get" || method == "get_async") {
+	if timeoutArg == "" && len(args) >= 2 && (method == "get" || method == "get_async" || method == "recv_from") {
 		timeoutArg = args[1]
 	}
 	if timeoutArg == "" && len(args) >= 3 && method == "post" {
@@ -1701,7 +1711,7 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 	case "len":
 		return fmt.Sprintf("v_int(anima_len(%s))", recv)
 	case "port":
-		return fmt.Sprintf("hdl_listener_port(%s)", recv)
+		return fmt.Sprintf("hdl_sock_port(%s)", recv)
 	case "accept":
 		return fmt.Sprintf("hdl_listener_accept(%s, (%s).u.i)", recv, timeoutArg)
 	case "send_text":
@@ -1746,6 +1756,14 @@ func (g *cgen) emitMethodCall(recv, method string, e *ast.CallExpr) string {
 		return fmt.Sprintf("fs_file_write_text(%s, (%s).u.s)", recv, args[0])
 	case "slice":
 		return fmt.Sprintf("bytes_slice(%s, (%s).u.i, (%s).u.i)", recv, args[0], args[1])
+	case "concat":
+		return fmt.Sprintf("bytes_concat(%s, %s)", recv, args[0])
+	case "to_hex":
+		return fmt.Sprintf("bytes_to_hex(%s)", recv)
+	case "send_to":
+		return fmt.Sprintf("hdl_udp_send_to(%s, %s, (%s).u.s, (%s).u.i)", recv, args[0], args[1], args[2])
+	case "recv_from":
+		return fmt.Sprintf("hdl_udp_recv_from(%s, (%s).u.i, (%s).u.i)", recv, args[0], timeoutArg)
 	case "acquire":
 		g.line("hdl_sem_acquire((%s).u.hdl);", recv)
 		return "v_void()"

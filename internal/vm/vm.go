@@ -2,6 +2,7 @@ package vm
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -64,12 +65,14 @@ const (
 	HandleSession
 	HandleFuture
 	HandleByteView
+	HandleUDP
 )
 
 type HandleValue struct {
 	Kind       HandleKind
 	Listener   net.Listener
 	Conn       net.Conn
+	UDP        *net.UDPConn
 	File       *os.File
 	FilePath   string
 	Bytes      []byte
@@ -102,6 +105,10 @@ func (h *HandleValue) Close() {
 	case HandleStream:
 		if h.Conn != nil {
 			_ = h.Conn.Close()
+		}
+	case HandleUDP:
+		if h.UDP != nil {
+			_ = h.UDP.Close()
 		}
 	case HandleFile:
 		if h.File != nil {
@@ -206,6 +213,10 @@ func valuesEqual(v, o Value, open []eqPair) bool {
 	case ValClosure:
 		return v.Closure == o.Closure
 	case ValHandle:
+		// A byte view never changes: it is the bytes it holds.
+		if v.Handle != nil && o.Handle != nil && v.Handle.Kind == HandleByteView && o.Handle.Kind == HandleByteView {
+			return bytes.Equal(v.Handle.Bytes, o.Handle.Bytes)
+		}
 		return v.Handle == o.Handle
 	case ValList:
 		pair = eqPair{reflect.ValueOf(v.List).Pointer(), reflect.ValueOf(o.List).Pointer()}

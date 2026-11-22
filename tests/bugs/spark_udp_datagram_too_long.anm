@@ -1,0 +1,13 @@
+# recv_from makes room for max_bytes before it reads, and no datagram holds
+# more than 65535: max_bytes_bounds.
+import std.socket as sock
+
+def main() -> int:
+    match sock.bind_udp("127.0.0.1", 0):
+        Ok(s) ->
+            match s.recv_from(1 << 40, timeout_ms=100):
+                Ok(d) -> print(d.data.len())
+                Err(e) -> print(e)
+            s.close()
+        Err(e) -> print(e)
+    return 0

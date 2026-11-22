@@ -1,6 +1,6 @@
 # Handles and ownership
 
-A handle is a resource of the operating system or of the runtime: `sock.TcpStream`, `sock.TcpListener`, `fs.File`, `conc.ThreadPool`. The ownership checker runs with the FSP / LTS kernel and proves that no descriptor leaks and none is used after it is closed.
+A handle is a resource of the operating system or of the runtime: `sock.TcpStream`, `sock.TcpListener`, `sock.UdpSocket`, `fs.File`, `conc.ThreadPool`. The ownership checker runs with the FSP / LTS kernel and proves that no descriptor leaks and none is used after it is closed.
 
 Contents: [One owner](#one-owner) · [Threads](#threads) · [`?` while holding a handle](#-while-holding-a-handle) · [Thread pools](#thread-pools) · [Futures](#futures) · [Workflows](#workflows) · [Port protocols](#port-protocols)
 
@@ -16,7 +16,7 @@ See `examples/concurrent_http.anm`.
 ## Threads
 
 - `pool.submit(() => handle(own conn))` moves a connection into a worker thread.
-- A stream or file cannot be shared between threads.
+- A stream, a UDP socket or a file cannot be shared between threads.
 - A listener can be lent to tasks, and is not closed until they are awaited or the pool is shut down.
 
 ## `?` while holding a handle

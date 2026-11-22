@@ -300,7 +300,7 @@ func LinearHandle(ty Type) (ht *HandleType, wrapped bool) {
 	switch t := ty.(type) {
 	case *HandleType:
 		switch t.Name {
-		case "sock.TcpListener", "sock.TcpStream", "fs.File", "conc.ThreadPool":
+		case "sock.TcpListener", "sock.TcpStream", "sock.UdpSocket", "fs.File", "conc.ThreadPool":
 			return t, false
 		}
 	case *ADTType:
