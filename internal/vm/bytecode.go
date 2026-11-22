@@ -179,6 +179,18 @@ type EntityFieldSchema struct {
 	HasHi bool
 	Lo    int64
 	Hi    int64
+	Type  *JSONType
+}
+
+// JSONType is a type as json.decode checks a value against it.
+type JSONType struct {
+	Kind   string // "int", "bool", "str", "list", "map", "option", "entity", "any"
+	HasLo  bool
+	HasHi  bool
+	Lo     int64
+	Hi     int64
+	Elem   *JSONType // of a list, a map, an option
+	Entity string
 }
 
 type EntitySchema struct {

@@ -215,6 +215,8 @@ func TestE2ENegativeBugSuiteAndDeterministicReplay(t *testing.T) {
 		{"../tests/bugs/spark_workflow_step_sees_other_branch.anm", "workflow:W.div_nonzero"},
 		{"../tests/bugs/sema_function_ends_without_return.anm", "can end without a return"},
 		{"../tests/bugs/sema_return_without_value.anm", "return needs a value"},
+		{"../tests/bugs/sema_json_decode_field.anm", "Reply.outcome is a Result[int, str], which is not read from JSON"},
+		{"../tests/bugs/sema_json_decode_not_entity.anm", "json.decode[int]: only an entity is decoded into"},
 		{"../tests/bugs/lts_safety_violation.anm", "ERROR=-1"},
 		{"../tests/bugs/dining_philosophers_deadlock.anm", "DEADLOCK"},
 		{"../tests/bugs/lts_livelock_progress.anm", "PROGRESS"},
@@ -917,7 +919,7 @@ def main() -> int:
 // native runtime wrote the fields of an entity in the order they are
 // declared, control characters as they are, and null for a variant.
 func TestE2EJsonEncodeParity(t *testing.T) {
-	runOnBothBackends(t, "json_encode", jsonEncodeSrc, "{\"age\":-5,\"name\":\"a\\\"b\\\\c\\u003cd\\u003e\\u0026e\\n\\tf\",\"ok\":true,\"tags\":[\"x\",\"\xc3\xa9\"]}\n{\"a\":1,\"b\":2}\n[\"Circle(3)\",\"Dot\"]\nnull\n\"Some(4)\"\n\"s\" 7 false []\n\"c:\\u0001\\b\\f\x7f\\u001f|\"\n\"u:\\u2028\\u2029\xe2\x82\xac\xf0\x9f\x98\x80|\"\n\"bad:\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd\\ufffd|\\ufffd\"\n{\"a\\n\":[],\"q\\\"k\\u003c\":[{\"k\":\"v\"}]}\n[\"Word(say \\\"hi\\\" \\u0026 \\u003cgo\\u003e)\",\"Blank\"]\n[\"Node(...)\"]\n[[1,2],[]] {\"n\":null}\n")
+	runOnBothBackends(t, "json_encode", jsonEncodeSrc, "{\"age\":-5,\"name\":\"a\\\"b\\\\c\\u003cd\\u003e\\u0026e\\n\\tf\",\"ok\":true,\"tags\":[\"x\",\"\xc3\xa9\"]}\n{\"a\":1,\"b\":2}\n[\"Circle(3)\",\"Dot\"]\nnull\n4\n\"s\" 7 false []\n\"c:\\u0001\\b\\f\x7f\\u001f|\"\n\"u:\\u2028\\u2029\xe2\x82\xac\xf0\x9f\x98\x80|\"\n\"bad:\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd|\\ufffd\\ufffd\\ufffd\\ufffd|\\ufffd\"\n{\"a\\n\":[],\"q\\\"k\\u003c\":[{\"k\":\"v\"}]}\n[\"Word(say \\\"hi\\\" \\u0026 \\u003cgo\\u003e)\",\"Blank\"]\n[\"Node(...)\"]\n[[1,2],[]] {\"n\":null}\n")
 }
 
 const jsonEncodeSrc = "import std.json as json\n" +
@@ -961,7 +963,7 @@ const jsonEncodeSrc = "import std.json as json\n" +
 // native parser took the u of a \u escape for a letter. A handle and a
 // lambda have the same text on both, in print and inside an encoded variant.
 func TestE2EJsonRoundTripParity(t *testing.T) {
-	runOnBothBackends(t, "json_round_trip", jsonRoundTripSrc, "True\n\"\xc3\xa9 \xf0\x9f\x98\x80 \xef\xbf\xbdx \xef\xbf\xbd \xef\xbf\xbdA / \\b\\f \xe2\x82\xac\"\n<handle:9> Some(<handle:9>) <handle:4> <fn>\n\"Some(\\u003chandle:9\\u003e)\" [null]\n")
+	runOnBothBackends(t, "json_round_trip", jsonRoundTripSrc, "True\n\"\xc3\xa9 \xf0\x9f\x98\x80 \xef\xbf\xbdx \xef\xbf\xbd \xef\xbf\xbdA / \\b\\f \xe2\x82\xac\"\n<handle:9> Some(<handle:9>) <handle:4> <fn>\nnull [null]\n")
 }
 
 const jsonRoundTripSrc = "import std.json as json\n" +
@@ -993,6 +995,202 @@ const jsonRoundTripSrc = "import std.json as json\n" +
 	"    print(bv, Some(bv), ch, g)\n" +
 	"    print(json.encode(Some(bv)), json.encode([bv]))\n" +
 	"    return 0\n"
+
+// json.decode[E] gives a value typed as E, so it checks all of E. It checked
+// the int, bool and str fields of E itself and took every other field as the
+// JSON gave it: a 0 in a list[int[1..9]], in a map, in an Option or in an
+// entity inside E was an Ok, and the division the kernel had proved safe
+// divided by zero on both backends; a number where a list[str] was declared
+// was an Ok too. Each of these is an Err with the same words on both, an
+// Option field that is absent or null is None, and what json.encode writes
+// of an entity is read back.
+func TestE2EJsonDecodeTypedParity(t *testing.T) {
+	runOnBothBackends(t, "json_decode_typed", jsonDecodeTypedSrc, jsonDecodeTypedWant)
+}
+
+const jsonDecodeTypedSrc = `import std.json as json
+
+entity In:
+    d: int[1..9]
+    tag: str
+
+entity Pair:
+    lo: int
+    hi: int
+    invariant: lo <= hi
+
+entity E:
+    n: int[0..100]
+    ok: bool
+    s: str
+    xs: list[int[1..9]]
+    m: map[str, int[1..9]]
+    o: Option[int[1..9]]
+    inner: In
+    ins: list[In]
+    p: Option[Pair]
+    mm: map[str, list[str]]
+
+entity Node:
+    v: int[1..9]
+    kids: list[Node]
+
+entity Opts:
+    o: Option[Option[int[1..9]]]
+    os: list[Option[int[1..9]]]
+
+def show(raw: str) -> int:
+    match json.decode[E](raw):
+        Ok(e) ->
+            for x in e.xs:
+                print(10 / x)
+            for q in e.ins:
+                print(10 / q.d, q.tag + "!")
+            match e.o:
+                Some(v) ->
+                    print(10 / v)
+                None ->
+                    print("none")
+            if "a" in e.m:
+                print(10 / e.m["a"])
+            print(10 / e.inner.d, e)
+            text = json.encode(e)
+            print(text)
+            match json.decode[E](text):
+                Ok(again) ->
+                    print(json.encode(again) == text)
+                Err(m2) ->
+                    print("round trip", m2)
+        Err(m) ->
+            print(m)
+    return 0
+
+def node(raw: str) -> int:
+    match json.decode[Node](raw):
+        Ok(e) ->
+            print(e, json.encode(e))
+        Err(m) ->
+            print(m)
+    return 0
+
+def opts(raw: str) -> int:
+    match json.decode[Opts](raw):
+        Ok(e) ->
+            print(e, json.encode(e))
+        Err(m) ->
+            print(m)
+    return 0
+
+def main() -> int:
+    base = "\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[1,2],\"m\":{\"b\":2,\"a\":1},\"inner\":{\"d\":3,\"tag\":\"t\"},\"ins\":[{\"d\":4,\"tag\":\"u\"}],\"mm\":{\"k\":[\"x\"]}"
+    show("{" + base + "}")
+    show("{" + base + ",\"o\":5,\"p\":{\"lo\":1,\"hi\":2}}")
+    show("{" + base + ",\"o\":null,\"p\":null}")
+    show("{" + base + ",\"o\":0}")
+    show("{" + base + ",\"o\":10}")
+    show("{" + base + ",\"o\":\"x\"}")
+    show("{" + base + ",\"p\":{\"lo\":3,\"hi\":2}}")
+    show("{" + base + ",\"p\":{\"lo\":3}}")
+    show("{" + base + ",\"p\":5}")
+    show("{\"n\":101,\"ok\":true}")
+    show("{\"n\":-1,\"ok\":true}")
+    show("{\"n\":\"1\",\"ok\":true}")
+    show("{\"n\":1,\"ok\":1}")
+    show("{\"n\":1,\"ok\":true,\"s\":5}")
+    show("{\"n\":1,\"ok\":true,\"s\":null}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\"}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":5}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":null}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[1,0]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[1,\"q\"]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[1,[2],null]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":[]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{\"z\":0,\"a\\\"b\":0}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{\"a\":true}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":[]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":0,\"tag\":\"t\"}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1,\"tag\":\"t\"},\"ins\":[{\"d\":1,\"tag\":\"t\"},{\"d\":1,\"tag\":2}]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1,\"tag\":\"t\"},\"ins\":[{\"d\":10,\"tag\":\"t\"}]}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1,\"tag\":\"t\"},\"ins\":[],\"mm\":{\"k\":[\"x\",1]}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1,\"tag\":\"t\"},\"ins\":[],\"mm\":{\"k\":\"x\"}}")
+    show("{\"n\":1,\"ok\":true,\"s\":\"a\",\"xs\":[],\"m\":{},\"inner\":{\"d\":1,\"tag\":\"t\",\"extra\":[1]},\"ins\":[],\"mm\":{},\"zzz\":1}")
+    node("{\"v\":1,\"kids\":[{\"v\":2,\"kids\":[]},{\"v\":3,\"kids\":[{\"v\":4,\"kids\":[]}]}]}")
+    node("{\"v\":1,\"kids\":[{\"v\":2,\"kids\":[]},{\"v\":3,\"kids\":[{\"v\":0,\"kids\":[]}]}]}")
+    node("{\"v\":1,\"kids\":[{\"v\":2}]}")
+    opts("{\"os\":[1,null,9]}")
+    opts("{\"o\":3,\"os\":[]}")
+    opts("{\"o\":0,\"os\":[]}")
+    opts("{\"os\":[1,null,10]}")
+    opts("{}")
+    return 0
+`
+
+const jsonDecodeTypedWant = `10
+5
+2 u!
+none
+10
+3 E(inner=In(d=3, tag=t), ins=[In(d=4, tag=u)], m={"a": 1, "b": 2}, mm={"k": [x]}, n=1, o=None, ok=True, p=None, s=a, xs=[1, 2])
+{"inner":{"d":3,"tag":"t"},"ins":[{"d":4,"tag":"u"}],"m":{"a":1,"b":2},"mm":{"k":["x"]},"n":1,"o":null,"ok":true,"p":null,"s":"a","xs":[1,2]}
+True
+10
+5
+2 u!
+2
+10
+3 E(inner=In(d=3, tag=t), ins=[In(d=4, tag=u)], m={"a": 1, "b": 2}, mm={"k": [x]}, n=1, o=Some(5), ok=True, p=Some(Pair(hi=2, lo=1)), s=a, xs=[1, 2])
+{"inner":{"d":3,"tag":"t"},"ins":[{"d":4,"tag":"u"}],"m":{"a":1,"b":2},"mm":{"k":["x"]},"n":1,"o":5,"ok":true,"p":{"hi":2,"lo":1},"s":"a","xs":[1,2]}
+True
+10
+5
+2 u!
+none
+10
+3 E(inner=In(d=3, tag=t), ins=[In(d=4, tag=u)], m={"a": 1, "b": 2}, mm={"k": [x]}, n=1, o=None, ok=True, p=None, s=a, xs=[1, 2])
+{"inner":{"d":3,"tag":"t"},"ins":[{"d":4,"tag":"u"}],"m":{"a":1,"b":2},"mm":{"k":["x"]},"n":1,"o":null,"ok":true,"p":null,"s":"a","xs":[1,2]}
+True
+schema violation: E.o=0 below minimum 1
+schema violation: E.o=10 exceeds maximum 9
+schema error: field E.o must be integer
+entity invariant violated for Pair on JSON input
+schema error: missing field E.p.hi
+schema error: field E.p must be Pair
+schema violation: E.n=101 exceeds maximum 100
+schema violation: E.n=-1 below minimum 0
+schema error: field E.n must be integer
+schema error: field E.ok must be bool
+schema error: field E.s must be str
+schema error: field E.s must be str
+schema error: missing field E.xs
+schema error: field E.xs must be list
+schema error: field E.xs must be list
+schema violation: E.xs[1]=0 below minimum 1
+schema error: field E.xs[1] must be integer
+schema error: field E.xs[1] must be integer
+schema error: field E.m must be map
+schema violation: E.m["a\"b"]=0 below minimum 1
+schema error: field E.m["a"] must be integer
+schema error: field E.inner must be In
+schema violation: E.inner.d=0 below minimum 1
+schema error: missing field E.inner.tag
+schema error: field E.ins[1].tag must be str
+schema violation: E.ins[0].d=10 exceeds maximum 9
+schema error: field E.mm["k"][1] must be str
+schema error: field E.mm["k"] must be list
+none
+10 E(inner=In(d=1, tag=t), ins=[], m={}, mm={}, n=1, o=None, ok=True, p=None, s=a, xs=[])
+{"inner":{"d":1,"tag":"t"},"ins":[],"m":{},"mm":{},"n":1,"o":null,"ok":true,"p":null,"s":"a","xs":[]}
+True
+Node(kids=[Node(kids=[], v=2), Node(kids=[Node(kids=[], v=4)], v=3)], v=1) {"kids":[{"kids":[],"v":2},{"kids":[{"kids":[],"v":4}],"v":3}],"v":1}
+schema violation: Node.kids[1].kids[0].v=0 below minimum 1
+schema error: missing field Node.kids[0].kids
+Opts(o=None, os=[Some(1), None, Some(9)]) {"o":null,"os":[1,null,9]}
+Opts(o=Some(Some(3)), os=[]) {"o":3,"os":[]}
+schema violation: Opts.o=0 below minimum 1
+schema violation: Opts.os[2]=10 exceeds maximum 9
+schema error: missing field Opts.os
+`
 
 // A JSON text with \u0000 in a string or a key is an Err on both backends:
 // a native string ends at a NUL, so it read "ab\u0000cd" as "ab" where the

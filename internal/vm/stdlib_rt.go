@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -767,66 +768,132 @@ func (vm *VM) jsonDecodeSchema(typeName, raw string) Value {
 	if err != nil {
 		return VErr("invalid JSON: " + err.Error())
 	}
-	idx, ok := vm.prog.Module.EntityIndex[typeName]
-	if !ok {
+	if _, ok := vm.prog.Module.EntityIndex[typeName]; !ok {
 		out := map[string]Value{}
 		for k, v := range m {
 			out[k] = goJSONToValue(v)
 		}
 		return VOk(VMap(out))
 	}
-	schema := vm.prog.Module.Entities[idx]
-	fields := map[string]Value{}
-	for _, f := range schema.Fields {
-		rawVal, exists := m[f.Name]
-		if !exists {
-			return VErr(fmt.Sprintf("schema error: missing field %s.%s", typeName, f.Name))
-		}
-		switch f.Kind {
-		case "int":
-			num, ok := rawVal.(float64)
-			if !ok {
-				return VErr(fmt.Sprintf("schema error: field %s.%s must be integer", typeName, f.Name))
-			}
-			iv := int64(num)
-			if float64(iv) != num {
-				return VErr(fmt.Sprintf("schema error: field %s.%s must be exact integer", typeName, f.Name))
-			}
-			if f.HasLo && iv < f.Lo {
-				return VErr(fmt.Sprintf("schema violation: %s.%s=%d below minimum %d", typeName, f.Name, iv, f.Lo))
-			}
-			if f.HasHi && iv > f.Hi {
-				return VErr(fmt.Sprintf("schema violation: %s.%s=%d exceeds maximum %d", typeName, f.Name, iv, f.Hi))
-			}
-			fields[f.Name] = VInt(iv)
-		case "bool":
-			bv, ok := rawVal.(bool)
-			if !ok {
-				return VErr(fmt.Sprintf("schema error: field %s.%s must be bool", typeName, f.Name))
-			}
-			fields[f.Name] = VBool(bv)
-		case "str":
-			sv, ok := rawVal.(string)
-			if !ok {
-				return VErr(fmt.Sprintf("schema error: field %s.%s must be str", typeName, f.Name))
-			}
-			fields[f.Name] = VStr(sv)
-		default:
-			fields[f.Name] = goJSONToValue(rawVal)
-		}
+	v, msg := vm.jsonAs(&JSONType{Kind: "entity", Entity: typeName}, m, typeName)
+	if msg != "" {
+		return VErr(msg)
 	}
-	entVal := Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: typeName, Fields: fields}}
-	// Evaluate compiled SPARK entity invariant bytecode function!
-	for _, invFn := range schema.Invariants {
-		okVal, _, _, err := vm.callFuncByName(invFn, []Value{entVal}, nil)
-		if err != nil {
-			return VErr("invariant evaluation error: " + err.Error())
+	return VOk(v)
+}
+
+// jsonAs checks decoded JSON against a type and gives the value of that
+// type, or says what is wrong. What it gives is typed as declared, so there
+// is nothing it lets through unchecked: an int is in its range, every
+// element of a list, value of a map and field of an entity is checked the
+// same way, and an entity holds its invariant. The native runtime has the
+// same rule and the same words (json_as in runtime_c.go).
+func (vm *VM) jsonAs(t *JSONType, raw any, path string) (Value, string) {
+	switch t.Kind {
+	case "int":
+		num, ok := raw.(float64)
+		if !ok {
+			return Value{}, fmt.Sprintf("schema error: field %s must be integer", path)
 		}
-		if !okVal.IsTruthy() {
-			return VErr(fmt.Sprintf("entity invariant violated for %s on JSON input", typeName))
+		iv := int64(num)
+		if float64(iv) != num {
+			return Value{}, fmt.Sprintf("schema error: field %s must be exact integer", path)
 		}
+		if t.HasLo && iv < t.Lo {
+			return Value{}, fmt.Sprintf("schema violation: %s=%d below minimum %d", path, iv, t.Lo)
+		}
+		if t.HasHi && iv > t.Hi {
+			return Value{}, fmt.Sprintf("schema violation: %s=%d exceeds maximum %d", path, iv, t.Hi)
+		}
+		return VInt(iv), ""
+	case "bool":
+		bv, ok := raw.(bool)
+		if !ok {
+			return Value{}, fmt.Sprintf("schema error: field %s must be bool", path)
+		}
+		return VBool(bv), ""
+	case "str":
+		sv, ok := raw.(string)
+		if !ok {
+			return Value{}, fmt.Sprintf("schema error: field %s must be str", path)
+		}
+		return VStr(sv), ""
+	case "list":
+		arr, ok := raw.([]any)
+		if !ok {
+			return Value{}, fmt.Sprintf("schema error: field %s must be list", path)
+		}
+		out := make([]Value, len(arr))
+		for i, el := range arr {
+			v, msg := vm.jsonAs(t.Elem, el, fmt.Sprintf("%s[%d]", path, i))
+			if msg != "" {
+				return Value{}, msg
+			}
+			out[i] = v
+		}
+		return VList(out), ""
+	case "map":
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			return Value{}, fmt.Sprintf("schema error: field %s must be map", path)
+		}
+		out := make(map[string]Value, len(obj))
+		// In the order of the keys, so that the first thing wrong is the
+		// same one from run to run and on the native backend.
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v, msg := vm.jsonAs(t.Elem, obj[k], path+"["+quoteKey(k)+"]")
+			if msg != "" {
+				return Value{}, msg
+			}
+			out[k] = v
+		}
+		return VMap(out), ""
+	case "option":
+		if raw == nil {
+			return VNone(), ""
+		}
+		v, msg := vm.jsonAs(t.Elem, raw, path)
+		if msg != "" {
+			return Value{}, msg
+		}
+		return VSome(v), ""
+	case "entity":
+		obj, ok := raw.(map[string]any)
+		idx, known := vm.prog.Module.EntityIndex[t.Entity]
+		if !ok || !known {
+			return Value{}, fmt.Sprintf("schema error: field %s must be %s", path, t.Entity)
+		}
+		schema := vm.prog.Module.Entities[idx]
+		fields := map[string]Value{}
+		for _, f := range schema.Fields {
+			rawVal, exists := obj[f.Name]
+			if !exists && f.Type.Kind != "option" {
+				return Value{}, fmt.Sprintf("schema error: missing field %s.%s", path, f.Name)
+			}
+			v, msg := vm.jsonAs(f.Type, rawVal, path+"."+f.Name)
+			if msg != "" {
+				return Value{}, msg
+			}
+			fields[f.Name] = v
+		}
+		entVal := Value{Kind: ValEntity, Entity: &EntityInstance{TypeName: t.Entity, Fields: fields}}
+		for _, invFn := range schema.Invariants {
+			okVal, _, _, err := vm.callFuncByName(invFn, []Value{entVal}, nil)
+			if err != nil {
+				return Value{}, "invariant evaluation error: " + err.Error()
+			}
+			if !okVal.IsTruthy() {
+				return Value{}, fmt.Sprintf("entity invariant violated for %s on JSON input", t.Entity)
+			}
+		}
+		return entVal, ""
 	}
-	return VOk(entVal)
+	return Value{}, fmt.Sprintf("schema error: field %s is not read from JSON", path)
 }
 
 func goJSONToValue(x any) Value {
@@ -898,6 +965,11 @@ func valueToJSON(v Value, open []uintptr) any {
 		}
 		return out
 	case ValVariant:
+		// Some(x) is x and None is null, which is what json.decode reads
+		// an Option from; any other variant is its text.
+		if v.Variant != nil && v.Variant.Name == "Some" && len(v.Variant.Fields) == 1 {
+			return valueToJSON(v.Variant.Fields[0], open)
+		}
 		return v.text(open[:len(open)-1])
 	default:
 		return nil

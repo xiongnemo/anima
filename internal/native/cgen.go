@@ -2,9 +2,11 @@ package native
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xiongnemo/anima/internal/ast"
@@ -18,6 +20,7 @@ func EmitC(info *sema.ProgramInfo) (string, error) {
 		liftedFns:   &strings.Builder{},
 		lambdaFns:   &strings.Builder{},
 		fwdDecls:    &strings.Builder{},
+		jsonEnts:    map[string]bool{},
 		bodyOut:     &strings.Builder{},
 		localVars:   map[string]bool{},
 		freeScanSet: map[string]bool{},
@@ -79,6 +82,8 @@ func BuildNative(info *sema.ProgramInfo, outBinary string, emitCPath string) err
 type cgen struct {
 	info      *sema.ProgramInfo
 	fwdDecls  *strings.Builder
+	jsonEnts  map[string]bool // entities whose JSON table is written
+	jsonTypes int
 	liftedFns *strings.Builder
 	// lambdaFns holds the functions of lambdas, apart from liftedFns: a
 	// fork branch or an entity validator that has a lambda in it is being
@@ -147,6 +152,17 @@ func (g *cgen) generate() error {
 		if ent, ok := d.(*ast.EntityDecl); ok {
 			g.emitEntityValidators(ent)
 		}
+	}
+	// The entities the program did not declare are decoded into as well.
+	var builtin []string
+	for name := range g.info.Entities {
+		if !g.jsonEnts[name] {
+			builtin = append(builtin, name)
+		}
+	}
+	sort.Strings(builtin)
+	for _, name := range builtin {
+		g.emitJSONEntity(g.info.Entities[name], "NULL")
 	}
 	// Built-in fallback json decode for raw map
 	g.liftedFns.WriteString("static AnimaVal __json_decode_raw(const char *raw) { bool ok = true; const char *p = raw; AnimaVal v = json_parse_val(&p, &ok); if (!ok) return v_err(\"invalid json\"); return v_ok(v); }\n")
@@ -222,6 +238,67 @@ func (g *cgen) generate() error {
 	return nil
 }
 
+// emitJSONEntity writes the table json.decode checks a JSON object against
+// to make an entity of it (json_as in the runtime): the type of every field
+// and the function of the invariant.
+func (g *cgen) emitJSONEntity(et *sema.EntityType, inv string) {
+	g.jsonEnts[et.Name] = true
+	fmt.Fprintf(g.fwdDecls, "static const JEntity __jent_%s;\n", et.Name)
+	var fields []string
+	for _, f := range et.Fields {
+		fields = append(fields, fmt.Sprintf("{%s, %s}", cEscapeStr(f.Name), g.jsonTypeC(f.Type)))
+	}
+	if len(fields) == 0 {
+		fields = append(fields, "{NULL, NULL}")
+	}
+	fmt.Fprintf(g.liftedFns, "static const JField __jf_%s[] = {%s};\n", et.Name, strings.Join(fields, ", "))
+	fmt.Fprintf(g.liftedFns, "static const JEntity __jent_%s = {%s, __jf_%s, %d, %s};\n", et.Name, cEscapeStr(et.Name), et.Name, len(et.Fields), inv)
+}
+
+// jsonTypeC writes t as a JType of the runtime and gives a pointer to it.
+// The checker lets json.decode name only an entity made of the types here.
+func (g *cgen) jsonTypeC(t sema.Type) string {
+	def := ""
+	switch x := t.(type) {
+	case *sema.IntType:
+		if x.IsBounded {
+			def = fmt.Sprintf("{JT_INT, true, %s, %s, NULL, NULL}", cInt64(x.Lo), cInt64(x.Hi))
+		} else {
+			def = "{JT_INT, false, 0, 0, NULL, NULL}"
+		}
+	case sema.BoolType:
+		def = "{JT_BOOL, false, 0, 0, NULL, NULL}"
+	case sema.StrType:
+		def = "{JT_STR, false, 0, 0, NULL, NULL}"
+	case *sema.ListType:
+		def = fmt.Sprintf("{JT_LIST, false, 0, 0, %s, NULL}", g.jsonTypeC(x.Elem))
+	case *sema.MapType:
+		def = fmt.Sprintf("{JT_MAP, false, 0, 0, %s, NULL}", g.jsonTypeC(x.Val))
+	case *sema.ADTType:
+		if x.Name == "Option" && len(x.TypeArgs) == 1 {
+			def = fmt.Sprintf("{JT_OPTION, false, 0, 0, %s, NULL}", g.jsonTypeC(x.TypeArgs[0]))
+		}
+	case *sema.EntityType:
+		def = fmt.Sprintf("{JT_ENTITY, false, 0, 0, NULL, &__jent_%s}", x.Name)
+	}
+	if def == "" {
+		// Nothing is of this kind, so json_as refuses whatever it is given.
+		def = "{-1, false, 0, 0, NULL, NULL}"
+	}
+	g.jsonTypes++
+	name := fmt.Sprintf("__jt_%d", g.jsonTypes)
+	fmt.Fprintf(g.liftedFns, "static const JType %s = %s;\n", name, def)
+	return "&" + name
+}
+
+// cInt64 writes n as a C constant; the least int64 has no literal of its own.
+func cInt64(n int64) string {
+	if n == math.MinInt64 {
+		return "(-9223372036854775807LL - 1)"
+	}
+	return fmt.Sprintf("%dLL", n)
+}
+
 func (g *cgen) emitEntityValidators(ent *ast.EntityDecl) {
 	et := g.info.Entities[ent.Name]
 	prevCur := g.cur
@@ -247,33 +324,7 @@ func (g *cgen) emitEntityValidators(ent *ast.EntityDecl) {
 	g.indent--
 	g.line("}")
 
-	// JSON Schema & Invariant Decoder function
-	fmt.Fprintf(g.fwdDecls, "static AnimaVal __json_decode_%s(const char *raw);\n", ent.Name)
-	g.line("static AnimaVal __json_decode_%s(const char *raw) {", ent.Name)
-	g.indent++
-	g.line("bool ok = true; const char *p = raw;")
-	g.line("AnimaVal m = json_parse_val(&p, &ok);")
-	g.line("if (!ok || m.kind != VAL_MAP) return v_err(\"invalid json object\");")
-	g.line("AnimaVal ent = v_entity_new(%s);", cEscapeStr(ent.Name))
-	for _, f := range et.Fields {
-		g.line("AnimaVal f_%s = v_map_get(m, %s);", f.Name, cEscapeStr(f.Name))
-		switch f.Type.Kind() {
-		case sema.KindInt:
-			g.line("if (f_%s.kind != VAL_INT) return v_err(\"field %s.%s must be int\");", f.Name, ent.Name, f.Name)
-			if it, ok := f.Type.(*sema.IntType); ok && it.IsBounded {
-				g.line("if (f_%s.u.i < %dLL || f_%s.u.i > %dLL) return v_err(\"field %s.%s out of range\");", f.Name, it.Lo, f.Name, it.Hi, ent.Name, f.Name)
-			}
-		case sema.KindBool:
-			g.line("if (f_%s.kind != VAL_BOOL) return v_err(\"field %s.%s must be bool\");", f.Name, ent.Name, f.Name)
-		case sema.KindStr:
-			g.line("if (f_%s.kind != VAL_STR) return v_err(\"field %s.%s must be str\");", f.Name, ent.Name, f.Name)
-		}
-		g.line("v_entity_set(ent, %s, f_%s);", cEscapeStr(f.Name), f.Name)
-	}
-	g.line("if (!__inv_%s(ent)) return v_err(\"entity invariant violated\");", ent.Name)
-	g.line("return v_ok(ent);")
-	g.indent--
-	g.line("}")
+	g.emitJSONEntity(et, "__inv_"+ent.Name)
 
 	g.cur = prevCur
 	g.localVars = prevVars
@@ -1574,7 +1625,7 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 		if len(e.TypeArgs) == 1 {
 			tname := strings.TrimSpace(e.TypeArgs[0].String())
 			if _, isEnt := g.info.Entities[tname]; isEnt {
-				return fmt.Sprintf("__json_decode_%s((%s).u.s)", tname, args[0])
+				return fmt.Sprintf("json_decode_as(&__jent_%s, (%s).u.s)", tname, args[0])
 			}
 		}
 		return fmt.Sprintf("__json_decode_raw((%s).u.s)", args[0])

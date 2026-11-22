@@ -198,6 +198,7 @@ func (c *compiler) registerBuiltinEntity(et *sema.EntityType) int {
 		if it, ok := f.Type.(*sema.IntType); ok && it.IsBounded {
 			fs.HasLo, fs.HasHi, fs.Lo, fs.Hi = true, true, it.Lo, it.Hi
 		}
+		fs.Type = jsonTypeOf(f.Type)
 		es.Fields = append(es.Fields, fs)
 	}
 	idx := len(c.mod.Entities)
@@ -240,6 +241,34 @@ func (c *compiler) compileEntity(ent *ast.EntityDecl) error {
 	fc.finish()
 	c.mod.Entities[idx].Invariants = []string{fnName}
 	return nil
+}
+
+// jsonTypeOf is t as json.decode checks a value against it. The checker
+// refuses a json.decode into an entity that has a part of kind "any".
+func jsonTypeOf(t sema.Type) *JSONType {
+	switch x := t.(type) {
+	case *sema.IntType:
+		jt := &JSONType{Kind: "int"}
+		if x.IsBounded {
+			jt.HasLo, jt.HasHi, jt.Lo, jt.Hi = true, true, x.Lo, x.Hi
+		}
+		return jt
+	case sema.BoolType:
+		return &JSONType{Kind: "bool"}
+	case sema.StrType:
+		return &JSONType{Kind: "str"}
+	case *sema.ListType:
+		return &JSONType{Kind: "list", Elem: jsonTypeOf(x.Elem)}
+	case *sema.MapType:
+		return &JSONType{Kind: "map", Elem: jsonTypeOf(x.Val)}
+	case *sema.ADTType:
+		if x.Name == "Option" && len(x.TypeArgs) == 1 {
+			return &JSONType{Kind: "option", Elem: jsonTypeOf(x.TypeArgs[0])}
+		}
+	case *sema.EntityType:
+		return &JSONType{Kind: "entity", Entity: x.Name}
+	}
+	return &JSONType{Kind: "any"}
 }
 
 func typeKindStr(t sema.Type) string {
