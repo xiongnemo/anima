@@ -1703,10 +1703,13 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 					v.record(fmt.Sprintf("%s.construct_%s_fields", scope, et.Name), scope, e.Span, "each field is given once", VCFailed,
 						fmt.Sprintf("in the making of %s, %s", et.Name, strings.Replace(problem, "parameter", "field", 1)), nil)
 				}
-				entEnv := env.clone()
-				for _, bind := range v.paramBinds(fields, e.Args, argField, env, scope, func(f string) string {
+				// The arguments are evaluated before env is cloned, as for a
+				// call: what that learns of them is known of the fields.
+				binds := v.paramBinds(fields, e.Args, argField, env, scope, func(f string) string {
 					return fmt.Sprintf("%s.construct_%s.%s", scope, et.Name, f)
-				}) {
+				})
+				entEnv := env.clone()
+				for _, bind := range binds {
 					bind(entEnv)
 				}
 				for idx, inv := range et.Invariants {

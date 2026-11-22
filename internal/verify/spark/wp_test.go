@@ -3948,4 +3948,29 @@ entity P:
 			t.Errorf("%s: failed %v, want %v", tc.ctor, got, tc.want)
 		}
 	}
+
+	// What evaluating an argument learns of it is known of the field: the
+	// range of a result, that a length is not negative.
+	rep := verifySrc(t, `
+entity R:
+    s: str
+    d: int
+    invariant: len(s) >= 0
+    invariant: d > 0
+
+def name() -> str:
+    return "ab"
+
+def g() -> int[1..9]:
+    return 5
+
+def mk() -> R:
+    return R(s=name(), d=g())
+
+def mk0(n: int) -> R:
+    return R(s=name(), d=g() - n)
+`)
+	if got, want := failedVCs(rep), []string{"def:mk0.int64_overflow", "def:mk0.construct_R_inv_2"}; !slices.Equal(got, want) {
+		t.Errorf("results as arguments: failed %v, want %v", got, want)
+	}
 }
