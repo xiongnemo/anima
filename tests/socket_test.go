@@ -127,19 +127,21 @@ entity Ask:
 entity Asks:
     all: list[Ask]
 
-def once(host: str, port: int[1..65535]) -> bool:
+def reach(l: sock.TcpListener, host: str, port: int[1..65535]) -> str:
+    # Reached is accepted by l. A port l does not listen at is now and then
+    # another program's, or the one the system connects from, and so one
+    # that is connected to.
     match sock.connect_tcp(host, port):
         Ok(c) ->
+            got = "no"
+            match l.accept(timeout_ms=300):
+                Ok(s) ->
+                    s.close()
+                    got = "yes"
+                Err(e) -> got = "no"
             c.close()
-            return True
-        Err(e) -> return False
-    return False
-
-def reach(host: str, port: int[1..65535]) -> str:
-    # Twice: a port nothing listens at is now and then the one the system
-    # connects from, and so one that is connected to.
-    if once(host, port) and once(host, port):
-        return "yes"
+            return got
+        Err(e) -> return "no"
     return "no"
 
 def dial(a: Ask) -> int:
@@ -157,10 +159,10 @@ def listen(a: Ask) -> int:
     match sock.listen_tcp(a.host, a.port):
         Ok(l) ->
             p = l.port()
-            v4 = reach("127.0.0.1", p)
-            v6 = reach("::1", p)
+            v4 = reach(l, "127.0.0.1", p)
+            v6 = reach(l, "::1", p)
             # :: is dialed as ::1 and then, as Go does, as 0.0.0.0.
-            any = reach("::", p)
+            any = reach(l, "::", p)
             print(f"#{a.n} ok", a.port == 0 or a.port == p, v4, v6, any)
             l.close()
         Err(e) -> print(f"#{a.n} err", e)
