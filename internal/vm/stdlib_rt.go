@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xiongnemo/anima/internal/sema"
 )
 
 func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
@@ -250,8 +252,8 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 
 	case "std.requests.Session":
 		poolSize := 4
-		if len(args) >= 1 && args[0].Int > 0 {
-			poolSize = int(args[0].Int)
+		if len(args) >= 1 {
+			poolSize = int(sema.Within(args[0].Int, 1, sema.MaxWorkers))
 		}
 		tr := newTransport()
 		tr.MaxIdleConnsPerHost, tr.MaxIdleConns = poolSize, poolSize*2
@@ -275,14 +277,10 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 
 	// ─── std.concurrent ───
 	case "std.concurrent.ThreadPool":
-		workers := 4
-		qcap := 16
-		if len(args) >= 1 && args[0].Int > 0 {
-			workers = int(args[0].Int)
-		}
-		if len(args) >= 2 && args[1].Int > 0 {
-			qcap = int(args[1].Int)
-		}
+		// The kernel proves both in range; they are held to it again for
+		// what it did not read.
+		workers := int(sema.Within(args[0].Int, 1, sema.MaxWorkers))
+		qcap := int(sema.Within(args[1].Int, 1, sema.MaxQueueCap))
 		ch := make(chan func(), qcap)
 		var wg sync.WaitGroup
 		for i := 0; i < workers; i++ {
@@ -298,8 +296,8 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 
 	case "std.concurrent.Channel":
 		capVal := 8
-		if len(args) >= 1 && args[0].Int > 0 {
-			capVal = int(args[0].Int)
+		if len(args) >= 1 {
+			capVal = int(sema.Within(args[0].Int, 1, sema.MaxQueueCap))
 		}
 		return Value{Kind: ValHandle, Handle: &HandleValue{
 			Kind:   HandleChannel,
@@ -319,27 +317,24 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		}}, nil
 
 	case "std.concurrent.Semaphore":
-		n := 1
-		if len(args) >= 1 && args[0].Int > 0 {
-			n = int(args[0].Int)
-		}
-		sem := make(chan struct{}, n)
-		for i := 0; i < n; i++ {
-			sem <- struct{}{}
-		}
-		return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleSemaphore, Sem: sem}}, nil
+		return Value{Kind: ValHandle, Handle: &HandleValue{Kind: HandleSemaphore, Sem: newSemaphore(sema.Within(args[0].Int, 1, sema.MaxPermits))}}, nil
 
 	case "std.concurrent.parallel_map":
 		if len(args) >= 2 && args[0].List != nil && args[1].Closure != nil {
-			xs := *args[0].List
+			// At most MaxWorkers calls at a time, begun in the order of
+			// xs: what the native runtime has the threads for.
+			xs := append([]Value(nil), *args[0].List...)
 			out := make([]Value, len(xs))
 			var wg sync.WaitGroup
 			var firstErr error
 			var errMu sync.Mutex
+			slots := make(chan struct{}, sema.MaxWorkers)
 			for i, item := range xs {
+				slots <- struct{}{}
 				wg.Add(1)
 				go func(idx int, v Value) {
 					defer wg.Done()
+					defer func() { <-slots }()
 					r, err := vm.callClosure(args[1].Closure, []Value{v})
 					if err != nil {
 						errMu.Lock()
@@ -461,8 +456,8 @@ func (vm *VM) dispatchCall(cm CallMeta, args []Value) (Value, error) {
 		return VInt(time.Now().UnixMilli()), nil
 
 	case "std.time.sleep_ms":
-		if len(args) >= 1 && args[0].Int > 0 {
-			time.Sleep(time.Duration(args[0].Int) * time.Millisecond)
+		if ms := sema.Within(args[0].Int, 0, sema.MaxSleepMs); ms > 0 {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 		return VVoid(), nil
 	}
@@ -626,10 +621,10 @@ func (vm *VM) dispatchMethod(cm CallMeta, recv Value, args []Value) (Value, erro
 	case HandleSemaphore:
 		switch cm.CalleeName {
 		case "acquire":
-			<-h.Sem
+			h.Sem.acquire()
 			return VVoid(), nil
 		case "release":
-			h.Sem <- struct{}{}
+			h.Sem.release()
 			return VVoid(), nil
 		}
 	case HandleByteView:

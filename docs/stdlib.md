@@ -34,6 +34,19 @@ Built-in functions: `abs`, `min`, `max`, `str`, `len`, `assert`, `print`.
 
 A channel, a mutex and a future hold one type: [language.md](language.md#handles-hold-one-type). A thread pool is an owned handle and is shut down on every path: [ownership.md](ownership.md#thread-pools).
 
+- What a call asks of the machine has a range, and the kernel proves the value in it, so one that is computed needs a type or a check that says so:
+
+  | Argument | Range | Obligation |
+  |---|---|---|
+  | `workers` of a `ThreadPool` | `int[1..256]` | `workers_bounds` |
+  | `queue_cap` of a `ThreadPool` | `int[1..65_536]` | `queue_cap_bounds` |
+  | `cap` of a `Channel` (8 when left out) | `int[1..65_536]` | `cap_bounds` |
+  | `permits` of a `Semaphore` | `int[1..65_536]` | `permits_bounds` |
+
+  No count is made into another: `Semaphore(0)` is rejected, not a semaphore of one permit, and `ThreadPool(n, 4)` of an `n: int` is rejected, not a pool of four threads.
+- `parallel_map(xs, f)` gives `f` of every element in the order of `xs`. At most 256 of the calls go on at a time, begun in the order of `xs`, so in a list of more than 256 elements a call that waits for what a later one gives may wait forever.
+- `sem.release` adds a permit, also one the semaphore did not begin with.
+
 ## `std.socket`
 
 | Call | Parameters |
@@ -69,6 +82,7 @@ Every socket has one owner that closes it on every path; none is used after it i
 | `req.gather` | `futures` (a list) |
 
 - `timeout_ms` is an `int[1..300_000]` and has to be given; the kernel proves the value in range (`timeout_bounds`). The same holds for `accept` on a listener.
+- `pool_size` is an `int[1..256]`, 4 when left out; the kernel proves the value in range (`pool_size_bounds`). It bounds nothing yet: each request has a connection of its own, on both backends.
 - It is the time for the whole request. A request that runs out of it is an `Err` that says where: `... (Client.Timeout exceeded while awaiting headers)` before the head of the answer is read, `... (Client.Timeout or context cancellation while reading body)` after.
 - The URL is read as Go's `net/url` reads one, and the request is the same bytes on both backends:
   - It is `http://` or `https://` (in any case), then the host, then an optional path, `?query` and `#fragment`. The host is a name, an IPv4 address or an IPv6 address in brackets (`http://[::1]:8080/`), with an optional `:port`; `user:password@` before it is sent as an `Authorization: Basic` header and is not part of the host.
@@ -157,6 +171,8 @@ Every read of a `ByteView` and every slice is proved inside the view: [contracts
 | `time.sleep_ms` | `ms` |
 
 A `File` is an owned handle and is closed on every path: [ownership.md](ownership.md).
+
+`ms` is an `int[0..86_400_000]`, a day at most; the kernel proves the value in range (`ms_bounds`).
 
 ## A `str` holds no NUL
 

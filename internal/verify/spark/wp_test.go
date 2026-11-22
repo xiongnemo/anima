@@ -2736,6 +2736,85 @@ def f(` + params + `) -> int:
 	}
 }
 
+// What a program asks of the machine in one call is a count the machine
+// has: the threads and the queue of a pool, the values a channel holds, the
+// permits of a semaphore, the connections of a session, the time asleep.
+func TestSPARKStdResourceRanges(t *testing.T) {
+	prog := func(params, body string) string {
+		return `
+import std.concurrent as conc
+import std.requests as req
+import std.time as time
+
+def f(` + params + `) -> int:
+` + body + `
+    return 0
+`
+	}
+	pool := func(params, w, q string) string {
+		return prog(params, "    p = conc.ThreadPool("+w+", "+q+")\n    p.shutdown()")
+	}
+	one := func(params, call string) string { return prog(params, "    x = "+call) }
+	sleep := func(params, ms string) string { return prog(params, "    time.sleep_ms("+ms+")") }
+	rejected := map[string][2]string{
+		"pool, unbounded workers":   {pool("n: int", "n", "4"), "workers_bounds"},
+		"pool, no worker":           {pool("n: int", "0", "4"), "workers_bounds"},
+		"pool, workers below zero":  {pool("n: int", "0 - 1", "4"), "workers_bounds"},
+		"pool, one worker too many": {pool("n: int", "257", "4"), "workers_bounds"},
+		"pool, a huge count":        {pool("n: int", "1 << 40", "4"), "workers_bounds"},
+		"pool, unbounded queue":     {pool("n: int", "2", "n"), "queue_cap_bounds"},
+		"pool, no queue":            {pool("n: int", "2", "0"), "queue_cap_bounds"},
+		"pool, a huge queue":        {pool("n: int", "2", "1 << 40"), "queue_cap_bounds"},
+		"pool, by keyword":          {pool("n: int", "workers=n", "queue_cap=4"), "workers_bounds"},
+		"pool, in a lambda":         {prog("n: int", "    g = (k) => conc.ThreadPool(k, 4)\n    p = g(n)\n    p.shutdown()"), "workers_bounds"},
+		"channel, unbounded":        {one("n: int", "conc.Channel(n)"), "cap_bounds"},
+		"channel, none":             {one("n: int", "conc.Channel(0)"), "cap_bounds"},
+		"channel, typed, huge":      {one("n: int", "conc.Channel[int](cap=1 << 40)"), "cap_bounds"},
+		"channel, one too many":     {one("n: int", "conc.Channel((1 << 16) + 1)"), "cap_bounds"},
+		"semaphore, unbounded":      {one("n: int", "conc.Semaphore(n)"), "permits_bounds"},
+		"semaphore, no permit":      {one("n: int", "conc.Semaphore(0)"), "permits_bounds"},
+		"semaphore, below zero":     {one("n: int", "conc.Semaphore(0 - 1)"), "permits_bounds"},
+		"semaphore, a huge count":   {one("n: int", "conc.Semaphore(1 << 62)"), "permits_bounds"},
+		"semaphore, piped":          {one("n: int", "n |> conc.Semaphore()"), "permits_bounds"},
+		"session, unbounded":        {one("n: int", "req.Session(n)"), "pool_size_bounds"},
+		"session, none":             {one("n: int", "req.Session(0)"), "pool_size_bounds"},
+		"session, a huge count":     {one("n: int", "req.Session(1 << 40)"), "pool_size_bounds"},
+		"sleep, unbounded":          {sleep("n: int", "n"), "ms_bounds"},
+		"sleep, below zero":         {sleep("n: int", "0 - 1"), "ms_bounds"},
+		"sleep, more than a day":    {sleep("n: int", "86_400_001"), "ms_bounds"},
+		"sleep, a huge count":       {sleep("n: int", "1 << 62"), "ms_bounds"},
+		"sleep, a difference":       {sleep("a: int[0..9], b: int[0..9]", "a - b"), "ms_bounds"},
+	}
+	for name, c := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, c[0])), "\n")
+		if !strings.Contains(failed, c[1]) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, c[1], failed)
+		}
+	}
+	proved := map[string]string{
+		"pool, the least":      pool("n: int", "1", "1"),
+		"pool, the most":       pool("n: int", "256", "1 << 16"),
+		"pool, bounded":        pool("n: int[1..8], q: int[1..64]", "n", "q * 2"),
+		"pool, guarded":        prog("n: int", "    if n < 1 or n > 16:\n        return 0\n    p = conc.ThreadPool(n, 4)\n    p.shutdown()"),
+		"channel, the default": one("n: int", "conc.Channel()"),
+		"channel, the most":    one("n: int", "conc.Channel(1 << 16)"),
+		"channel, typed":       one("n: int[1..9]", "conc.Channel[int](cap=n)"),
+		"semaphore, one":       one("n: int", "conc.Semaphore(1)"),
+		"semaphore, the most":  one("n: int", "conc.Semaphore(1 << 16)"),
+		"semaphore, bounded":   one("n: int[1..9]", "conc.Semaphore(n)"),
+		"session, the default": one("n: int", "req.Session()"),
+		"session, the most":    one("n: int", "req.Session(256)"),
+		"sleep, none":          sleep("n: int", "0"),
+		"sleep, a day":         sleep("n: int", "86_400_000"),
+		"sleep, bounded":       sleep("n: int[0..5000]", "n"),
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
 // A call that blocks on the network is given a timeout in 1..300_000,
 // whatever the type of the expression.
 func TestSPARKTimeoutBounds(t *testing.T) {

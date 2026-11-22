@@ -61,6 +61,19 @@ func portP() stdParam { return intP("port").within(0, 65535) }
 // MaxRecvText is the most bytes one recv_text asks for.
 const MaxRecvText = 1 << 20
 
+// What a program may ask of the machine in one call. Both runtimes hold a
+// value to its range again (Within): the kernel proves it, and this is for
+// what the kernel did not read.
+const (
+	MaxWorkers  = 256        // threads of a ThreadPool, connections of a Session
+	MaxQueueCap = 1 << 16    // tasks waiting in a ThreadPool, values in a Channel
+	MaxPermits  = 1 << 16    // permits a Semaphore starts with
+	MaxSleepMs  = 86_400_000 // a day
+)
+
+// Within is v held to lo..hi.
+func Within(v, lo, hi int64) int64 { return min(max(v, lo), hi) }
+
 // stdSigs is keyed by `std.module.function` and by `handle.method`.
 var stdSigs = map[string]stdSig{
 	"std.socket.listen_tcp":  sig(strP("host"), portP()),
@@ -68,13 +81,13 @@ var stdSigs = map[string]stdSig{
 
 	"std.requests.get":     sig(strP("url")).withTimeout(),
 	"std.requests.post":    sig(strP("url"), strP("body")).withTimeout(),
-	"std.requests.Session": sig(intP("pool_size").maybe()),
+	"std.requests.Session": sig(intP("pool_size").within(1, MaxWorkers).maybe()),
 	"std.requests.gather":  sig(stdParam{name: "futures", kind: argList}),
 
-	"std.concurrent.ThreadPool":   sig(intP("workers"), intP("queue_cap")),
-	"std.concurrent.Channel":      sig(intP("cap").maybe()),
+	"std.concurrent.ThreadPool":   sig(intP("workers").within(1, MaxWorkers), intP("queue_cap").within(1, MaxQueueCap)),
+	"std.concurrent.Channel":      sig(intP("cap").within(1, MaxQueueCap).maybe()),
 	"std.concurrent.Mutex":        sig(anyP("value")),
-	"std.concurrent.Semaphore":    sig(intP("permits")),
+	"std.concurrent.Semaphore":    sig(intP("permits").within(1, MaxPermits)),
 	"std.concurrent.parallel_map": sig(stdParam{name: "xs", kind: argList}, stdParam{name: "f", kind: argFn1}),
 
 	"std.json.encode": sig(anyP("value")),
@@ -95,7 +108,7 @@ var stdSigs = map[string]stdSig{
 	"std.cli.env_get": sig(strP("name")),
 
 	"std.time.now_ms":   sig(),
-	"std.time.sleep_ms": sig(intP("ms")),
+	"std.time.sleep_ms": sig(intP("ms").within(0, MaxSleepMs)),
 
 	"sock.TcpListener.port":   sig(),
 	"sock.TcpListener.accept": sig().withTimeout(),

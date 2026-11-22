@@ -81,7 +81,7 @@ type HandleValue struct {
 	ChanMu     *sync.Mutex
 	Mu         *sync.Mutex
 	MutexVal   *Value
-	Sem        chan struct{}
+	Sem        *semaphore
 	HTTPClient *http.Client
 	FutCh      chan Value
 	FutDone    bool
