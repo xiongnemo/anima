@@ -1,0 +1,33 @@
+# The paths out of the choice written after a join are followed like any
+# other: only the path through yes shuts the pool down.
+import std.concurrent as conc
+
+def note() -> int:
+    return 1
+
+workflow W(n: int) -> int:
+    verify: sound
+
+    start -> split:
+        ok = n > 0
+        pool = conc.ThreadPool(1, 2)
+
+    fork split:
+        branch left:
+            call note()
+        branch right:
+            call note()
+    join both
+    choice after both:
+        when ok -> yes
+        when not ok -> no
+
+    step yes -> done:
+        pool.shutdown()
+        return 1
+    step no -> done:
+        return 2
+
+def main() -> int:
+    print(run_workflow W(0), run_workflow W(5))
+    return 0

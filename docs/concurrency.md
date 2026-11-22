@@ -40,7 +40,11 @@ system SingleLaneBridge:
         ltl: always (red_enter -> eventually red_exit)
 ```
 
-A `workflow` takes part in a composition through its `sync` operations (`sync VaultMutex.acquire` in `examples/escrow_service.anm`).
+A `workflow` takes part in a composition through its `sync` operations (`sync VaultMutex.acquire` in `examples/escrow_service.anm`). Its process is the workflow as it runs:
+
+- a step does the action of its name once its body has run, wherever it goes next: to its target, to each branch of the `choice` after it, or out of the workflow where the body has a `return` or a `?`;
+- a `join` does `join_<name>` the same way, the start, a `choice` and a `merge` are silent, and the branches of a `fork` do their operations in every order;
+- no guard and no statement is read: every branch of a `choice` may be taken.
 
 ## What is checked
 

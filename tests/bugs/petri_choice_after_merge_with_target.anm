@@ -1,0 +1,30 @@
+# A merge with a target goes to it, as a step does: the choice written after
+# the merge is never taken.
+workflow Find(k: int[0..9]) -> int:
+    verify: sound
+
+    start -> one
+
+    choice one:
+        when k > 3 -> a
+        when k <= 3 -> b
+
+    step a -> both:
+        print("a")
+    step b -> both:
+        print("b")
+
+    merge both after a, b -> fin
+    choice after both:
+        when k > 5 -> fin
+        when k <= 5 -> none
+
+    step fin -> done:
+        return 1
+    step none -> done:
+        return 0
+
+def main() -> int:
+    print(run_workflow Find(1))
+    print(run_workflow Find(9))
+    return 0

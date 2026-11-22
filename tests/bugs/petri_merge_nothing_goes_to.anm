@@ -1,0 +1,16 @@
+# The branches of a fork meet at its join: the merge written after the fork,
+# and the step it goes to, never run.
+workflow W(b: bool):
+    verify: sound
+    start -> f
+    fork f:
+        branch x:
+            call print("x")
+    merge m after f -> c
+    step c -> j:
+        print("c")
+    join j -> done
+
+def main() -> int:
+    run_workflow W(True)
+    return 0

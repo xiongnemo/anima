@@ -130,17 +130,7 @@ func (w *wfAssigned) walk(cur string, bound map[string]bool, onPath map[string]b
 			}
 		}
 		if choice != nil {
-			for _, br := range choice.Branches {
-				if br.Guard != nil {
-					if err := w.reads(br.Guard, br.Span, bound, "this choice"); err != nil {
-						return err
-					}
-				}
-				if err := w.walk(br.Target, copyNames(bound), copyNames(onPath)); err != nil {
-					return err
-				}
-			}
-			return nil
+			return w.choice(choice, bound, onPath)
 		}
 		if fk := w.flow.Fork(cur); fk != nil {
 			// Every branch runs, and none reads what another assigns
@@ -159,11 +149,29 @@ func (w *wfAssigned) walk(cur string, bound map[string]bool, onPath map[string]b
 			continue
 		}
 		if jn := w.flow.Join(cur); jn != nil {
-			cur = w.flow.AfterJoin(jn)
-			continue
+			cur, choice = w.flow.AfterJoin(jn)
+		} else {
+			cur, choice = w.flow.AfterMerge(w.flow.Merge(cur))
 		}
-		cur = w.flow.AfterMerge(w.flow.Merge(cur))
+		if choice != nil {
+			return w.choice(choice, bound, onPath)
+		}
 	}
+}
+
+// choice walks each branch of a choice with what is bound before it.
+func (w *wfAssigned) choice(choice *ast.ChoiceNode, bound map[string]bool, onPath map[string]bool) error {
+	for _, br := range choice.Branches {
+		if br.Guard != nil {
+			if err := w.reads(br.Guard, br.Span, bound, "this choice"); err != nil {
+				return err
+			}
+		}
+		if err := w.walk(br.Target, copyNames(bound), copyNames(onPath)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sortedNames(m map[string]bool) []string {

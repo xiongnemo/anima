@@ -29,6 +29,7 @@ A verified program does the same on both backends. Tests run one source on both 
 - A `?` that returns early closes nothing on either backend.
 - A lambda copies the variables its body names when it is made; one held in a workflow variable or written in a fork branch is called as anywhere else.
 - `run_workflow` runs the workflow it names, and a `merge` node is run by both.
+- A `choice` with a name is decided by its own guards, and a `return` with no value in a step ends the workflow (`TestE2EWorkflowChoicesAndReturnsParity`).
 - A value that holds itself is printed and encoded with an end, the same way: [language.md](language.md#a-value-may-hold-itself).
 - `json.encode` writes the same text, and `json.decode` reads a text as the same value or refuses it with the same message: [stdlib.md](stdlib.md#stdjson).
 - The text of a handle is `<handle:N>`, `N` being its kind, and of a lambda `<fn>`.

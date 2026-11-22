@@ -1,0 +1,30 @@
+# A step that a join goes on to by the choice written after it is proved
+# like any other: both steps divide by a k that may be 0.
+def note() -> int:
+    return 1
+
+workflow Find(k: int[0..9]) -> int:
+    verify: sound
+
+    start -> split
+
+    fork split:
+        branch left:
+            call note()
+        branch right:
+            call note()
+
+    join both
+    choice after both:
+        when k > 3 -> a
+        when k <= 3 -> b
+
+    step a -> done:
+        return 10 / k
+    step b -> done:
+        return 10 / k
+
+def main() -> int:
+    print(run_workflow Find(0))
+    print(run_workflow Find(9))
+    return 0

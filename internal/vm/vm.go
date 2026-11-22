@@ -992,7 +992,7 @@ func (vm *VM) execProto(fp *FuncProto, args []Value, upvals []Value, presetLocal
 				rv := pop()
 				return rv, true, locals, nil
 			}
-			return VVoid(), false, locals, nil
+			return VVoid(), bc != 0, locals, nil
 		case OpHalt:
 			return VVoid(), false, locals, nil
 		}
@@ -1042,17 +1042,24 @@ func (vm *VM) RunWorkflow(wfName string, args []Value) (Value, error) {
 		}
 	}
 
-	cur := wfc.StartTarget
-	visitedSteps := 0
-	for cur != "" && cur != "done" && cur != "END" {
-		visitedSteps++
-		if visitedSteps > 10000 {
+	// The workflow goes where its flow says, which is what the kernels
+	// verified and what the native backend runs.
+	flow := wfc.Flow
+	if flow.Start == nil {
+		return VVoid(), nil
+	}
+	cur := flow.Start.Target
+	visited := 0
+	for !flow.Ends(cur) {
+		visited++
+		if visited > 10000 {
 			return VVoid(), fmt.Errorf("workflow %s exceeded max step guard", wfName)
 		}
 
-		if st, ok := wfc.Steps[cur]; ok {
-			if st.FnName != "" {
-				rv, hasRet, updated, err := vm.callFuncByName(st.FnName, nil, locals)
+		choice := flow.Choice(cur)
+		if st := flow.Step(cur); st != nil {
+			if fn := wfc.StepFn[st]; fn != "" {
+				rv, hasRet, updated, err := vm.callFuncByName(fn, nil, locals)
 				if err != nil {
 					return VVoid(), err
 				}
@@ -1061,31 +1068,12 @@ func (vm *VM) RunWorkflow(wfName string, args []Value) (Value, error) {
 					return rv, nil
 				}
 			}
-			if st.Target != "" {
-				cur = st.Target
+			if cur, choice = flow.AfterStep(st); choice == nil {
 				continue
 			}
-			if ch, hasChoice := wfc.Choices[cur]; hasChoice {
-				next, err := vm.evalChoice(ch, locals)
-				if err != nil {
-					return VVoid(), err
-				}
-				cur = next
-				continue
-			}
-			if fk := findForkAfter(wfc, cur); fk != nil {
-				cur = fk.Name
-				continue
-			}
-			if nextSt := findStepAfter(wfc, cur); nextSt != nil {
-				cur = nextSt.Name
-				continue
-			}
-			break
 		}
-
-		if ch, ok := wfc.Choices[cur]; ok {
-			next, err := vm.evalChoice(ch, locals)
+		if choice != nil {
+			next, err := vm.evalChoice(choice, wfc.GuardFn[choice], locals)
 			if err != nil {
 				return VVoid(), err
 			}
@@ -1093,109 +1081,101 @@ func (vm *VM) RunWorkflow(wfName string, args []Value) (Value, error) {
 			continue
 		}
 
-		if fk, ok := wfc.Forks[cur]; ok {
-			preFork := append([]Value{}, locals...)
-			type branchRes struct {
-				updated []Value
-				err     error
+		if fk := flow.Fork(cur); fk != nil {
+			updated, err := vm.runFork(fk, wfc.OpFn[fk], pools, locals)
+			if err != nil {
+				return VVoid(), err
 			}
-			results := make([]branchRes, len(fk.Branches))
-			var wg sync.WaitGroup
-			for bIdx, br := range fk.Branches {
-				wg.Add(1)
-				go func(idx int, branch WorkflowBranchMeta) {
-					defer wg.Done()
-					brLocals := append([]Value{}, preFork...)
-					for _, op := range branch.Ops {
-						switch op.Kind {
-						case 2: // acquire pool
-							<-pools[op.Target]
-						case 3: // release pool
-							pools[op.Target] <- struct{}{}
-						case 1: // sync Monitor.action
-							vm.monMu.Lock()
-							parts := strings.SplitN(op.Target, ".", 2)
-							if len(parts) == 2 {
-								if m, ok := vm.prog.Machines[parts[0]]; ok {
-									vm.stepMachineLocked(m, parts[1])
-								}
-							}
-							vm.monMu.Unlock()
-						case 0: // stmt
-							_, _, upd, err := vm.callFuncByName(op.FnName, nil, brLocals)
-							if err != nil {
-								results[idx] = branchRes{err: err}
-								return
-							}
-							brLocals = upd
-						}
-					}
-					results[idx] = branchRes{updated: brLocals}
-				}(bIdx, br)
-			}
-			wg.Wait()
-
-			// Join: merge disjoint variable updates from branches back into locals
-			for _, r := range results {
-				if r.err != nil {
-					return VVoid(), r.err
-				}
-				for i := range locals {
-					if i < len(r.updated) && r.updated[i].Kind != ValVoid && r.updated[i].reboundFrom(preFork[i]) {
-						locals[i] = r.updated[i]
-					}
-				}
-			}
-
-			// Move to matching Join
-			nextNode := ""
-			for jName := range wfc.Joins {
-				nextNode = jName
-				break
-			}
-			if nextNode == "" {
-				break
-			}
-			cur = nextNode
+			locals, cur = updated, flow.AfterFork()
 			continue
 		}
-
-		if jn, ok := wfc.Joins[cur]; ok {
-			if jn.Target != "" {
-				cur = jn.Target
-				continue
-			}
-			if nextSt := findStepAfter(wfc, cur); nextSt != nil {
-				cur = nextSt.Name
-				continue
-			}
-			break
+		if jn := flow.Join(cur); jn != nil {
+			cur, choice = flow.AfterJoin(jn)
+		} else {
+			// A merge is where the branches of a choice come together: it
+			// does nothing itself.
+			cur, choice = flow.AfterMerge(flow.Merge(cur))
 		}
-
-		// A merge is where the branches of a choice come together: it
-		// does nothing itself.
-		if mg, ok := wfc.Merges[cur]; ok {
-			if mg.Target != "" {
-				cur = mg.Target
-				continue
+		if choice != nil {
+			next, err := vm.evalChoice(choice, wfc.GuardFn[choice], locals)
+			if err != nil {
+				return VVoid(), err
 			}
-			if nextSt := findStepAfter(wfc, cur); nextSt != nil {
-				cur = nextSt.Name
-				continue
-			}
-			break
+			cur = next
 		}
-		break
 	}
 	return VVoid(), nil
 }
 
-func (vm *VM) evalChoice(ch WorkflowChoiceMeta, locals []Value) (string, error) {
-	for _, br := range ch.Branches {
+// runFork runs the branches of a fork at the same time, each on a copy of
+// the variables, and gives the variables as they are after the join: what
+// each branch assigned is there.
+func (vm *VM) runFork(fk *ast.ForkNode, opFn [][]string, pools map[string]chan struct{}, locals []Value) ([]Value, error) {
+	preFork := append([]Value{}, locals...)
+	type branchRes struct {
+		updated []Value
+		err     error
+	}
+	results := make([]branchRes, len(fk.Branches))
+	var wg sync.WaitGroup
+	for bIdx := range fk.Branches {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			brLocals := append([]Value{}, preFork...)
+			for k, op := range fk.Branches[idx].Ops {
+				switch op.Kind {
+				case ast.BranchAcquire:
+					<-pools[op.Target]
+				case ast.BranchRelease:
+					pools[op.Target] <- struct{}{}
+				case ast.BranchSync:
+					vm.monMu.Lock()
+					parts := strings.SplitN(op.Target, ".", 2)
+					if len(parts) == 2 {
+						if m, ok := vm.prog.Machines[parts[0]]; ok {
+							vm.stepMachineLocked(m, parts[1])
+						}
+					}
+					vm.monMu.Unlock()
+				case ast.BranchStmt:
+					if opFn[idx][k] == "" {
+						continue
+					}
+					_, _, upd, err := vm.callFuncByName(opFn[idx][k], nil, brLocals)
+					if err != nil {
+						results[idx] = branchRes{err: err}
+						return
+					}
+					brLocals = upd
+				}
+			}
+			results[idx] = branchRes{updated: brLocals}
+		}(bIdx)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+		for i := range locals {
+			if i < len(r.updated) && r.updated[i].Kind != ValVoid && r.updated[i].reboundFrom(preFork[i]) {
+				locals[i] = r.updated[i]
+			}
+		}
+	}
+	return locals, nil
+}
+
+// evalChoice gives the target of the first branch whose guard holds. With
+// none the workflow is over, which the contract kernel proves is never so.
+func (vm *VM) evalChoice(ch *ast.ChoiceNode, guardFn []string, locals []Value) (string, error) {
+	for i, br := range ch.Branches {
 		if br.IsElse {
 			return br.Target, nil
 		}
-		res, _, _, err := vm.callFuncByName(br.GuardFn, nil, locals)
+		res, _, _, err := vm.callFuncByName(guardFn[i], nil, locals)
 		if err != nil {
 			return "", err
 		}
@@ -1218,26 +1198,6 @@ func (vm *VM) stepMachineLocked(m *ast.MachineDecl, action string) {
 			}
 		}
 	}
-}
-
-func findForkAfter(wfc *WorkflowCompiled, after string) *WorkflowForkMeta {
-	for _, fk := range wfc.Forks {
-		if fk.After == after {
-			cp := fk
-			return &cp
-		}
-	}
-	return nil
-}
-
-func findStepAfter(wfc *WorkflowCompiled, after string) *WorkflowStepMeta {
-	for _, st := range wfc.Steps {
-		if st.After == after {
-			cp := st
-			return &cp
-		}
-	}
-	return nil
 }
 
 func sha256Hex(s string) string {

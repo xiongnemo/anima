@@ -1,0 +1,18 @@
+# A step with a target goes there: the choice written after it is never taken.
+workflow W(b: bool):
+    verify: sound
+    start -> a
+    step a -> c:
+        print("a")
+    choice after a:
+        when b -> c
+        else -> d
+    step c -> done:
+        print("c")
+    step d -> done:
+        print("d")
+
+def main() -> int:
+    run_workflow W(True)
+    run_workflow W(False)
+    return 0

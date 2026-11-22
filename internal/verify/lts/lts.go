@@ -2,6 +2,7 @@ package lts
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,7 +235,20 @@ func CompileMachine(m *ast.MachineDecl, info *sema.ProgramInfo) (*ComponentLTS, 
 	return lts, nil
 }
 
-// CompileWorkflowLTS extracts the synchronization/control LTS projection of a WorkflowDecl.
+// CompileWorkflowLTS is the control of a workflow as the backends run it
+// (ast.Flow), with what a composition sees of it:
+//
+//   - a step does the action of its name when its body has run, wherever it
+//     goes next: to its target, to each branch of the choice after it, or out
+//     of the workflow where the body may return;
+//   - the start does so too when the name it goes to is its own (a `choice
+//     after` it and no node), and moves silently otherwise;
+//   - a choice and a merge move silently, a join does `join_<name>`;
+//   - the branches of a fork do their sync, acquire, release and step
+//     operations in every order.
+//
+// The guard of a choice and the statements of a body are not read: each
+// branch may be taken.
 func CompileWorkflowLTS(wf *ast.WorkflowDecl) *ComponentLTS {
 	lts := &ComponentLTS{
 		Name:       wf.Name,
@@ -252,139 +266,72 @@ func CompileWorkflowLTS(wf *ast.WorkflowDecl) *ComponentLTS {
 		id := len(lts.States)
 		lts.States = append(lts.States, name)
 		stateIDs[name] = id
-		if name == "done" || name == "END" {
-			lts.Terminal[id] = true
-		}
 		return id
 	}
-
-	initID := getState("start")
-	lts.Init = initID
+	lts.Init = getState("start")
 	doneID := getState("done")
 	lts.Terminal[doneID] = true
 
-	nodeMap := map[string]ast.WorkflowNode{}
-	var startNode *ast.StartNode
-	for _, n := range wf.Nodes {
-		switch x := n.(type) {
-		case *ast.StartNode:
-			startNode = x
-		case *ast.StepNode:
-			nodeMap[x.Name] = x
-		case *ast.ChoiceNode:
-			if x.Name != "" {
-				nodeMap[x.Name] = x
-			}
-			if x.After != "" {
-				nodeMap["choice_after_"+x.After] = x
-			}
-		case *ast.ForkNode:
-			nodeMap[x.Name] = x
-		case *ast.JoinNode:
-			nodeMap[x.Name] = x
-		case *ast.MergeNode:
-			nodeMap[x.Name] = x
-		}
+	flow := ast.NewFlow(wf)
+	if flow.Start == nil {
+		return lts
 	}
-
-	addEdge := func(from, to int, act, base, mon string) {
-		if act == "" {
-			act = "tau"
-			base = "tau"
+	var todo []string
+	seen := map[string]bool{}
+	// at is the state of the workflow standing before the node of a name.
+	at := func(name string) int {
+		if flow.Ends(name) {
+			return doneID
 		}
+		if !seen[name] {
+			seen[name] = true
+			todo = append(todo, name)
+		}
+		return getState(name)
+	}
+	addEdge := func(from, to int, act string) {
 		lts.Alphabet[act] = true
-		lts.BaseAlpha[base] = true
+		lts.BaseAlpha[act] = true
 		lts.Edges[from] = append(lts.Edges[from], Edge{
-			Action: act, BaseAction: base, Actor: wf.Name, TargetMon: mon, Target: to, Hidden: act == "tau",
+			Action: act, BaseAction: act, Actor: wf.Name, Target: to, Hidden: act == "tau",
 		})
 	}
-
-	if startNode != nil {
-		addEdge(initID, getState(startNode.Target), "tau", "tau", "")
-	}
-
-	// Build outgoing maps for `after` links
-	afterChoice := map[string]*ast.ChoiceNode{}
-	afterSteps := map[string][]*ast.StepNode{}
-	afterForks := map[string][]*ast.ForkNode{}
-	var joinNodes []*ast.JoinNode
-	for _, n := range wf.Nodes {
-		switch x := n.(type) {
-		case *ast.ChoiceNode:
-			if x.After != "" {
-				afterChoice[x.After] = x
-			}
-		case *ast.StepNode:
-			if x.After != "" {
-				afterSteps[x.After] = append(afterSteps[x.After], x)
-			}
-		case *ast.ForkNode:
-			if x.After != "" {
-				afterForks[x.After] = append(afterForks[x.After], x)
-			}
-		case *ast.JoinNode:
-			joinNodes = append(joinNodes, x)
+	// leave is what a body does at its end: act, to next or to each branch
+	// of the choice after it, and out of the workflow where it may return.
+	leave := func(from int, act string, body []ast.Stmt, next string, choice *ast.ChoiceNode) {
+		if mayEndWorkflow(body) {
+			addEdge(from, doneID, act)
+		}
+		if sema.AlwaysReturns(body) {
+			return
+		}
+		if choice == nil {
+			addEdge(from, at(next), act)
+			return
+		}
+		for _, br := range choice.Branches {
+			addEdge(from, at(br.Target), act)
 		}
 	}
 
-	for _, n := range wf.Nodes {
-		switch x := n.(type) {
-		case *ast.StepNode:
-			sid := getState(x.Name)
-			// Collect any sync/call actions in step body
-			cur := sid
-			syncs := collectStmtSyncs(x.Body)
-			for i, sc := range syncs {
-				next := cur
-				if i < len(syncs)-1 || x.Target != "" || afterChoice[x.Name] != nil || len(afterForks[x.Name]) > 0 {
-					next = getState(fmt.Sprintf("%s__%d", x.Name, i+1))
-				}
-				addEdge(cur, next, sc.full, sc.base, sc.mon)
-				cur = next
+	leave(lts.Init, "tau", flow.Start.Body, flow.Start.Target, nil)
+	for len(todo) > 0 {
+		name := todo[0]
+		todo = todo[1:]
+		from := getState(name)
+		switch {
+		case flow.Step(name) != nil:
+			st := flow.Step(name)
+			next, choice := flow.AfterStep(st)
+			leave(from, st.Name, st.Body, next, choice)
+		case flow.Choice(name) != nil:
+			for _, br := range flow.Choice(name).Branches {
+				addEdge(from, at(br.Target), "tau")
 			}
-			if x.Target != "" {
-				addEdge(cur, getState(x.Target), x.Name, x.Name, "")
-			} else if ch, ok := afterChoice[x.Name]; ok {
-				for _, br := range ch.Branches {
-					addEdge(cur, getState(br.Target), "tau", "tau", "")
-				}
-			} else if fks, ok := afterForks[x.Name]; ok {
-				for _, fk := range fks {
-					addEdge(cur, getState(fk.Name), "tau", "tau", "")
-				}
-			}
-		case *ast.ChoiceNode:
-			if x.Name != "" {
-				cid := getState(x.Name)
-				for _, br := range x.Branches {
-					addEdge(cid, getState(br.Target), "tau", "tau", "")
-				}
-			}
-			if x.After != "" {
-				// If there is no explicit StepNode for x.After (e.g. `start -> check_and_lock:` followed by `choice after check_and_lock:`)
-				if _, isStep := nodeMap[x.After]; !isStep {
-					aid := getState(x.After)
-					for _, br := range x.Branches {
-						addEdge(aid, getState(br.Target), "tau", "tau", "")
-					}
-				}
-			}
-		case *ast.ForkNode:
-			fid := getState(x.Name)
-			if x.After != "" {
-				if _, isStep := nodeMap[x.After]; !isStep {
-					addEdge(getState(x.After), fid, "tau", "tau", "")
-				}
-			}
-			// Find corresponding join node
-			joinTarget := doneID
-			for _, jn := range joinNodes {
-				joinTarget = getState(jn.Name)
-				break
-			}
-			// Build product interleaving of branches' ops from fid to joinTarget!
+		case flow.Fork(name) != nil:
+			fk := flow.Fork(name)
 			var branchOps [][]forkOpItem
-			for _, br := range x.Branches {
+			for _, br := range fk.Branches {
 				var ops []forkOpItem
 				for _, bo := range br.Ops {
 					switch bo.Kind {
@@ -405,26 +352,58 @@ func CompileWorkflowLTS(wf *ast.WorkflowDecl) *ComponentLTS {
 				}
 				branchOps = append(branchOps, ops)
 			}
-			expandForkInterleaving(lts, getState, fid, joinTarget, x.Name, branchOps, wf.Name)
+			expandForkInterleaving(lts, getState, from, at(flow.AfterFork()), fk.Name, branchOps, wf.Name)
+		case flow.Join(name) != nil:
+			jn := flow.Join(name)
+			next, choice := flow.AfterJoin(jn)
+			leave(from, "join_"+jn.Name, nil, next, choice)
+		default:
+			next, choice := flow.AfterMerge(flow.Merge(name))
+			leave(from, "tau", nil, next, choice)
+		}
+	}
+	return lts
+}
 
-		case *ast.JoinNode:
-			jid := getState(x.Name)
-			if x.Target != "" {
-				addEdge(jid, getState(x.Target), "join_"+x.Name, "join_"+x.Name, "")
-			} else if steps, ok := afterSteps[x.Name]; ok {
-				for _, st := range steps {
-					addEdge(jid, getState(st.Name), "join_"+x.Name, "join_"+x.Name, "")
-				}
+// mayEndWorkflow reports whether a body of a workflow holds a way out of it:
+// a return, or a `?`, which returns the Err it finds. One in a lambda leaves
+// the lambda.
+func mayEndWorkflow(body []ast.Stmt) bool {
+	found := false
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		if found {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
 			}
-		case *ast.MergeNode:
-			mid := getState(x.Name)
-			if x.Target != "" {
-				addEdge(mid, getState(x.Target), "tau", "tau", "")
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			switch v.Interface().(type) {
+			case *ast.ReturnStmt, *ast.TryExpr:
+				found = true
+				return
+			case *ast.LambdaExpr:
+				return
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				walk(v.Field(i))
+			}
+		case reflect.Slice:
+			for i := 0; i < v.Len(); i++ {
+				walk(v.Index(i))
 			}
 		}
 	}
-
-	return lts
+	walk(reflect.ValueOf(body))
+	return found
 }
 
 type forkOpItem struct{ full, base, mon string }
@@ -484,7 +463,7 @@ func expandForkInterleaving(
 				if existing, ok := visited[nk]; ok {
 					toID = existing
 				} else {
-					toID = getState(fmt.Sprintf("%s_par_%s", forkName, nk))
+					toID = getState(forkName + ":" + nk)
 					visited[nk] = toID
 					queue = append(queue, nextPC)
 				}
@@ -1024,29 +1003,6 @@ func baseAct(a string) string {
 		return a[idx+1:]
 	}
 	return a
-}
-
-type syncCall struct {
-	full string
-	base string
-	mon  string
-}
-
-func collectStmtSyncs(stmts []ast.Stmt) []syncCall {
-	var out []syncCall
-	for _, s := range stmts {
-		switch x := s.(type) {
-		case *ast.ExprStmt:
-			if ce, ok := x.Expr.(*ast.CallExpr); ok {
-				if fe, ok := ce.Callee.(*ast.FieldExpr); ok {
-					if id, ok := fe.Object.(*ast.Ident); ok {
-						out = append(out, syncCall{full: id.Name + "." + fe.Field, base: fe.Field, mon: id.Name})
-					}
-				}
-			}
-		}
-	}
-	return out
 }
 
 func cloneIntMap(m map[string]int64) map[string]int64 {

@@ -8,64 +8,17 @@ import (
 	"github.com/xiongnemo/anima/internal/sema"
 )
 
-// WorkflowStepCompiled holds compiled bytecode function names for workflow execution.
+// WorkflowCompiled is a workflow as the VM runs it: its flow, and the
+// function compiled of each body, guard and branch statement.
 type WorkflowCompiled struct {
-	Name        string
-	Params      []string
-	Pools       map[string]int64
-	StartTarget string
-	StartFn     string
-	Steps       map[string]WorkflowStepMeta
-	Choices     map[string]WorkflowChoiceMeta
-	Forks       map[string]WorkflowForkMeta
-	Joins       map[string]WorkflowJoinMeta
-	Merges      map[string]WorkflowMergeMeta
-}
-
-type WorkflowStepMeta struct {
-	Name   string
-	After  string
-	Target string
-	FnName string
-}
-
-type WorkflowChoiceBranchMeta struct {
-	GuardFn string
-	IsElse  bool
-	Target  string
-}
-
-type WorkflowChoiceMeta struct {
-	After    string
-	Branches []WorkflowChoiceBranchMeta
-}
-
-type WorkflowBranchOpMeta struct {
-	Kind   int // 0=stmt, 1=sync, 2=acquire, 3=release, 4=stepref
-	Target string
-	FnName string
-}
-
-type WorkflowBranchMeta struct {
-	Name string
-	Ops  []WorkflowBranchOpMeta
-}
-
-type WorkflowForkMeta struct {
-	Name     string
-	After    string
-	Branches []WorkflowBranchMeta
-}
-
-type WorkflowJoinMeta struct {
-	Name   string
-	Target string
-}
-
-type WorkflowMergeMeta struct {
-	Name   string
-	Afters []string
-	Target string
+	Name    string
+	Params  []string
+	Pools   map[string]int64
+	Flow    *ast.Flow
+	StartFn string                       // "" when the start has no body
+	StepFn  map[*ast.StepNode]string     // "" when the step has no body
+	GuardFn map[*ast.ChoiceNode][]string // by branch; "" for an else
+	OpFn    map[*ast.ForkNode][][]string // by branch and operation; "" for one that is no statement
 }
 
 type CompiledProgram struct {
@@ -328,17 +281,17 @@ func (c *compiler) compileWorkflow(wf *ast.WorkflowDecl) error {
 		Name:    wf.Name,
 		Params:  pnames,
 		Pools:   map[string]int64{},
-		Steps:   map[string]WorkflowStepMeta{},
-		Choices: map[string]WorkflowChoiceMeta{},
-		Forks:   map[string]WorkflowForkMeta{},
-		Joins:   map[string]WorkflowJoinMeta{},
-		Merges:  map[string]WorkflowMergeMeta{},
+		Flow:    ast.NewFlow(wf),
+		StepFn:  map[*ast.StepNode]string{},
+		GuardFn: map[*ast.ChoiceNode][]string{},
+		OpFn:    map[*ast.ForkNode][][]string{},
 	}
 	for _, pl := range wf.Pools {
 		wfc.Pools[pl.Name] = pl.Capacity
 	}
 
-	// Collect all workflow-scoped variable names so steps/branches share a workflow frame!
+	// The bodies of a workflow share its variables: each is a function of
+	// all of them, run on the one frame.
 	wfVars := collectWorkflowVars(wf)
 	sharedParams := append([]string{}, pnames...)
 	seenP := map[string]bool{}
@@ -352,71 +305,55 @@ func (c *compiler) compileWorkflow(wf *ast.WorkflowDecl) error {
 		}
 	}
 
-	// Compile workflow-scoped helper that takes & returns updated workflow env map, or runs with workflow env slots!
-	// Even cleaner: each synth func takes a single `env` map? Wait: no! Using `sharedParams` where VM preserves workflow frame locals by name across steps makes `ok = lock_funds(...)` and `r1 = req.get(...)` and `return aggregate_quotes(...)` work with ZERO friction!
-	for _, n := range wf.Nodes {
+	// A function is named by the place of its node in the workflow, so two
+	// nodes never share one.
+	for at, n := range wf.Nodes {
 		switch node := n.(type) {
 		case *ast.StartNode:
-			wfc.StartTarget = node.Target
-			if len(node.Body) > 0 {
-				fn := fmt.Sprintf("__wf_%s_start", wf.Name)
-				if err := c.compileSynthFunc(fn, sharedParams, node.Body, nil, node.Span.Line); err != nil {
-					return err
-				}
-				wfc.StartFn = fn
+			if node != wfc.Flow.Start || len(node.Body) == 0 {
+				continue
 			}
+			fn := fmt.Sprintf("__wf_%s_start", wf.Name)
+			if err := c.compileSynthFunc(fn, sharedParams, node.Body, nil, node.Span.Line); err != nil {
+				return err
+			}
+			wfc.StartFn = fn
 		case *ast.StepNode:
-			fn := ""
-			if len(node.Body) > 0 {
-				fn = fmt.Sprintf("__wf_%s_step_%s", wf.Name, node.Name)
-				if err := c.compileSynthFunc(fn, sharedParams, node.Body, nil, node.Span.Line); err != nil {
+			if len(node.Body) == 0 {
+				continue
+			}
+			fn := fmt.Sprintf("__wf_%s_step_%d_%s", wf.Name, at, node.Name)
+			if err := c.compileSynthFunc(fn, sharedParams, node.Body, nil, node.Span.Line); err != nil {
+				return err
+			}
+			wfc.StepFn[node] = fn
+		case *ast.ChoiceNode:
+			guards := make([]string, len(node.Branches))
+			for i, br := range node.Branches {
+				if br.IsElse || br.Guard == nil {
+					continue
+				}
+				guards[i] = fmt.Sprintf("__wf_%s_choice_%d_%d", wf.Name, at, i)
+				if err := c.compileSynthFunc(guards[i], sharedParams, nil, br.Guard, br.Span.Line); err != nil {
 					return err
 				}
 			}
-			wfc.Steps[node.Name] = WorkflowStepMeta{
-				Name: node.Name, After: node.After, Target: node.Target, FnName: fn,
-			}
-		case *ast.ChoiceNode:
-			cm := WorkflowChoiceMeta{After: node.After}
+			wfc.GuardFn[node] = guards
+		case *ast.ForkNode:
+			ops := make([][]string, len(node.Branches))
 			for i, br := range node.Branches {
-				gfn := ""
-				if !br.IsElse && br.Guard != nil {
-					gfn = fmt.Sprintf("__wf_%s_choice_%s_%d", wf.Name, node.After, i)
-					if err := c.compileSynthFunc(gfn, sharedParams, nil, br.Guard, br.Span.Line); err != nil {
+				ops[i] = make([]string, len(br.Ops))
+				for k, op := range br.Ops {
+					if op.Kind != ast.BranchStmt || op.Stmt == nil {
+						continue
+					}
+					ops[i][k] = fmt.Sprintf("__wf_%s_fork_%d_%d_%d", wf.Name, at, i, k)
+					if err := c.compileSynthFunc(ops[i][k], sharedParams, []ast.Stmt{op.Stmt}, nil, op.Span.Line); err != nil {
 						return err
 					}
 				}
-				cm.Branches = append(cm.Branches, WorkflowChoiceBranchMeta{
-					GuardFn: gfn, IsElse: br.IsElse, Target: br.Target,
-				})
 			}
-			key := node.After
-			if key == "" {
-				key = node.Name
-			}
-			wfc.Choices[key] = cm
-		case *ast.ForkNode:
-			fm := WorkflowForkMeta{Name: node.Name, After: node.After}
-			for _, br := range node.Branches {
-				bm := WorkflowBranchMeta{Name: br.Name}
-				for idx, op := range br.Ops {
-					bop := WorkflowBranchOpMeta{Kind: int(op.Kind), Target: op.Target}
-					if op.Kind == ast.BranchStmt && op.Stmt != nil {
-						fn := fmt.Sprintf("__wf_%s_fk_%s_%s_%d", wf.Name, node.Name, br.Name, idx)
-						if err := c.compileSynthFunc(fn, sharedParams, []ast.Stmt{op.Stmt}, nil, op.Span.Line); err != nil {
-							return err
-						}
-						bop.FnName = fn
-					}
-					bm.Ops = append(bm.Ops, bop)
-				}
-				fm.Branches = append(fm.Branches, bm)
-			}
-			wfc.Forks[node.Name] = fm
-		case *ast.JoinNode:
-			wfc.Joins[node.Name] = WorkflowJoinMeta{Name: node.Name, Target: node.Target}
-		case *ast.MergeNode:
-			wfc.Merges[node.Name] = WorkflowMergeMeta{Name: node.Name, Afters: node.Afters, Target: node.Target}
+			wfc.OpFn[node] = ops
 		}
 	}
 
@@ -777,7 +714,9 @@ func (f *fnCompiler) compileStmt(stmt ast.Stmt) error {
 			}
 			f.emit(EncodeABC(OpRet, 1, 0), s.Span.Line)
 		} else {
-			f.emit(EncodeABC(OpRet, 0, 0), s.Span.Line)
+			// A written return, which ends a workflow where the end of a
+			// step body does not.
+			f.emit(EncodeABC(OpRet, 0, 1), s.Span.Line)
 		}
 
 	case *ast.ExprStmt:

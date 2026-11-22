@@ -1,0 +1,33 @@
+# The paths out of the choice written after a join are followed like any
+# other: the path through b does not assign n.
+def note() -> int:
+    return 1
+
+workflow Find(k: int[0..9]) -> int:
+    verify: sound
+
+    start -> split
+
+    fork split:
+        branch left:
+            call note()
+        branch right:
+            call note()
+
+    join both
+    choice after both:
+        when k > 3 -> a
+        when k <= 3 -> b
+
+    step a -> fin:
+        n = 1
+    step b -> fin:
+        print("b")
+    merge fin after a, b
+    step last after fin -> done:
+        return n
+
+def main() -> int:
+    print(run_workflow Find(0))
+    print(run_workflow Find(9))
+    return 0

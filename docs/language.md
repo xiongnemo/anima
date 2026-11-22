@@ -14,6 +14,7 @@ A name is declared once. Sema, the kernels and the two backends each look a name
 - **Models.** Two machines, two properties, two progress properties, two workflows or two systems of one name are an error. A workflow and a function may share a name (`run_workflow W()` names the workflow).
 - **Within a model.** No two states of a machine, a monitor, a property or a port protocol, no two control variables of a monitor, no two pools of a workflow and no two parts of a system have one name. Of two states of one name the model kept the last, so a second state could allow what the first forbids.
 - **Within a declaration.** No two parameters of a function, a workflow, a lambda or an extern function, no two fields of an entity or of a variant, no two extern functions of a port, no two nodes of a workflow and no two branches of a `fork` have one name. One pattern binds a name once (`C(r, r)` is an error).
+- A node of a workflow is not named `start`, `done`, `END` or `tau`: the first three are where a workflow starts and ends (`-> done`), and `tau` is the action of the model that no other part sees.
 - A local variable may still have the name of a function; it then cannot be called (see [What can be called](#what-can-be-called)).
 
 ## Variables

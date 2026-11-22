@@ -479,19 +479,7 @@ func (t *typestateChecker) walkWorkflow(wf *ast.WorkflowDecl, flow *ast.Flow, cu
 			}
 		}
 		if choice != nil {
-			// The backends try the guards in order and take the first
-			// that holds: a branch has run its own guard and those
-			// before it, not the ones after.
-			for _, br := range choice.Branches {
-				if br.Guard != nil {
-					t.evalExpr(br.Guard, env, false)
-				}
-				path := make(map[string]bool, len(onPath))
-				for k := range onPath {
-					path[k] = true
-				}
-				t.walkWorkflow(wf, flow, br.Target, env.clone(), br.Span, path)
-			}
+			t.walkChoice(wf, flow, choice, env, onPath)
 			return
 		}
 		if fk := flow.Fork(cur); fk != nil {
@@ -500,11 +488,33 @@ func (t *typestateChecker) walkWorkflow(wf *ast.WorkflowDecl, flow *ast.Flow, cu
 			continue
 		}
 		if jn := flow.Join(cur); jn != nil {
-			cur, at = flow.AfterJoin(jn), jn.Span
-			continue
+			cur, choice = flow.AfterJoin(jn)
+			at = jn.Span
+		} else {
+			mn := flow.Merge(cur)
+			cur, choice = flow.AfterMerge(mn)
+			at = mn.Span
 		}
-		mn := flow.Merge(cur)
-		cur, at = flow.AfterMerge(mn), mn.Span
+		if choice != nil {
+			t.walkChoice(wf, flow, choice, env, onPath)
+			return
+		}
+	}
+}
+
+// walkChoice follows each branch of a choice. The backends try the guards in
+// order and take the first that holds: a branch has run its own guard and
+// those before it, not the ones after.
+func (t *typestateChecker) walkChoice(wf *ast.WorkflowDecl, flow *ast.Flow, choice *ast.ChoiceNode, env *tsEnv, onPath map[string]bool) {
+	for _, br := range choice.Branches {
+		if br.Guard != nil {
+			t.evalExpr(br.Guard, env, false)
+		}
+		path := make(map[string]bool, len(onPath))
+		for k := range onPath {
+			path[k] = true
+		}
+		t.walkWorkflow(wf, flow, br.Target, env.clone(), br.Span, path)
 	}
 }
 
