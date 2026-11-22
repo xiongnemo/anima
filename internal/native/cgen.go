@@ -164,8 +164,6 @@ func (g *cgen) generate() error {
 	for _, name := range builtin {
 		g.emitJSONEntity(g.info.Entities[name], "NULL")
 	}
-	// Built-in fallback json decode for raw map
-	g.liftedFns.WriteString("static AnimaVal __json_decode_raw(const char *raw) { bool ok = true; const char *p = raw; AnimaVal v = json_parse_val(&p, &ok); if (!ok) return v_err(\"invalid json\"); return v_ok(v); }\n")
 
 	// 3. Forward declare all user functions and workflows
 	for _, d := range g.info.Program.Decls {
@@ -1628,7 +1626,7 @@ func (g *cgen) emitStdlibCall(modPath, member string, e *ast.CallExpr) string {
 				return fmt.Sprintf("json_decode_as(&__jent_%s, (%s).u.s)", tname, args[0])
 			}
 		}
-		return fmt.Sprintf("__json_decode_raw((%s).u.s)", args[0])
+		return fmt.Sprintf("json_decode_raw((%s).u.s)", args[0])
 	case "std.bytes.from_str":
 		return fmt.Sprintf("bytes_from_str((%s).u.s)", args[0])
 	case "std.bytes.from_hex":

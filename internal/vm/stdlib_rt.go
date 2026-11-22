@@ -763,26 +763,28 @@ func (vm *VM) httpDo(method, url, body string, timeoutMs int, baseClient *http.C
 	return VOk(Value{Kind: ValEntity, Entity: ent})
 }
 
+// jsonDecodeSchema is json.decode. With no type it gives the value of the
+// JSON text, whatever it is. With an entity it gives that entity, checked
+// by jsonAs. The native runtime does the same (json_decode_raw and
+// json_decode_as).
 func (vm *VM) jsonDecodeSchema(typeName, raw string) Value {
-	m, err := decodeJSONToMap(raw)
-	if err != nil {
-		return VErr("invalid JSON: " + err.Error())
-	}
 	if _, ok := vm.prog.Module.EntityIndex[typeName]; !ok {
-		out := map[string]Value{}
-		for k, v := range m {
-			out[k] = goJSONToValue(v)
+		x, msg := parseJSON(raw, true)
+		if msg != "" {
+			return VErr(msg)
 		}
-		return VOk(VMap(out))
+		return VOk(goJSONToValue(x))
 	}
-	// A JSON null unmarshals into a nil map without an error. It is not an
-	// object, so it is no entity, as for the native decoder: read as an
-	// object with no members it would give an entity whose every field is
-	// an Option.
-	if m == nil {
-		return VErr("invalid JSON: json: cannot unmarshal null into Go value of type map[string]interface {}")
+	x, msg := parseJSON(raw, false)
+	if msg != "" {
+		return VErr(msg)
 	}
-	v, msg := vm.jsonAs(&JSONType{Kind: "entity", Entity: typeName}, m, typeName)
+	// Only an object is an entity: a null is not one with every field
+	// absent.
+	if _, ok := x.(map[string]any); !ok {
+		return VErr(fmt.Sprintf("schema error: %s must be object", typeName))
+	}
+	v, msg := vm.jsonAs(&JSONType{Kind: "entity", Entity: typeName}, x, typeName)
 	if msg != "" {
 		return VErr(msg)
 	}
@@ -798,13 +800,11 @@ func (vm *VM) jsonDecodeSchema(typeName, raw string) Value {
 func (vm *VM) jsonAs(t *JSONType, raw any, path string) (Value, string) {
 	switch t.Kind {
 	case "int":
-		num, ok := raw.(float64)
+		// A number with a fraction or an exponent, or outside 64 bits, is
+		// a jsonNotInt: it is no int, however it is written.
+		iv, ok := raw.(int64)
 		if !ok {
 			return Value{}, fmt.Sprintf("schema error: field %s must be integer", path)
-		}
-		iv := int64(num)
-		if float64(iv) != num {
-			return Value{}, fmt.Sprintf("schema error: field %s must be exact integer", path)
 		}
 		if t.HasLo && iv < t.Lo {
 			return Value{}, fmt.Sprintf("schema violation: %s=%d below minimum %d", path, iv, t.Lo)
@@ -905,8 +905,8 @@ func (vm *VM) jsonAs(t *JSONType, raw any, path string) (Value, string) {
 
 func goJSONToValue(x any) Value {
 	switch v := x.(type) {
-	case float64:
-		return VInt(int64(v))
+	case int64:
+		return VInt(v)
 	case bool:
 		return VBool(v)
 	case string:

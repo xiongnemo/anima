@@ -25,7 +25,7 @@ A verified program does the same on both backends. Tests run one source on both 
 - A lambda copies the variables its body names when it is made; one held in a workflow variable or written in a fork branch is called as anywhere else.
 - `run_workflow` runs the workflow it names, and a `merge` node is run by both.
 - A value that holds itself is printed and encoded with an end, the same way: [language.md](language.md#a-value-may-hold-itself).
-- `json.encode` writes the same text, and `json.decode` reads it back: [stdlib.md](stdlib.md#stdjson).
+- `json.encode` writes the same text, and `json.decode` reads a text as the same value or refuses it with the same message: [stdlib.md](stdlib.md#stdjson).
 - The text of a handle is `<handle:N>`, `N` being its kind, and of a lambda `<fn>`.
 
 Known differences, none of which a kernel relies on:
@@ -33,6 +33,7 @@ Known differences, none of which a kernel relies on:
 - The text of some errors: a malformed response header, a failed DNS lookup, and `write_atomic` (the name of its temporary file).
 - Connecting, the TLS handshake and DNS are not under `timeout_ms`.
 - A server that answers and closes before it has read the whole request: the VM gives an `Err` or the answer, depending on timing; the native client gives the answer.
+- A text with a NUL byte in it, as `fs.read_text` gives of a file that holds one, ends at that byte on the native backend, for `json.decode` as for everything else.
 - `+`, `-` and `*` are proved not to overflow, so what each backend would do on overflow is never reached; the two have not been compared there.
 
 ## The studio
