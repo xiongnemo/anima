@@ -21,6 +21,8 @@ const runtimeHeader = `#define _POSIX_C_SOURCE 200809L
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <net/if.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
@@ -128,6 +130,7 @@ struct AnimaHandle {
     bool closed;
     int fd;
     char *path; // of a file, for its error messages
+    char *where; // of a socket, for its error messages: "tcp4 127.0.0.1:80"
     uint8_t *bytes;
     size_t bytes_len;
     // Mutex / Semaphore / Channel / Pool / Future
@@ -864,69 +867,7 @@ static void set_fd_timeout(int fd, int64_t ms) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
-static AnimaVal sock_listen_tcp(const char *host, int64_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return v_err(strerror(errno));
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(fd); return v_err(strerror(errno)); }
-    if (listen(fd, 64) < 0) { close(fd); return v_err(strerror(errno)); }
-    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
-    h->kind = HDL_LISTENER; h->fd = fd;
-    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
-    return v_ok(v);
-}
-
-static AnimaVal sock_connect_tcp(const char *host, int64_t port) {
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    char pstr[32];
-    snprintf(pstr, sizeof(pstr), "%lld", (long long)port);
-    if (getaddrinfo(host, pstr, &hints, &res) != 0 || !res) return v_err("dns/addr resolution failed");
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return v_err(strerror(errno)); }
-    set_fd_timeout(fd, 5000);
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        int e = errno; close(fd); freeaddrinfo(res); return v_err(strerror(e));
-    }
-    freeaddrinfo(res);
-    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
-    h->kind = HDL_STREAM; h->fd = fd;
-    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
-    return v_ok(v);
-}
-
 static void hdl_close(AnimaVal hv);
-
-static AnimaVal hdl_listener_port(AnimaVal hv) {
-    struct sockaddr_in addr = {0};
-    socklen_t alen = sizeof(addr);
-    getsockname(hv.u.hdl->fd, (struct sockaddr *)&addr, &alen);
-    return v_int(ntohs(addr.sin_port));
-}
-
-static AnimaVal hdl_listener_accept(AnimaVal hv, int64_t timeout_ms) {
-    set_fd_timeout(hv.u.hdl->fd, timeout_ms);
-    int cfd = accept(hv.u.hdl->fd, NULL, NULL);
-    if (cfd < 0) return v_err(strerror(errno));
-    set_fd_timeout(cfd, 5000);
-    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
-    h->kind = HDL_STREAM; h->fd = cfd;
-    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
-    return v_ok(v);
-}
-
-static AnimaVal hdl_stream_send(AnimaVal hv, const char *txt) {
-    if (!hv.u.hdl || hv.u.hdl->closed) return v_err("socket closed");
-    ssize_t n = send(hv.u.hdl->fd, txt, strlen(txt), 0);
-    if (n < 0) return v_err(strerror(errno));
-    return v_ok(v_int((int64_t)n));
-}
 
 // A str holds no NUL: it ends at one. The n bytes read from outside the
 // program are Ok(str) when none of them is a NUL and an Err when one is, as
@@ -939,18 +880,6 @@ static AnimaVal text_read(const char *p, size_t n) {
     t[n] = '\0';
     AnimaVal r = v_ok(v_str(t));
     free(t);
-    return r;
-}
-
-static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
-    if (!hv.u.hdl || hv.u.hdl->closed) return v_err("socket closed");
-    if (max_b <= 0) max_b = 4096;
-    char *buf = malloc((size_t)max_b + 1);
-    ssize_t n = recv(hv.u.hdl->fd, buf, (size_t)max_b, 0);
-    if (n < 0) { int e = errno; free(buf); return v_err(strerror(e)); }
-    if (n == 0) { free(buf); return v_err("EOF"); }
-    AnimaVal r = text_read(buf, (size_t)n);
-    free(buf);
     return r;
 }
 
@@ -2027,6 +1956,57 @@ static struct addrinfo *http_lookup(const char *name, int64_t deadline, bool *la
     return res;
 }
 
+// The addresses of a host that is named: its own if it is an address, else
+// what the name is looked up to be, in the order they were found. Only
+// what Go takes for an address is one: 127.1 and 0x7f.0.0.1 are names, and
+// no host has them. None is found for a name no host has, and none when
+// (*late) the time ran out first.
+static size_t host_peers(const char *host, int port, int64_t deadline, HttpPeer **out, bool *late) {
+    int kind = url_addr(host);
+    struct in_addr a4 = {0};
+    struct in6_addr a6;
+    HttpPeer *peers = NULL;
+    size_t npeers = 0;
+    if (kind == 4 && inet_pton(AF_INET, host, &a4) == 1) {
+        peers = calloc(1, sizeof(HttpPeer));
+        http_peer4(&peers[npeers++], a4, port, false);
+    } else if (kind == 6 && inet_pton(AF_INET6, host, &a6) == 1) {
+        peers = calloc(1, sizeof(HttpPeer));
+        http_peer6(&peers[npeers++], &a6, 0, port);
+    } else {
+        struct addrinfo *res = NULL;
+        if (kind == 0 && http_is_name(host) && !http_is_old_addr(host)) res = http_lookup(host, deadline, late);
+        size_t found = 0;
+        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) found++;
+        if (found > 0) peers = calloc(found, sizeof(HttpPeer));
+        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+            if (ai->ai_family == AF_INET) {
+                http_peer4(&peers[npeers++], ((struct sockaddr_in *)ai->ai_addr)->sin_addr, port, false);
+            } else if (ai->ai_family == AF_INET6) {
+                struct sockaddr_in6 *sa = (struct sockaddr_in6 *)ai->ai_addr;
+                http_peer6(&peers[npeers++], &sa->sin6_addr, sa->sin6_scope_id, port);
+            }
+        }
+        if (res) freeaddrinfo(res);
+    }
+    if (npeers == 0) { free(peers); peers = NULL; }
+    *out = peers;
+    return npeers;
+}
+
+// The addresses a host is dialed at. As for Go, :: alone is followed by
+// 0.0.0.0: on a machine where :: can be bound and not connected back to,
+// what listens at every address is still reached.
+static size_t host_dialed(const char *host, int port, int64_t deadline, HttpPeer **out, bool *late) {
+    size_t n = host_peers(host, port, deadline, out, late);
+    if (n != 1 || (*out)[0].family != AF_INET6) return n;
+    if (!IN6_IS_ADDR_UNSPECIFIED(&((struct sockaddr_in6 *)&(*out)[0].sa)->sin6_addr)) return n;
+    struct in_addr any = {0};
+    *out = realloc(*out, 2 * sizeof(HttpPeer));
+    http_peer4(&(*out)[1], any, port, false);
+    return 2;
+}
+
 // Why an address was not connected to, in Go's words. The first of them
 // is the one that is kept.
 static void http_undialed(AnimaBuf *why, const HttpPeer *p, const char *what, int err) {
@@ -2122,6 +2102,302 @@ static int http_dial(const HttpPeer *peers, size_t npeers, int64_t deadline, Ani
     }
     free(r[1].why.p);
     return won;
+}
+
+// ─── std.socket ───
+// A socket fails in Go's words, which are the VM's: what was being done,
+// to which address, and why ("read tcp 127.0.0.1:4->127.0.0.1:5: i/o
+// timeout"). No call waits on the system: a socket never blocks, and what
+// waits for it does so until its time is up and no longer.
+
+// Go's text of the address of a socket.
+static void sock_text(const struct sockaddr_storage *ss, char *out, size_t cap) {
+    if (ss->ss_family == AF_INET) {
+        const struct sockaddr_in *sa = (const struct sockaddr_in *)ss;
+        char ip[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+        snprintf(out, cap, "%s:%d", ip, ntohs(sa->sin_port));
+        return;
+    }
+    const struct sockaddr_in6 *sa = (const struct sockaddr_in6 *)ss;
+    char ip[INET6_ADDRSTRLEN], zone[IF_NAMESIZE + 16] = {0};
+    ip6_text(sa->sin6_addr.s6_addr, ip, sizeof(ip));
+    if (sa->sin6_scope_id != 0) {
+        char name[IF_NAMESIZE];
+        if (if_indextoname(sa->sin6_scope_id, name)) snprintf(zone, sizeof(zone), "%%%s", name);
+        else snprintf(zone, sizeof(zone), "%%%u", (unsigned)sa->sin6_scope_id);
+    }
+    if (strchr(ip, ':') || zone[0]) snprintf(out, cap, "[%s%s]:%d", ip, zone, ntohs(sa->sin6_port));
+    else snprintf(out, cap, "%s:%d", ip, ntohs(sa->sin6_port));
+}
+
+// "op where: call: why", the why being that of the system for err. With no
+// call the why is said alone, and with err 0 it is that the time ran out.
+static AnimaVal sock_err(const char *op, const char *where, const char *call, int err) {
+    AnimaBuf b = {0};
+    buf_put(&b, op);
+    buf_put(&b, " ");
+    buf_put(&b, where);
+    buf_put(&b, ": ");
+    if (err == 0) {
+        buf_put(&b, "i/o timeout");
+    } else {
+        if (call) { buf_put(&b, call); buf_put(&b, ": "); }
+        size_t at = b.len;
+        buf_put(&b, strerror(err));
+        if (b.len > at) b.p[at] = (char)tolower((unsigned char)b.p[at]);
+    }
+    AnimaVal r = v_err(b.p);
+    free(b.p);
+    return r;
+}
+
+// Why a host is none to a socket, or NULL: an empty one, an IPv6 address
+// with a zone, a name outside ASCII. The VM refuses the same.
+static const char *sock_host_refused(const char *host) {
+    if (host[0] == '\0') return "missing host";
+    if (strchr(host, '%')) return "invalid host";
+    for (const char *c = host; *c; c++) if ((unsigned char)*c >= 0x80) return "non-ASCII host name";
+    return NULL;
+}
+
+// "op: address host: why" or, for no host, "op: why".
+static AnimaVal sock_unmet(const char *op, const char *host, const char *why) {
+    AnimaBuf b = {0};
+    buf_put(&b, op);
+    if (host[0] != '\0' || strcmp(why, "missing host") != 0) {
+        buf_put(&b, ": address ");
+        buf_put(&b, host);
+    }
+    buf_put(&b, ": ");
+    buf_put(&b, why);
+    AnimaVal r = v_err(b.p);
+    free(b.p);
+    return r;
+}
+
+static AnimaVal sock_bad_port(const char *op, int64_t port) {
+    char why[96];
+    snprintf(why, sizeof(why), "%s: address %lld: invalid port", op, (long long)port);
+    return v_err(why);
+}
+
+static AnimaVal sock_no_host(const char *op, const char *host) {
+    AnimaBuf b = {0};
+    buf_put(&b, op);
+    buf_put(&b, ": lookup ");
+    buf_put(&b, host);
+    buf_put(&b, ": no such host");
+    AnimaVal r = v_err(b.p);
+    free(b.p);
+    return r;
+}
+
+// host:port as Go joins them: an address with a colon goes in [ ].
+static char *sock_joined(const char *host, int64_t port) {
+    size_t cap = strlen(host) + 32;
+    char *out = malloc(cap);
+    snprintf(out, cap, strchr(host, ':') ? "[%s]:%lld" : "%s:%lld", host, (long long)port);
+    return out;
+}
+
+// Waits until fd can be read (POLLIN) or written (POLLOUT): false when the
+// time ran out first.
+static bool sock_wait(int fd, short what, int64_t deadline) {
+    for (;;) {
+        int64_t left = deadline - mono_ms();
+        if (left <= 0) return false;
+        struct pollfd p = {fd, what, 0};
+        if (poll(&p, 1, left > 60000 ? 60000 : (int)left) > 0) return true;
+    }
+}
+
+static void sock_unblocked(int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, fcntl(fd, F_GETFD, 0) | FD_CLOEXEC);
+}
+
+// The handle of a socket: where says "net local" or "net local->remote".
+static AnimaVal sock_handle(HandleKind kind, int fd, const char *net, bool peer) {
+    struct sockaddr_storage ss = {0};
+    socklen_t len = sizeof(ss);
+    char local[128] = "", remote[128] = "";
+    if (getsockname(fd, (struct sockaddr *)&ss, &len) == 0) sock_text(&ss, local, sizeof(local));
+    memset(&ss, 0, sizeof(ss));
+    len = sizeof(ss);
+    if (peer && getpeername(fd, (struct sockaddr *)&ss, &len) == 0) sock_text(&ss, remote, sizeof(remote));
+    AnimaHandle *h = calloc(1, sizeof(AnimaHandle));
+    h->kind = kind; h->fd = fd;
+    size_t cap = strlen(net) + strlen(local) + strlen(remote) + 8;
+    h->where = malloc(cap);
+    if (peer) snprintf(h->where, cap, "%s %s->%s", net, local, remote);
+    else snprintf(h->where, cap, "%s %s", net, local);
+    AnimaVal v = {0}; v.kind = VAL_HANDLE; v.u.hdl = h;
+    return v;
+}
+
+// How many connections may wait to be accepted: what the system allows, as
+// for Go.
+static int sock_backlog(void) {
+    int n = 0;
+    FILE *f = fopen("/proc/sys/net/core/somaxconn", "r");
+    if (f) {
+        if (fscanf(f, "%d", &n) != 1) n = 0;
+        fclose(f);
+    }
+    return n > 0 ? n : SOMAXCONN;
+}
+
+#define SOCK_DIAL_MS 5000
+#define SOCK_IO_MS 5000
+#define SOCK_MAX_RECV_TEXT (1 << 20)
+
+// The one address a host is bound at: its own, or of those its name is
+// looked up to be the first IPv4 one, or the first if it has none.
+static bool sock_local(const char *op, const char *host, int64_t port, HttpPeer *at, AnimaVal *unmet) {
+    if (port < 0 || port > 65535) { *unmet = sock_bad_port(op, port); return false; }
+    const char *refused = sock_host_refused(host);
+    if (refused) { *unmet = sock_unmet(op, host, refused); return false; }
+    HttpPeer *peers = NULL;
+    bool late = false;
+    // A name that is not found in the time a dial has is one no host has.
+    size_t n = host_peers(host, (int)port, mono_ms() + SOCK_DIAL_MS, &peers, &late);
+    if (n == 0) { *unmet = sock_no_host(op, host); return false; }
+    *at = peers[0];
+    for (size_t i = 0; i < n; i++) if (peers[i].family == AF_INET) { *at = peers[i]; break; }
+    free(peers);
+    return true;
+}
+
+static AnimaVal sock_listen_tcp(const char *host, int64_t port) {
+    HttpPeer at;
+    AnimaVal unmet;
+    if (!sock_local("listen tcp", host, port, &at, &unmet)) return unmet;
+    // An IPv6 address is listened at for IPv6 alone: :: is not 0.0.0.0 too.
+    const char *net = at.family == AF_INET ? "tcp4" : "tcp6";
+    char where[128];
+    snprintf(where, sizeof(where), "%s %s", net, at.text);
+    int fd = socket(at.family, SOCK_STREAM, 0);
+    if (fd < 0) return sock_err("listen", where, "socket", errno);
+    sock_unblocked(fd);
+    int yes = 1;
+    if (at.family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    if (bind(fd, (struct sockaddr *)&at.sa, at.len) < 0) { int e = errno; close(fd); return sock_err("listen", where, "bind", e); }
+    if (listen(fd, sock_backlog()) < 0) { int e = errno; close(fd); return sock_err("listen", where, "listen", e); }
+    return v_ok(sock_handle(HDL_LISTENER, fd, net, false));
+}
+
+// A stream is written to at once, small as what is written may be.
+static void sock_stream_opts(int fd) {
+    int yes = 1;
+    sock_unblocked(fd);
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+}
+
+static AnimaVal sock_connect_tcp(const char *host, int64_t port) {
+    const char *op = "dial tcp";
+    if (port < 0 || port > 65535) return sock_bad_port(op, port);
+    const char *refused = sock_host_refused(host);
+    if (refused) return sock_unmet(op, host, refused);
+    int64_t deadline = mono_ms() + SOCK_DIAL_MS;
+    HttpPeer *peers = NULL;
+    bool late = false;
+    size_t n = host_dialed(host, (int)port, deadline, &peers, &late);
+    AnimaBuf why = {0};
+    int fd = n > 0 ? http_dial(peers, n, deadline, &why) : -1;
+    free(peers);
+    if (fd < 0) {
+        AnimaVal r;
+        if (mono_ms() >= deadline || (n > 0 && !why.p)) {
+            // The time ran out, on whichever address: the host is named
+            // as it was written.
+            char *joined = sock_joined(host, port);
+            AnimaBuf b = {0};
+            buf_put(&b, "dial tcp ");
+            buf_put(&b, joined);
+            buf_put(&b, ": i/o timeout");
+            r = v_err(b.p);
+            free(b.p); free(joined);
+        } else if (n == 0) {
+            r = sock_no_host(op, host);
+        } else {
+            r = v_err(why.p);
+        }
+        free(why.p);
+        return r;
+    }
+    free(why.p);
+    sock_stream_opts(fd);
+    return v_ok(sock_handle(HDL_STREAM, fd, "tcp", true));
+}
+
+static AnimaVal hdl_listener_port(AnimaVal hv) {
+    struct sockaddr_storage ss = {0};
+    socklen_t len = sizeof(ss);
+    getsockname(hv.u.hdl->fd, (struct sockaddr *)&ss, &len);
+    if (ss.ss_family == AF_INET6) return v_int(ntohs(((struct sockaddr_in6 *)&ss)->sin6_port));
+    return v_int(ntohs(((struct sockaddr_in *)&ss)->sin_port));
+}
+
+static AnimaVal hdl_listener_accept(AnimaVal hv, int64_t timeout_ms) {
+    AnimaHandle *l = hv.u.hdl;
+    if (!l || l->closed) return v_err("socket closed");
+    int64_t deadline = mono_ms() + timeout_ms;
+    for (;;) {
+        int cfd = accept(l->fd, NULL, NULL);
+        if (cfd >= 0) {
+            sock_stream_opts(cfd);
+            // The stream is of the listener's network.
+            char net[8] = "tcp";
+            sscanf(l->where, "%7s", net);
+            return v_ok(sock_handle(HDL_STREAM, cfd, net, true));
+        }
+        // A connection that was given up before it was accepted is passed over.
+        if (errno == EINTR || errno == ECONNABORTED) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return sock_err("accept", l->where, "accept4", errno);
+        if (!sock_wait(l->fd, POLLIN, deadline)) return sock_err("accept", l->where, NULL, 0);
+    }
+}
+
+// The whole text is sent, or it is an Err.
+static AnimaVal hdl_stream_send(AnimaVal hv, const char *txt) {
+    AnimaHandle *h = hv.u.hdl;
+    if (!h || h->closed) return v_err("socket closed");
+    size_t len = strlen(txt), sent = 0;
+    int64_t deadline = mono_ms() + SOCK_IO_MS;
+    for (;;) {
+        ssize_t n = send(h->fd, txt + sent, len - sent, MSG_NOSIGNAL);
+        if (n >= 0) {
+            sent += (size_t)n;
+            if (sent >= len) return v_ok(v_int((int64_t)sent));
+            continue;
+        }
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return sock_err("write", h->where, "write", errno);
+        if (!sock_wait(h->fd, POLLOUT, deadline)) return sock_err("write", h->where, NULL, 0);
+    }
+}
+
+static AnimaVal hdl_stream_recv(AnimaVal hv, int64_t max_b) {
+    AnimaHandle *h = hv.u.hdl;
+    if (!h || h->closed) return v_err("socket closed");
+    if (max_b < 1) max_b = 1;
+    if (max_b > SOCK_MAX_RECV_TEXT) max_b = SOCK_MAX_RECV_TEXT;
+    int64_t deadline = mono_ms() + SOCK_IO_MS;
+    char *buf = malloc((size_t)max_b);
+    for (;;) {
+        ssize_t n = recv(h->fd, buf, (size_t)max_b, 0);
+        if (n > 0) {
+            AnimaVal r = text_read(buf, (size_t)n);
+            free(buf);
+            return r;
+        }
+        if (n == 0) { free(buf); return v_err("EOF"); }
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) { int e = errno; free(buf); return sock_err("read", h->where, "read", e); }
+        if (!sock_wait(h->fd, POLLIN, deadline)) { free(buf); return sock_err("read", h->where, NULL, 0); }
+    }
 }
 
 // The TLS handshake, for no longer than the request has: whether it was
@@ -2391,34 +2667,13 @@ static AnimaVal http_ask(const char *method, const Url *u, const char *who, cons
     HttpPeer *peers = NULL;
     size_t npeers = 0;
     if (!unmet.p) {
-        int kind = url_addr(host);
-        struct in_addr a4 = {0};
-        struct in6_addr a6;
         if (host[0] == '\0') {
+            struct in_addr any = {0};
             peers = calloc(1, sizeof(HttpPeer));
-            http_peer4(&peers[npeers++], a4, (int)portno, true);
-        } else if (kind == 4 && inet_pton(AF_INET, host, &a4) == 1) {
-            peers = calloc(1, sizeof(HttpPeer));
-            http_peer4(&peers[npeers++], a4, (int)portno, false);
-        } else if (kind == 6 && inet_pton(AF_INET6, host, &a6) == 1) {
-            peers = calloc(1, sizeof(HttpPeer));
-            http_peer6(&peers[npeers++], &a6, 0, (int)portno);
+            http_peer4(&peers[npeers++], any, (int)portno, true);
         } else {
             bool late = false;
-            struct addrinfo *res = NULL;
-            if (kind == 0 && http_is_name(host) && !http_is_old_addr(host)) res = http_lookup(host, deadline, &late);
-            size_t found = 0;
-            for (struct addrinfo *ai = res; ai; ai = ai->ai_next) found++;
-            if (found > 0) peers = calloc(found, sizeof(HttpPeer));
-            for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-                if (ai->ai_family == AF_INET) {
-                    http_peer4(&peers[npeers++], ((struct sockaddr_in *)ai->ai_addr)->sin_addr, (int)portno, false);
-                } else if (ai->ai_family == AF_INET6) {
-                    struct sockaddr_in6 *sa = (struct sockaddr_in6 *)ai->ai_addr;
-                    http_peer6(&peers[npeers++], &sa->sin6_addr, sa->sin6_scope_id, (int)portno);
-                }
-            }
-            if (res) freeaddrinfo(res);
+            npeers = host_dialed(host, (int)portno, deadline, &peers, &late);
             if (npeers == 0) {
                 buf_put(&unmet, "dial tcp: lookup ");
                 buf_put(&unmet, host);

@@ -1663,6 +1663,10 @@ func (v *verifier) evalSideEffects(expr ast.Expr, env *symEnv, scope string) {
 		if te := v.info.TimeoutArgs[e]; te != nil {
 			v.checkIntRange(v.evalInt(te, env, scope, false), te, env, sema.NewIntRange(1, 300_000, ""), scope+".timeout_bounds", scope, te.GetSpan())
 		}
+		// A port is one, and a count of bytes is one the runtime can hold.
+		for _, r := range v.info.ArgRanges[e] {
+			v.checkIntRange(v.evalInt(r.Expr, env, scope, false), r.Expr, env, r.Range, scope+"."+r.Name+"_bounds", scope, r.Expr.GetSpan())
+		}
 		// A variant is made with its fields in their declared ranges.
 		if v.isVariantConstructor(e) {
 			ty := v.info.LiteralTargets[e]

@@ -48,7 +48,13 @@ A channel, a mutex and a future hold one type: [language.md](language.md#handles
 
 Every socket has one owner that closes it on every path; none is used after it is closed or moved, and a stream is not shared between threads: [ownership.md](ownership.md).
 
-`recv_text` gives text: what was received and holds a NUL byte is an `Err`, and is gone ([a `str` holds no NUL](#a-str-holds-no-nul)).
+- `host` is an IPv4 address (`127.0.0.1`), an IPv6 address written without brackets and without a zone (`::1`), or a name in ASCII. Only what Go's `netip.ParseAddr` takes is an address: `127.1` and `0x7f.0.0.1` are names no host has. Anything else is an `Err` and no socket is made: `listen tcp: missing host` (the empty text), `dial tcp: address ::1%lo: invalid host`, `... non-ASCII host name`, `listen tcp: lookup no.such.host: no such host`.
+- `port` is an `int[0..65535]`; the kernel proves the value in range (`port_bounds`), so a port that is computed needs a type or a check that says so. `listen_tcp` at port `0` listens at a port the system picks, which `listener.port()` gives as an `int[1..65535]`.
+- A listener is at the one address its host is, of the family it is written in: `0.0.0.0` is every IPv4 address of the machine, `::` every IPv6 one and not the IPv4 ones too. A name is listened at its first IPv4 address, or its first address when it has none. A name not found within five seconds is one no host has. No host means "every address".
+- `connect_tcp` tries each address of a name as the HTTP client does, for five seconds in all (`dial tcp 10.255.255.1:80: i/o timeout`); `::` is tried as `::1` and then as `0.0.0.0`.
+- `send_text` sends the whole text or is an `Err`; it and `recv_text` each wait five seconds at most (`read tcp 127.0.0.1:40000->127.0.0.1:8080: i/o timeout`). `accept` waits `timeout_ms`.
+- `recv_text` gives what has arrived, `max_bytes` of it at most: an `int[1..1_048_576]` the kernel proves in range (`max_bytes_bounds`), 4096 when left out. A peer that closed is `Err("EOF")`. What was received and holds a NUL byte is an `Err`, and is gone ([a `str` holds no NUL](#a-str-holds-no-nul)). It is cut by bytes, so a text may end in the middle of a character.
+- An `Err` is in Go's words on both backends: `listen tcp4 127.0.0.1:8080: bind: address already in use`, `accept tcp4 127.0.0.1:8080: i/o timeout`, `dial tcp 127.0.0.1:1: connect: connection refused`, `write tcp 127.0.0.1:40000->127.0.0.1:8080: write: broken pipe`, `read tcp ...: read: connection reset by peer`.
 
 ## `std.requests`
 

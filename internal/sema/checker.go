@@ -31,6 +31,7 @@ func Check(prog *ast.Program) (*ProgramInfo, error) {
 			LiteralTargets: map[ast.Expr]Type{},
 			LetRanges:      map[*ast.LetAssignStmt]*IntType{},
 			TimeoutArgs:    map[*ast.CallExpr]ast.Expr{},
+			ArgRanges:      map[*ast.CallExpr][]ArgRange{},
 			Imports:        map[string]string{},
 			StdHandles:     defaultStdHandles(),
 		},

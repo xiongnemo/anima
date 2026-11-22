@@ -2670,6 +2670,72 @@ def main() -> int:
 	}
 }
 
+// An argument of a standard call that has a range is proved inside it: the
+// port of a socket, and how many bytes recv_text makes room for.
+func TestSPARKStdArgumentRanges(t *testing.T) {
+	sock := func(params, body string) string {
+		return `
+import std.socket as sock
+
+def f(` + params + `) -> int:
+` + body + `
+    return 0
+`
+	}
+	listen := func(params, port string) string {
+		return sock(params, `    match sock.listen_tcp("127.0.0.1", `+port+`):
+        Ok(ln) -> ln.close()
+        Err(e) -> print(e)`)
+	}
+	dial := func(params, port string) string {
+		return sock(params, `    match sock.connect_tcp("127.0.0.1", `+port+`):
+        Ok(c) -> c.close()
+        Err(e) -> print(e)`)
+	}
+	recv := func(params, call string) string {
+		return sock("c: sock.TcpStream, "+params, `    match `+call+`:
+        Ok(t) -> print(t)
+        Err(e) -> print(e)`)
+	}
+	rejected := map[string][2]string{
+		"listen, unbounded":      {listen("p: int", "p"), "port_bounds"},
+		"listen, too high":       {listen("p: int", "65536"), "port_bounds"},
+		"listen, below zero":     {listen("p: int", "0 - 1"), "port_bounds"},
+		"listen, one past":       {listen("p: int[0..65535]", "p + 1"), "port_bounds"},
+		"dial, unbounded":        {dial("p: int", "p"), "port_bounds"},
+		"dial, 16 bits and more": {dial("p: int", "1 << 16"), "port_bounds"},
+		"dial, piped":            {sock("p: int", "    r = \"127.0.0.1\" |> sock.connect_tcp(p)\n    match r:\n        Ok(c) -> c.close()\n        Err(e) -> print(e)"), "port_bounds"},
+		"dial, in a lambda":      {sock("p: int", "    g = (q) => sock.connect_tcp(\"127.0.0.1\", q)\n    match g(p):\n        Ok(c) -> c.close()\n        Err(e) -> print(e)"), "port_bounds"},
+		"recv, unbounded":        {recv("n: int", "c.recv_text(n)"), "max_bytes_bounds"},
+		"recv, none":             {recv("n: int", "c.recv_text(0)"), "max_bytes_bounds"},
+		"recv, one too many":     {recv("n: int", "c.recv_text((1 << 20) + 1)"), "max_bytes_bounds"},
+		"recv, a huge count":     {recv("n: int", "c.recv_text(1 << 46)"), "max_bytes_bounds"},
+		"recv, piped":            {recv("n: int", "n |> c.recv_text()"), "max_bytes_bounds"},
+	}
+	for name, c := range rejected {
+		failed := strings.Join(failedVCs(verifySrc(t, c[0])), "\n")
+		if !strings.Contains(failed, c[1]) {
+			t.Errorf("%s: expected a failed %s, failed VCs:\n%s", name, c[1], failed)
+		}
+	}
+	proved := map[string]string{
+		"listen, any port":   listen("p: int[0..65535]", "p"),
+		"listen, the system": listen("p: int", "0"),
+		"dial, the highest":  dial("p: int", "65535"),
+		"dial, guarded":      sock("p: int", "    if p < 1 or p > 65535:\n        return 0\n    match sock.connect_tcp(\"127.0.0.1\", p):\n        Ok(c) -> c.close()\n        Err(e) -> print(e)"),
+		"dial, a byte pair":  dial("hi: int[0..255], lo: int[0..255]", "hi << 8 | lo"),
+		"recv, the default":  recv("n: int", "c.recv_text()"),
+		"recv, the most":     recv("n: int", "c.recv_text(1 << 20)"),
+		"recv, one":          recv("n: int", "c.recv_text(1)"),
+		"recv, bounded":      recv("n: int[1..4096]", "c.recv_text(n)"),
+	}
+	for name, src := range proved {
+		if failed := failedVCs(verifySrc(t, src)); len(failed) != 0 {
+			t.Errorf("%s: expected every VC proved, failed VCs: %v", name, failed)
+		}
+	}
+}
+
 // A call that blocks on the network is given a timeout in 1..300_000,
 // whatever the type of the expression.
 func TestSPARKTimeoutBounds(t *testing.T) {
